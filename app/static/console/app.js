@@ -1242,6 +1242,28 @@ async function syncLaunchPending() {
 
 async function loadResourceSyncStatus() {
   const data = await safeLoad(`/api/v5/resources/sync-status${companyQuery()}`);
+  const registry = await loadCapabilityRegistry({ silent: true });
+  const registryGovernanceRows = governanceFindingRows(registry?.governance_payload);
+  if (registry?.governance_payload) {
+    const summary = registry.governance_payload.summary || {};
+    logCapabilityRegistryDiff(
+      "governance_payload",
+      {
+        resource_governance_actions: data?.governance_actions?.length || 0,
+      },
+      {
+        findings: summary.finding_count || registryGovernanceRows.length,
+        p0: summary.p0_count || 0,
+        p1: summary.p1_count || 0,
+        p2: summary.p2_count || 0,
+        p3: summary.p3_count || 0,
+      },
+      {
+        governance_payload_coverage: registryCoverage(summary.finding_count || 0, registryGovernanceRows.length),
+      },
+    );
+  }
+  const governanceActions = registry?.governance_payload ? registryGovernanceRows : (data?.governance_actions || []);
   const items = (data?.items || []).map((item) => ({
     ...item,
     latest_run_status: item.latest_run?.status,
@@ -1255,7 +1277,7 @@ async function loadResourceSyncStatus() {
     authorization_required_identifiers: item.authorization?.required_identifiers,
   }));
   renderChips("syncStatusStats", data?.counts || {});
-  renderGovernanceActions(data?.governance_actions || []);
+  renderGovernanceActions(governanceActions);
   renderTable("resourceSyncStatusTable", items, [
     ["resource_name", "资源"],
     ["resource_type", "类型"],
@@ -1280,7 +1302,8 @@ async function loadResourceSyncStatus() {
     ["next_action", "建议"],
   ], { rowAction: selectResource, compactId: true });
   showResult("resourceSyncResult", {
-    governance_actions: data?.governance_actions || [],
+    governance_actions: governanceActions,
+    governance_source: registry?.governance_payload ? "governance_payload" : "resource_sync_status",
     latest_runs: data?.latest_runs || [],
   });
 }
@@ -1372,6 +1395,16 @@ function applyGovernanceActionPreset(action) {
 }
 
 function governanceActionGuide(action) {
+  if (action.registry_source === "governance_payload") {
+    return [
+      `治理项：${action.title || "-"}`,
+      `来源：${action.finding_id || "governance_payload"}`,
+      `范围：${action.business_domain || "-"}`,
+      `级别：${action.access_recommendation_summary || "-"}`,
+      `影响：${action.business_impact || "-"}`,
+      `下一步：${action.owner_next_step_detail || "-"}`,
+    ].join("\n");
+  }
   const code = action.action_code || "";
   const resources = (action.resources || [])
     .map((resource) => resource.resource_name || resource.resource_id)
@@ -3597,6 +3630,26 @@ function skillRegistryRows(skillRegistryPayload) {
     }
   }
   return rows;
+}
+
+function governanceFindingRows(governancePayload) {
+  return (governancePayload?.findings || []).map((finding) => ({
+    action_code: `registry_${finding.scope || "finding"}`,
+    title: finding.title || "Registry 治理项",
+    count: 1,
+    access_recommendation_summary: finding.severity || "P2",
+    recommended_notify_targets: [finding.scope, finding.provider_id].filter(Boolean),
+    business_domain: [finding.domain_id, finding.capability_id].filter(Boolean).join(" / ") || finding.scope || "registry",
+    responsible_role: finding.scope === "provider" ? "Provider Owner" : "Capability Owner",
+    business_impact: finding.message || finding.finding_id,
+    owner_next_step_detail: finding.recommendation || "请检查 Capability / Skill / Provider 绑定。",
+    owner_next_step: finding.recommendation || "",
+    system_behavior: `Registry finding · ${finding.status || "open"}`,
+    affected_resources: [finding.skill_id, finding.provider_id].filter(Boolean).join("、"),
+    resources: [],
+    registry_source: "governance_payload",
+    finding_id: finding.finding_id,
+  }));
 }
 
 function registryCoverage(total, covered) {

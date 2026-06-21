@@ -714,6 +714,11 @@ def test_console_settings_exposes_governance_action_table() -> None:
     assert "access-decision" in console_app
     assert "只有“建议接入”的业务群才通知负责人" in console_app
     assert "执行自动发现，系统会登记可同步资源" in console_app
+    assert "function governanceFindingRows" in console_app
+    assert "governance_payload" in console_app
+    assert 'governance_source: registry?.governance_payload ? "governance_payload" : "resource_sync_status"' in console_app
+    assert '"governance_payload"' in console_app
+    assert "Registry finding" in console_app
 
 
 def test_console_overview_surfaces_only_high_value_group_access_actions() -> None:
