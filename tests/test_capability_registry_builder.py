@@ -8,12 +8,24 @@ def test_capability_registry_builder_outputs_page_payloads() -> None:
     payload = CapabilityRegistryBuilder(company_id="company-1", generated_at="2026-06-21T00:00:00+00:00").build()
 
     assert payload["version"] == "capability_registry_payload_v1"
+    assert payload["registry_version"] == "capability_registry_v1"
     assert payload["company_id"] == "company-1"
     assert set(payload) >= {
+        "registry_health",
         "catalog_payload",
         "skill_registry_payload",
         "governance_payload",
         "diagnostics_payload",
+    }
+    assert set(payload["registry_health"]) == {
+        "status",
+        "domains",
+        "capabilities",
+        "skills",
+        "providers",
+        "findings",
+        "orphan_skills",
+        "missing_provider",
     }
 
     catalog = payload["catalog_payload"]

@@ -95,6 +95,7 @@ def test_v5_router_exposes_foundation_endpoints() -> None:
     assert "/api/v5/agent/reply-modes" in paths
     assert "/api/v5/agent/traces" in paths
     assert "/api/v5/agent/settings" in paths
+    assert "/api/v5/capability-registry" in paths
     assert "/api/v5/tools/{tool_name}" in paths
     assert "/api/v5/resources/sync-status" in paths
     assert "/api/v5/resources/sync-runs" in paths

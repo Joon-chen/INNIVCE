@@ -14,7 +14,7 @@ Capability Registry Read API 评审见 `docs/CAPABILITY_REGISTRY_READ_API_REVIEW
 当前进入：
 
 ```text
-Capability Registry Read API Review Phase
+Capability Registry Read API Implementation Phase
 ```
 
 背景：
@@ -31,27 +31,26 @@ Business
 Intelligence
 ```
 
-Capability Registry Builder 已通过。
+Capability Registry Read API Review 已通过。
 
-当前评估 Registry Builder 是否可以成为四个页面唯一数据源，并冻结 Read API 方案。
+当前实现内部只读 Registry API，验证它是否可以成为四个页面唯一事实来源。
 
 ## 当前目标
 
-评估两种 Read API：
+实现只读 API：
 
 ```text
-方案A: GET /api/v5/capability-registry
-方案B: GET /catalog + /skills + /governance + /diagnostics
+GET /api/v5/capability-registry
 ```
 
 关键决策：
 
-- 先冻结 Read API，不实现 UI。
-- 证明四个页面可以完全由 Registry API 驱动。
-- Builder 继续只做聚合。
+- 仅供内部验证使用。
+- 暂不切换页面。
+- 暂不开放普通用户访问。
 - API 只负责 transport。
 
-本阶段只做 API Review，不实现路由。
+本阶段只做只读 API 和合同测试。
 
 ## 当前禁止范围
 
@@ -63,26 +62,24 @@ Capability Registry Builder 已通过。
 - Task 业务代码 / Tool / Runtime Action / UI。
 - 页面迁移实现。
 - 数据库迁移。
-- API 实现。
+- 拆分 catalog / skills / governance / diagnostics endpoint。
 - Domain 调整。
 - UI 重构。
 - 业务逻辑改造。
 
 ## 当前验收标准
 
-- 输出推荐方案。
-- 输出 Payload 大小评估。
-- 输出缓存策略。
-- 输出前端消费复杂度。
-- 输出 Builder 与 API 边界。
-- 输出页面迁移路径。
-- 证明能力目录 / 能力清册 / 治理中心 / 系统诊断可由 Registry API 驱动。
+- 实现 `GET /api/v5/capability-registry`。
+- Root Payload 包含 `registry_version`。
+- Root Payload 包含 `generated_at`。
+- Root Payload 包含 `registry_health`。
+- API Contract Test 覆盖四个子 Payload。
 - 不修改页面代码。
-- 不修改 API 路由。
+- 不修改数据库。
 - 不修改业务逻辑。
 
 ## 下一步计划
 
-1. 冻结 `docs/CAPABILITY_REGISTRY_READ_API_REVIEW.md`。
-2. 进入 Capability Registry Read API Implementation。
-3. 只做只读 API 和合同测试，暂不做 UI 迁移。
+1. 完成 Read API 和合同测试。
+2. 输出 Registry API 示例响应、Registry Health 示例、四页面覆盖率。
+3. 再进入 Registry API Shadow Verification，暂不做 UI 迁移。

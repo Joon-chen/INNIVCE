@@ -272,10 +272,18 @@ class CapabilityRegistryBuilder:
         skill_registry_payload = self.skill_registry_payload()
         governance_payload = self.governance_payload()
         diagnostics_payload = self.diagnostics_payload()
+        registry_health = self.registry_health(
+            catalog_payload=catalog_payload,
+            skill_registry_payload=skill_registry_payload,
+            governance_payload=governance_payload,
+            diagnostics_payload=diagnostics_payload,
+        )
         return {
             "version": "capability_registry_payload_v1",
+            "registry_version": "capability_registry_v1",
             "generated_at": generated_at,
             "company_id": self.company_id,
+            "registry_health": registry_health,
             "catalog_payload": catalog_payload,
             "skill_registry_payload": skill_registry_payload,
             "governance_payload": governance_payload,
@@ -475,6 +483,36 @@ class CapabilityRegistryBuilder:
             "MissingProvider": missing_providers,
             "OrphanSkill": orphan_skills,
             "OrphanProvider": orphan_providers,
+        }
+
+    def registry_health(
+        self,
+        *,
+        catalog_payload: dict[str, Any] | None = None,
+        skill_registry_payload: dict[str, Any] | None = None,
+        governance_payload: dict[str, Any] | None = None,
+        diagnostics_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        catalog_payload = catalog_payload or self.catalog_payload()
+        skill_registry_payload = skill_registry_payload or self.skill_registry_payload()
+        governance_payload = governance_payload or self.governance_payload()
+        diagnostics_payload = diagnostics_payload or self.diagnostics_payload()
+        report = self.consistency_report()
+        provider_ids = {
+            binding["provider_id"]
+            for capability in skill_registry_payload["capabilities"]
+            for skill in capability["skills"]
+            for binding in skill.get("provider_bindings", [])
+        }
+        return {
+            "status": report["status"] if diagnostics_payload["summary"]["status"] == "healthy" else "degraded",
+            "domains": catalog_payload["summary"]["domain_count"],
+            "capabilities": catalog_payload["summary"]["capability_count"],
+            "skills": skill_registry_payload["summary"]["skill_count"],
+            "providers": len(provider_ids),
+            "findings": governance_payload["summary"]["finding_count"],
+            "orphan_skills": report["OrphanSkill"],
+            "missing_provider": report["MissingProvider"],
         }
 
     def migration_assessment(self) -> dict[str, Any]:
