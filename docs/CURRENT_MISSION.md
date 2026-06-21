@@ -2,77 +2,77 @@
 
 本文档只回答：现在在做什么。
 
-历史阶段归档见 `docs/history/`。
 系统最高级规则见 `docs/V5_RUNTIME_CONSTITUTION.md`。
-审批样板冻结版见 `docs/APPROVAL_RUNTIME_SAMPLE.md`。
-Runtime V1 冻结复盘见 `docs/RUNTIME_V1_FREEZE_REVIEW.md`。
-第二业务样板选择见 `docs/SECOND_BUSINESS_SAMPLE_SELECTION.md`。
-审批验收复盘见 `docs/APPROVAL_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md`。
+企业 AI OS 顶层定义见 `docs/ENTERPRISE_AI_OS_V1.md`。
 企业认知底座 V1 见 `docs/ENTERPRISE_COGNITIVE_FOUNDATION_V1.md`。
 Snapshot 生成节奏见 `docs/SNAPSHOT_TRIGGER_MATRIX.md`。
+历史阶段归档见 `docs/history/`。
 
 ## 当前阶段
 
-当前阶段进入：
+当前进入：
 
 ```text
-Approval Snapshot Builder Alignment Phase
+Enterprise Evidence Layer V1
 ```
 
-Snapshot Trigger Matrix 已建立。本阶段按矩阵修正 Approval Snapshot Builder：
+背景：
 
-```text
-WorkEvent -> Snapshot Builder -> Snapshot
-```
+Approval Runtime Sample 和 Cognitive Foundation V1 已建立，但系统仍缺少通用 Evidence Layer。
+
+没有 Evidence Layer，AI 会直接面对原始业务系统数据，例如飞书表单 widget、OCR 片段、附件残缺文本；管理者也会看到技术噪音。这会让 AI OS 退化成“把复杂性转交给人”。
 
 ## 当前目标
 
-定义 Snapshot 触发规则：
+建立 AI OS 的通用证据层：
 
-- Snapshot 不由 Query 触发。
-- Snapshot 不由用户打开页面触发。
-- Snapshot 由 WorkEvent 驱动。
-- Bot / Card / Portal / SidePanel 只读取 Snapshot。
-- Snapshot Builder 根据 WorkEvent 判断是否需要重建 Snapshot。
-- Approval 是第一条按 Trigger Matrix 对齐的样板。
+```text
+Raw System Data
+-> Evidence
+-> Snapshot
+-> Interaction
+-> Runtime Action
+```
+
+先以 Approval 作为第一条样板验证：
+
+- Evidence Contract。
+- Approval Form Evidence。
+- Approval Attachment Evidence。
+- Approval Expense Evidence。
+- Snapshot Builder 消费 Evidence，而不是 raw widget form。
+- Portal / Card 展示 Evidence Summary，不展示技术解析噪音。
 
 ## 当前禁止范围
 
 本阶段不要做：
 
-- WorkEvent Engine / Event Bus / Replay / Subscription。
+- 新数据库表。
+- Event Bus / Replay / Subscription。
 - Workflow Engine。
 - Memory Engine。
 - Insight Engine。
-- 跨公司聚合。
-- Mail / Meeting / Customer / Task Snapshot。
-- Approval 专属 Snapshot 表。
-- 使用 Snapshot 替代实时审批状态。
-- 将审批状态、审批列表、申请人、金额等业务事实缓存到 Snapshot。
-- Bot / Card / Portal 直接实时生成 AI 建议。
-- 在 Bot Query 链路中执行附件读取或 AI 分析。
-- 由 Query / Portal / SidePanel 触发 Snapshot Builder。
-- Batch Migration、transfer/add_sign execution、USER Resolver。
+- 跨业务全量实现。
+- Task / Mail / Meeting / Customer 业务开发。
+- Batch Approval。
+- Transfer / AddSign。
 - Diagnostics / Observability 重构。
+- 把 Snapshot 当业务缓存。
+- 把审批专属逻辑硬编码成系统边界。
 
 ## 当前验收标准
 
-- WorkEvent 标准模型已冻结。
-- Snapshot 标准模型已冻结。
-- MemoryCandidate 标准模型已冻结。
-- Approval Cognitive Lifecycle 已冻结。
-- WorkEvent 写入语义必须是 append-only。
-- Approval Snapshot 是 Bot 展示 AI 判断的唯一来源，不是审批状态来源。
-- Approval 状态、审批列表和审批详情仍来自 Feishu live data。
-- 附件未完成或 AI 分析未完成时，Bot 显示“分析中”。
-- `attachment_processed` 是 Approval AI 分析的主要触发事件。
-- `approval_analysis_completed` 负责写入 completed Snapshot。
-- 所有三层数据必须携带 `company_id`。
-- 不建立审批专属快照表。
-- 同一批 live data 和同一批 completed Snapshot 下，多次查询结果必须一致。
+- AI OS 层面能区分 Raw Data、Evidence、Snapshot。
+- 管理者不再看到 `widget...`、JSON 结构异常、OCR 原始噪音。
+- 技术解析失败被表达为 Evidence quality，不直接等同业务高风险。
+- Snapshot 原因来自 Evidence Summary。
+- Interaction 展示 Live Data + Evidence Summary + Snapshot Judgment。
+- 管理者能直接知道：能不能处理、缺什么、下一步怎么做。
 
 ## 下一步计划
 
-- 部署 WorkEvent 驱动的 Approval Snapshot Builder。
-- 验证 Bot Query 不写 WorkEvent、不写 Snapshot、不触发 Builder。
-- 验证重复查询在同一批 Snapshot 下结果稳定。
+1. 冻结 Evidence Contract V1。
+2. 实现 Approval Form Normalizer V0。
+3. 实现 Approval Expense Evidence Builder V0。
+4. 让 Approval Snapshot Builder 消费 Evidence。
+5. 让 Portal Detail 展示 Evidence Summary。

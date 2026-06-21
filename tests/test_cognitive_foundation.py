@@ -234,6 +234,22 @@ def test_approval_item_preserves_portal_detail_identity_fields() -> None:
     assert item["raw"]["instance_detail"]["serial_number"] == "202606150009"
 
 
+def test_approval_item_does_not_use_open_id_as_applicant_display_name() -> None:
+    item = _approval_item(
+        {
+            "instance_code": "instance-1",
+            "approval_name": "费用报销",
+            "instance_detail": {
+                "applicant": {"open_id": "ou_6d06c92f4dab6f8626735b94f2d55bd2"},
+                "form": '[{"name":"费用汇总","value":8902.33}]',
+            },
+        }
+    )
+
+    assert item["applicant_name"] == ""
+    assert item["applicant"] == ""
+
+
 def test_approval_completed_snapshot_displays_recommendation_and_reasons() -> None:
     assessment = _approval_assessment(
         {

@@ -280,9 +280,12 @@ async function ensureSelectedDetailLoaded(item, index) {
 function mergeApprovalDetailItem(current, detail) {
   const currentRaw = rawOf(current);
   const detailRaw = detail.raw && typeof detail.raw === "object" ? detail.raw : {};
+  const applicant = displayNameOrEmpty(detail.applicant_name || detail.applicant) || displayNameOrEmpty(current.applicant_name || current.applicant);
   return {
     ...current,
     ...detail,
+    applicant,
+    applicant_name: applicant,
     assessment: current.assessment || detail.assessment,
     raw: {
       ...currentRaw,
@@ -387,9 +390,9 @@ function applicantOf(item) {
   const raw = rawOf(item);
   const detail = detailOf(item);
   const applicant = detail.applicant && typeof detail.applicant === "object" ? detail.applicant : {};
-  return item.applicant_name || item.user_name || item.applicant || item.user_id
-    || raw.applicant_name || raw.user_name || raw.applicant || raw.user_id
-    || detail.applicant_name || detail.user_name || applicant.name || applicant.open_id || "";
+  return displayNameOrEmpty(item.applicant_name) || displayNameOrEmpty(item.user_name) || displayNameOrEmpty(item.applicant)
+    || displayNameOrEmpty(raw.applicant_name) || displayNameOrEmpty(raw.user_name) || displayNameOrEmpty(raw.applicant)
+    || displayNameOrEmpty(detail.applicant_name) || displayNameOrEmpty(detail.user_name) || displayNameOrEmpty(applicant.name) || "";
 }
 
 function amountOf(item) {
@@ -415,6 +418,18 @@ function instanceCodeOf(item) {
   const instance = raw.instance && typeof raw.instance === "object" ? raw.instance : {};
   return item.instance_code || item.process_code || raw.instance_code || raw.process_code
     || detail.instance_code || detail.process_code || instance.code || instance.instance_code || "";
+}
+
+function displayNameOrEmpty(value) {
+  const text = String(value || "").trim();
+  if (!text || looksLikeIdentifier(text)) return "";
+  return text;
+}
+
+function looksLikeIdentifier(value) {
+  const text = String(value || "").trim();
+  const compact = text.replace(/[-_]/g, "");
+  return /^(ou_|oc_|od-|cli_|approval_)/.test(text) || (compact.length >= 8 && /^[a-zA-Z0-9]+$/.test(compact) && /\d/.test(compact));
 }
 
 function suggestionOf(item) {
