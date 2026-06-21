@@ -318,6 +318,17 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
             canonical_question=question,
         )
 
+    if _is_task_create(text):
+        return IntentResult(
+            question_type="action",
+            intent="task_create",
+            data_scope="self",
+            entities={"summary": _task_summary(question)},
+            missing_params=(),
+            confidence=0.86,
+            canonical_question=question,
+        )
+
     if _is_calendar_create(text):
         time_params = _calendar_time_params(question)
         return IntentResult(
@@ -327,17 +338,6 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
             entities={"summary": _calendar_summary(question), **time_params},
             missing_params=tuple(key for key in ("start", "end") if not time_params.get(key)),
             confidence=0.84,
-            canonical_question=question,
-        )
-
-    if _is_task_create(text):
-        return IntentResult(
-            question_type="action",
-            intent="task_create",
-            data_scope="self",
-            entities={"summary": _task_summary(question)},
-            missing_params=(),
-            confidence=0.86,
             canonical_question=question,
         )
 
@@ -1037,8 +1037,28 @@ def _calendar_summary(question: str) -> str:
     if title:
         return title
     summary = question.strip()
-    for token in ("帮我", "请", "创建日程", "新建日程", "安排会议", "约个会", "建个会议", "创建会议", "安排一个会议", "安排个会议"):
+    calendar_create_tokens = (
+        "帮我",
+        "请",
+        "创建日程",
+        "新建日程",
+        "创建一个日程",
+        "新建一个日程",
+        "安排会议",
+        "约个会",
+        "约一个会",
+        "建个会议",
+        "建一个会议",
+        "创建会议",
+        "创建一个会议",
+        "新建会议",
+        "新建一个会议",
+        "安排一个会议",
+        "安排个会议",
+    )
+    for token in sorted(calendar_create_tokens, key=len, reverse=True):
         summary = summary.replace(token, "")
+    summary = summary.lstrip("：: ")
     summary = re.sub(r"(今天|明天|后天|本周|这周)?\s*(上午|中午|下午|晚上|今晚)?\s*(?:\d{1,2}|[零一二两三四五六七八九十]{1,3})(?:点|:|：)(?:半|[0-5]?\d分?)?", "", summary)
     summary = summary.replace("开会", "会议").replace("的会议", "会议").replace("一个会议", "会议")
     return summary.strip() or question.strip()

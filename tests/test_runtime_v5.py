@@ -19,6 +19,7 @@ from app.services.runtime_v5.models import (
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
+from app.services.runtime_v5.intent import recognize_intent
 from app.services.runtime_v5.permission import check_runtime_permission
 from app.services.runtime_v5.runtime import run_runtime_v5
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload, runtime_action_input_from_payload
@@ -136,6 +137,24 @@ def test_runtime_v5_approval_query_runs_strategy_sources() -> None:
     assert runtime_state["status"] == "done"
     assert runtime_state["intent"] == "approval_query"
     assert runtime_state["actions"] == ()
+
+
+def test_runtime_v5_explicit_task_create_wins_over_meeting_words() -> None:
+    intent = recognize_intent("创建一个任务：明天4点开会", _context("创建一个任务：明天4点开会"))
+
+    assert intent.intent == "task_create"
+    assert intent.question_type == "action"
+    assert intent.entities["summary"] == "明天4点开会"
+
+
+def test_runtime_v5_calendar_create_still_handles_explicit_meeting() -> None:
+    intent = recognize_intent("创建一个会议：明天4点开会", _context("创建一个会议：明天4点开会"))
+
+    assert intent.intent == "calendar_create"
+    assert intent.question_type == "action"
+    assert intent.entities["summary"] == "会议"
+    assert intent.entities["start"]
+    assert intent.entities["end"]
 
 
 def test_runtime_v5_provider_request_carries_execution_identity_contract() -> None:
