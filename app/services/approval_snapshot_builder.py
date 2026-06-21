@@ -10,7 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import FeishuAppConfig, WorkEvent
+from app.services.approval_evidence import build_approval_expense_evidence
 from app.services.cognitive_foundation import append_cognitive_work_event, get_completed_snapshot, upsert_snapshot
+from app.services.evidence import evidence_payload
 from app.services.feishu import approval_formatters
 from app.services.feishu.approval import FeishuApprovalService, approval_attachment_refs
 from app.services.feishu.approval_attachments import FeishuApprovalAttachmentService
@@ -121,10 +123,26 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
         if detail:
             raw_item["instance_detail"] = detail
     attachment_results = _attachment_results_from_payload(payload)
+    evidence = build_approval_expense_evidence(
+        raw_item,
+        attachment_results=attachment_results,
+        source_event_ids=[str(event.id)],
+    )
+    evidence_event = append_cognitive_work_event(
+        db,
+        company_id=event.company_id,
+        event_type="approval_expense_evidence_completed",
+        object_type="approval",
+        object_id=event.object_id,
+        source="approval_evidence_builder",
+        actor=actor or "system",
+        payload={"evidence": evidence_payload(evidence)},
+    )
     llm_decision = _approval_llm_decision(raw_item, attachment_results=attachment_results)
     if llm_decision:
         raw_item["_approval_llm_decision"] = llm_decision
     assessment = _approval_assessment(raw_item, attachment_results=attachment_results)
+    assessment = _assessment_from_evidence(assessment, evidence=evidence)
     analysis_event = append_cognitive_work_event(
         db,
         company_id=event.company_id,
@@ -133,9 +151,9 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
         object_id=event.object_id,
         source="approval_snapshot_builder",
         actor=actor or "system",
-        payload={"assessment": assessment},
+        payload={"assessment": assessment, "evidence": evidence_payload(evidence)},
     )
-    source_event_ids = [str(event.id), str(analysis_event.id)]
+    source_event_ids = [str(event.id), str(evidence_event.id), str(analysis_event.id)]
     upsert_snapshot(
         db,
         company_id=event.company_id,
@@ -148,7 +166,7 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
         risk_level=_approval_snapshot_risk_level(assessment),
         reasons=_approval_snapshot_reasons(assessment),
         source_event_ids=source_event_ids,
-        payload={"assessment": assessment},
+        payload={"assessment": assessment, "evidence": evidence_payload(evidence)},
     )
     return {"ok": True, "status": "completed", "object_id": event.object_id, "event_id": str(event.id)}
 
@@ -228,6 +246,31 @@ def _attachment_results_from_payload(payload: dict[str, Any]) -> list[Any]:
             )
         )
     return results
+
+
+def _assessment_from_evidence(assessment: dict[str, Any], *, evidence) -> dict[str, Any]:
+    if not evidence.manager_summary:
+        return assessment
+    recommendation = str(assessment.get("suggestion") or "").strip()
+    if evidence.quality in {"partial", "failed"}:
+        recommendation = "补充后再审"
+    elif evidence.quality == "complete" and recommendation in {"", "建议先核对", "需补充核对", "补充后再审"}:
+        recommendation = "可通过"
+    detailed_reason = evidence.manager_summary
+    if evidence.missing:
+        detailed_reason = f"{detailed_reason}缺失证据：{'、'.join(evidence.missing)}。"
+    if evidence.conflicts:
+        detailed_reason = f"{detailed_reason}证据冲突：{'、'.join(evidence.conflicts)}。"
+    return {
+        **assessment,
+        "suggestion": recommendation or "需关注",
+        "reason": evidence.manager_summary,
+        "detailed_reason": detailed_reason,
+        "missing_evidence": list(evidence.missing),
+        "evidence_quality": evidence.quality,
+        "suggested_manager_action": evidence.suggested_next_step,
+        "source": "evidence",
+    }
 
 
 def _run_async(coro):
