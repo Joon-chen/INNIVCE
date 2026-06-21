@@ -1187,7 +1187,7 @@ class FeishuTaskProvider(FeishuResourceProvider):
         return ProviderResult(
             source="task",
             status=status,
-            result_type=operation,
+            result_type=_task_result_type(operation),
             count=len(items),
             items=tuple(items),
             metadata={
@@ -1200,6 +1200,12 @@ class FeishuTaskProvider(FeishuResourceProvider):
             answer=result.answer if status == "success" else _tool_failure_answer("任务操作", result),
             error=result.error or "",
         )
+
+
+def _task_result_type(operation: str) -> str:
+    if operation == "complete_task":
+        return "task_complete"
+    return operation
 
 
 class FeishuCalendarProvider(FeishuResourceProvider):

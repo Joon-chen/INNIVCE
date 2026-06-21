@@ -15,7 +15,7 @@ Task Runtime 样板合同评审见 `docs/TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`
 当前进入：
 
 ```text
-Task Runtime Sample Contract Test Phase
+Task Runtime Sample Contract Test Completed
 ```
 
 背景：
@@ -38,7 +38,15 @@ Digital Advisor 是企业数字参谋，不是个人助手。
 SELF / USER / TEAM / DEPARTMENT / COMPANY
 ```
 
-当前目标回到 Task Runtime Sample，先补合同测试，不做完整业务迁移。
+Task Runtime Sample 合同测试已完成。
+
+当前已验证：
+
+```text
+task_query
+task_complete
+WAITING_CONFIRMATION -> CONFIRMED -> EXECUTING -> DONE / FAILED
+```
 
 ## 当前禁止范围
 
@@ -66,13 +74,14 @@ SELF / USER / TEAM / DEPARTMENT / COMPANY
 - `RuntimeResult.metadata.scope_context` 已存在。
 - `RuntimeActionInput.metadata.scope_context` 可透传。
 - 普通员工 COMPANY scoped query 被 Policy 拒绝。
-- 输出 `task_query` / `task_complete` Contract Test。
-- 收敛 `complete_task` vs `task_complete` 命名。
+- `task_query` Contract Test 已通过。
+- `task_complete` Contract Test 已通过。
+- `complete_task` 已收敛为 Runtime result_type `task_complete`。
 - 不修改数据库。
 - 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 补 `task_query` Contract Test。
-2. 补 `task_complete` Contract Test。
-3. 只做最小命名收敛，不做 UI / Snapshot / Insight。
+1. 进入 Task Runtime Sample Minimal Implementation Review。
+2. 确认是否把 Task 完成动作接到真实入口。
+3. 继续禁止 UI / Snapshot / Insight 扩展。

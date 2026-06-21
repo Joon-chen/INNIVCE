@@ -906,6 +906,9 @@ def _task_search_keyword(question: str) -> str:
 
 
 def _task_ref(question: str, context: RuntimeContext) -> dict[str, str]:
+    action_entities = _runtime_action_task_entities(context)
+    if action_entities:
+        return action_entities
     guid = _extract_task_guid(question)
     if guid:
         return {"task_guid": guid}
@@ -921,6 +924,18 @@ def _task_ref(question: str, context: RuntimeContext) -> dict[str, str]:
     task_guid = str(item.get("guid") or item.get("task_guid") or item.get("id") or "").strip()
     title = str(item.get("title") or "").strip()
     return {"task_guid": task_guid, "title": title} if task_guid else {}
+
+
+def _runtime_action_task_entities(context: RuntimeContext) -> dict[str, str]:
+    for key in ("runtime_v5_confirmed_action_entities", "runtime_v5_pending_action"):
+        payload = context.session_context.get(key)
+        entities = payload.get("entities") if isinstance(payload, dict) and key == "runtime_v5_pending_action" else payload
+        if not isinstance(entities, dict):
+            continue
+        task_guid = str(entities.get("task_guid") or "").strip()
+        if task_guid:
+            return {"task_guid": task_guid, "title": str(entities.get("title") or "").strip()}
+    return {}
 
 
 def _extract_task_guid(question: str) -> str | None:

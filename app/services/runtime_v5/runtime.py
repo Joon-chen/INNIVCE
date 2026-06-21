@@ -457,6 +457,7 @@ def run_runtime_v5(
         if restored_message:
             state = mark_runtime_action_confirmed(chat_id=context.chat_id, session_context=context.session_context)
             session_context = _session_without_pending_action(context.session_context)
+            session_context["runtime_v5_confirmed_action_entities"] = pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {}
             if state is not None:
                 session_context["runtime_v5_state"] = runtime_state_payload(state)
             context = replace(
@@ -965,6 +966,7 @@ def _context_from_action_request(context: RuntimeContext) -> RuntimeContext:
     if action_input.confirmation.confirmed:
         pending_action = _pending_action_from_action_input(action_input, message=message)
         session_context[_PENDING_ACTION_KEY] = pending_action
+        session_context["runtime_v5_confirmed_action_entities"] = pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {}
         state = save_waiting_confirmation_state(
             chat_id=context.chat_id,
             session_context=session_context,
@@ -981,6 +983,15 @@ def _context_from_action_request(context: RuntimeContext) -> RuntimeContext:
         if confirmed_state is not None:
             session_context["runtime_v5_state"] = runtime_state_payload(confirmed_state)
         return replace(context, current_message="确认执行", session_context=session_context)
+    pending_action = _pending_action_from_action_input(action_input, message=message)
+    session_context[_PENDING_ACTION_KEY] = pending_action
+    state = save_waiting_confirmation_state(
+        chat_id=context.chat_id,
+        session_context=session_context,
+        pending_action=pending_action,
+        ttl_seconds=_PENDING_ACTION_TTL_SECONDS,
+    )
+    session_context["runtime_v5_state"] = runtime_state_payload(state)
     return replace(context, current_message=message, session_context=session_context)
 
 
@@ -1177,7 +1188,7 @@ def _runtime_action_receipt_context(
         )
     action_status_group = _runtime_action_status_group(execution.status)
     return ResultContext(
-        result_type="runtime_action",
+        result_type=_runtime_action_result_type(plan.strategy),
         query_id=f"{plan.strategy}:runtime_action:{uuid4().hex[:12]}",
         count=len(provider_items),
         items=tuple(provider_items),
@@ -1207,6 +1218,13 @@ def _runtime_action_receipt_context(
         },
         answer=answer or f"{label_for_strategy(plan.strategy)}已处理。",
     )
+
+
+def _runtime_action_result_type(strategy: str) -> str:
+    normalized = str(strategy or "").strip()
+    if normalized in {"task_complete"}:
+        return normalized
+    return "runtime_action"
 
 
 def _pending_action_receipt_context(*, pending_action: dict[str, Any], status: str, answer: str) -> ResultContext:

@@ -935,7 +935,7 @@ def test_runtime_v5_failed_action_uses_runtime_action_input_contract() -> None:
     assert runtime_state["error"] == "provider_failed"
     assert runtime_state["actions"][0]["status"] == "failed"
     assert runtime_state["actions"][0]["error"] == "provider_failed"
-    assert runtime_state["metadata"]["transitions"] == ["waiting", "confirmed", "executing", "failed"]
+    assert runtime_state["metadata"]["transitions"] == ["waiting", "waiting_confirmation", "confirmed", "executing", "failed"]
     _assert_runtime_state_company_id(runtime_state)
     action_input = runtime_state["actions"][0]["metadata"]["pending_action"]["runtime_action_input"]
     assert action_input["action_type"] == "approve"
@@ -994,12 +994,149 @@ def test_runtime_v5_cancel_action_uses_runtime_action_input_contract() -> None:
     runtime_state = result.composed.result_context.metadata["runtime_state"]
     assert runtime_state["status"] == "failed"
     assert runtime_state["actions"][0]["status"] == "cancelled"
-    assert runtime_state["metadata"]["transitions"] == ["waiting", "cancelled"]
+    assert runtime_state["metadata"]["transitions"] == ["waiting", "waiting_confirmation", "cancelled"]
     assert runtime_state["actions"][0]["metadata"]["transitions"] == ["waiting_confirmation", "cancelled"]
     action_input = runtime_state["actions"][0]["metadata"]["pending_action"]["runtime_action_input"]
     assert action_input["action_type"] == "cancel"
     assert action_input["confirmation"]["confirmed"] is False
     assert action_input["context"]["source_ui"] == "card"
+
+
+def test_runtime_v5_task_complete_waiting_confirmation_executes_and_returns_task_complete() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"complete_task": ("task.complete_task", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            calls.append((request.operation, request.params["task_guid"]))
+            return ProviderResult(
+                source="task",
+                status="success",
+                result_type="task_complete",
+                count=1,
+                items=({"title": "跟进客户", "task_guid": request.params["task_guid"]},),
+                answer="任务已完成。",
+            )
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context(
+            "card action",
+            chat_id="chat_task_complete",
+            session_context={
+                "runtime_v5_action_input": {
+                    "action_id": "task_complete_1",
+                    "action_type": "execute",
+                    "intent": "task_complete",
+                    "strategy": "task_complete",
+                    "target": {"task_guid": "task/1"},
+                    "confirmation": {"confirmed": False, "token": "task_complete_1"},
+                    "context": {
+                        "company_id": "company_1",
+                        "chat_id": "chat_task_complete",
+                        "user_id": "ou_test",
+                        "open_id": "ou_test",
+                        "source_ui": "card",
+                    },
+                    "message": "完成任务",
+                    "sources": ["task"],
+                    "metadata": {"scope_context": {"scope": "SELF", "company_id": "company_1", "filters": {}}},
+                }
+            },
+        ),
+        providers={"task": TaskProvider()},
+    )
+
+    assert waiting_confirmation.execution is None
+    assert waiting_confirmation.composed.result_context is not None
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_pending_confirmation"
+    runtime_state = waiting_confirmation.composed.result_context.metadata["runtime_state"]
+    assert runtime_state["status"] == "waiting"
+    assert runtime_state["actions"][0]["status"] == "waiting_confirmation"
+    assert runtime_state["metadata"]["transitions"] == ["waiting", "waiting_confirmation"]
+    assert calls == []
+
+    executed = run_runtime_v5(
+        context=_context(
+            "确认执行",
+            chat_id="chat_task_complete",
+            session_context={"runtime_v5_state": runtime_state},
+        ),
+        providers={"task": TaskProvider()},
+    )
+
+    assert calls == [("complete_task", "task/1")]
+    assert executed.execution is not None
+    assert executed.execution.status == "success"
+    assert executed.execution.provider_results[0].result_type == "task_complete"
+    assert executed.composed.result_context is not None
+    assert executed.composed.result_context.result_type == "task_complete"
+    runtime_state = executed.composed.result_context.metadata["runtime_state"]
+    assert runtime_state["status"] == "done"
+    assert runtime_state["actions"][0]["status"] == "done"
+    assert runtime_state["metadata"]["transitions"] == ["waiting", "waiting_confirmation", "confirmed", "executing", "done"]
+    assert runtime_state["actions"][0]["metadata"]["transitions"] == ["waiting_confirmation", "confirmed", "executing", "done"]
+    runtime_result = executed.composed.metadata["runtime_result"]
+    assert runtime_result["result_type"] == "task_complete"
+    assert interaction_payload_from_runtime_result(runtime_result_from_payload(runtime_result)).payload_type == "feedback"
+
+
+def test_runtime_v5_task_complete_failed_provider_returns_failed_task_complete() -> None:
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"complete_task": ("task.complete_task", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_complete",
+                count=0,
+                error="task_provider_failed",
+                answer="任务完成失败。",
+            )
+
+    result = run_runtime_v5(
+        context=_context(
+            "card action",
+            chat_id="chat_task_complete_failed",
+            session_context={
+                "runtime_v5_action_input": {
+                    "action_id": "task_complete_failed_1",
+                    "action_type": "execute",
+                    "intent": "task_complete",
+                    "strategy": "task_complete",
+                    "target": {"task_guid": "task/1"},
+                    "confirmation": {"confirmed": True, "token": "task_complete_failed_1"},
+                    "context": {
+                        "company_id": "company_1",
+                        "chat_id": "chat_task_complete_failed",
+                        "user_id": "ou_test",
+                        "open_id": "ou_test",
+                        "source_ui": "card",
+                    },
+                    "message": "完成任务",
+                    "sources": ["task"],
+                }
+            },
+        ),
+        providers={"task": TaskProvider()},
+    )
+
+    assert result.execution is not None
+    assert result.execution.status == "error"
+    assert result.execution.provider_results[0].result_type == "task_complete"
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "task_complete"
+    runtime_state = result.composed.result_context.metadata["runtime_state"]
+    assert runtime_state["status"] == "failed"
+    assert runtime_state["actions"][0]["status"] == "failed"
+    assert runtime_state["metadata"]["transitions"] == ["waiting", "waiting_confirmation", "confirmed", "executing", "failed"]
+    assert runtime_state["actions"][0]["metadata"]["transitions"] == ["waiting_confirmation", "confirmed", "executing", "failed"]
+    runtime_result = result.composed.metadata["runtime_result"]
+    assert runtime_result["result_type"] == "task_complete"
+    assert runtime_result["status"] == "error"
 
 
 def test_runtime_v5_reject_missing_params_waits_for_input_then_confirmation() -> None:

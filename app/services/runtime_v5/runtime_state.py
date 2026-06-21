@@ -151,7 +151,7 @@ def save_waiting_confirmation_state(
         actions=(action,),
         created_at=now,
         updated_at=now,
-        metadata={"storage": "session", "company_id": company_id, "transitions": ["waiting"]},
+        metadata={"storage": "session", "company_id": company_id, "transitions": ["waiting", "waiting_confirmation"]},
     )
     payload = dict(session_context)
     payload[PENDING_ACTION_KEY] = pending_action
