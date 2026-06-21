@@ -430,32 +430,50 @@ class CapabilityRegistryBuilder:
         }
 
     def consistency_report(self) -> dict[str, Any]:
+        guard = self.lifecycle_guard_report()
+        missing_capabilities = guard["MissingCapabilityForSkill"]
+        missing_skills = guard["MissingSkillForRuntime"]
+        missing_providers = guard["MissingProviderForSkill"]
+        orphan_skills = guard["OrphanSkill"]
+        orphan_providers = guard["OrphanProviderBinding"]
+        return {
+            "status": "complete" if not any([missing_capabilities, missing_skills, missing_providers, orphan_skills, orphan_providers]) else "needs_attention",
+            "MissingCapability": missing_capabilities,
+            "MissingSkill": missing_skills,
+            "MissingProvider": missing_providers,
+            "OrphanSkill": orphan_skills,
+            "OrphanProvider": orphan_providers,
+        }
+
+    def lifecycle_guard_report(self) -> dict[str, Any]:
+        domain_ids = {item["domain_id"] for item in FROZEN_DOMAINS}
         catalog_capabilities = {item["capability_id"] for item in CAPABILITY_DEFINITIONS}
+        missing_domain_for_capability = sorted(
+            {
+                item["capability_id"]
+                for item in CAPABILITY_DEFINITIONS
+                if item["domain_id"] not in domain_ids
+            }
+        )
+
         skill_payload = self.skill_registry_payload()
         skills = [skill for capability in skill_payload["capabilities"] for skill in capability["skills"]]
-        provider_bindings = [
-            binding
-            for skill in skills
-            for binding in skill.get("provider_bindings", [])
-        ]
         skill_ids = {skill["skill_id"] for skill in skills}
-        provider_ids = {binding["provider_id"] for binding in provider_bindings}
-
-        missing_capabilities = sorted(
+        missing_capability_for_skill = sorted(
             {
                 skill["capability_id"]
                 for skill in skills
                 if skill["capability_id"] not in catalog_capabilities
             }
         )
-        missing_skills = sorted(
+        missing_skill_for_runtime = sorted(
             {
                 item.strategy
                 for item in self.runtime_capabilities
                 if _runtime_skill_id(item) not in skill_ids
             }
         )
-        missing_providers = sorted(
+        missing_provider_for_skill = sorted(
             {
                 skill["skill_id"]
                 for skill in skills
@@ -469,20 +487,30 @@ class CapabilityRegistryBuilder:
                 if skill["capability_id"] not in catalog_capabilities
             }
         )
-        orphan_providers = sorted(
+        orphan_provider_bindings = sorted(
             {
-                provider_id
-                for provider_id in provider_ids
-                if not any(binding["provider_id"] == provider_id for binding in provider_bindings)
+                f"{binding.get('provider_id') or ''}:{binding.get('skill_id') or ''}"
+                for skill in skills
+                for binding in skill.get("provider_bindings", [])
+                if not binding.get("provider_id") or binding.get("skill_id") != skill["skill_id"]
             }
         )
+        issues = [
+            missing_domain_for_capability,
+            missing_capability_for_skill,
+            missing_skill_for_runtime,
+            missing_provider_for_skill,
+            orphan_skills,
+            orphan_provider_bindings,
+        ]
         return {
-            "status": "complete" if not any([missing_capabilities, missing_skills, missing_providers, orphan_skills, orphan_providers]) else "needs_attention",
-            "MissingCapability": missing_capabilities,
-            "MissingSkill": missing_skills,
-            "MissingProvider": missing_providers,
+            "status": "healthy" if not any(issues) else "needs_attention",
+            "MissingDomainForCapability": missing_domain_for_capability,
+            "MissingCapabilityForSkill": missing_capability_for_skill,
+            "MissingSkillForRuntime": missing_skill_for_runtime,
+            "MissingProviderForSkill": missing_provider_for_skill,
             "OrphanSkill": orphan_skills,
-            "OrphanProvider": orphan_providers,
+            "OrphanProviderBinding": orphan_provider_bindings,
         }
 
     def registry_health(

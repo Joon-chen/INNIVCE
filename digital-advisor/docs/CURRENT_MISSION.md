@@ -16,7 +16,7 @@ Skill Registry 治理计划见 `docs/SKILL_REGISTRY_CLEANUP_PLAN.md`。
 当前进入：
 
 ```text
-Registry Cleanup Phase
+Capability Lifecycle Guard Phase
 ```
 
 背景：
@@ -33,20 +33,19 @@ Business
 Intelligence
 ```
 
-Registry Shadow Verification 已通过。
+Capability Registry Contract Freeze 已通过。
 
-当前治理 `registry_health.status = needs_attention` 的根因。
+当前新增 Capability Lifecycle Guard，防止 Registry Health 回归。
 
 ## 当前目标
 
-处理 `missing_skill` 中的全部项目：
+新增 RuntimeCapability 时必须同时声明：
 
 ```text
-Workspace Skill
-Communication Skill
-Knowledge Skill
-Business Skill
-Intelligence Skill
+Domain
+Capability
+Skill
+Provider
 ```
 
 关键决策：
@@ -54,9 +53,9 @@ Intelligence Skill
 - 不新增 Registry 设计。
 - 不新增 Registry 页面。
 - 不新增 Shadow Panel。
-- 只处理 Capability -> Skill -> Provider 链路完整性。
+- 只增加 Registry 生命周期守护。
 
-本阶段优先完成 Registry 治理。
+本阶段目标是让测试长期守住 Registry Health。
 
 ## 当前禁止范围
 
@@ -76,18 +75,19 @@ Intelligence Skill
 
 ## 当前验收标准
 
-- 输出 Skill Registry Cleanup Plan。
-- `missing_skill` 全部归类。
-- 每项给出保留、合并、废弃或重命名判断。
-- 重新运行 `registry_health`。
-- 输出 before / after 统计变化。
-- `registry_health.status` 从 `needs_attention` 变为 `healthy`。
+- 新增 Capability Lifecycle Guard。
+- 新增 CI Contract Test。
+- 新增 RuntimeCapability 时缺 Domain / Capability / Skill / Provider 会失败。
+- 新增 Skill 时缺 Capability 会失败。
+- 新增 Capability 时缺 Domain 会失败。
+- 新增 Provider Binding 时缺 Skill 会失败。
+- 禁止 `missing_skill`、`missing_provider`、`orphan_skill`、`orphan_provider` 回归。
 - 不修改页面代码。
 - 不修改数据库。
 - 不修改业务逻辑。
 
 ## 下一步计划
 
-1. 完成 Registry Cleanup。
-2. 冻结 Registry 健康基线。
-3. 增加守护测试，防止新增 Runtime strategy 后漏登记 Skill。
+1. 完成 Lifecycle Guard。
+2. 运行 Registry Contract Test。
+3. 云端验证 Registry Health 保持 healthy。

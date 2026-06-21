@@ -122,6 +122,20 @@ def test_registry_health_is_healthy_after_skill_cleanup() -> None:
     assert health["orphan_provider"] == []
 
 
+def test_capability_lifecycle_guard_enforces_full_chain() -> None:
+    guard = CapabilityRegistryBuilder(company_id="company-1").lifecycle_guard_report()
+
+    assert guard == {
+        "status": "healthy",
+        "MissingDomainForCapability": [],
+        "MissingCapabilityForSkill": [],
+        "MissingSkillForRuntime": [],
+        "MissingProviderForSkill": [],
+        "OrphanSkill": [],
+        "OrphanProviderBinding": [],
+    }
+
+
 def test_mock_payload_can_drive_four_pages() -> None:
     payload = build_mock_capability_registry_payload()
 
