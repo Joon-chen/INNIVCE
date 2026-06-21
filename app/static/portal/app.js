@@ -145,7 +145,7 @@ function renderList() {
       <span>高风险 ${counts.hold} ｜ 需关注 ${counts.review} ｜ 可通过 ${counts.pass}</span>
     </div>
     ${entries.length ? entries.map(({ item, index }) => {
-    const advice = refinedAdviceOf(item);
+    const advice = conclusionOf(item);
     return `
       <button class="item ${index === state.selectedIndex ? "active" : ""}" data-index="${index}">
         <strong>${escapeHtml(titleOf(item))}</strong>
@@ -214,7 +214,7 @@ function renderDetail() {
     return;
   }
   $("approvalDetail").className = "";
-  const advice = refinedAdviceOf(item);
+  const advice = conclusionOf(item);
   $("approvalDetail").innerHTML = `
     <div class="detail-body approval-compact">
       <div class="approval-head">
@@ -228,7 +228,7 @@ function renderDetail() {
         <strong>${escapeHtml(advice.suggestion)}</strong>
         <div>${escapeHtml(advice.reason)}</div>
       </div>
-      ${renderBusinessSummary(item)}
+      ${renderApprovalEvidence(item) || renderBusinessSummary(item)}
       ${renderAttachments(item)}
       <label>
         处理意见
@@ -440,6 +440,13 @@ function reasonOf(item) {
   return item.assessment?.reason || item.reason || item.description || "暂无判断理由。";
 }
 
+function conclusionOf(item) {
+  return {
+    suggestion: suggestionOf(item),
+    reason: reasonOf(item),
+  };
+}
+
 function refinedAdviceOf(item) {
   const amountCheck = detailAmountCheck(item);
   const base = {
@@ -562,6 +569,116 @@ function renderAttachments(item) {
       </details>
     </section>
   `;
+}
+
+function renderApprovalEvidence(item) {
+  const evidence = approvalEvidenceOf(item);
+  if (!evidence) return "";
+  const facts = approvalEvidenceFacts(evidence);
+  const missing = evidenceList(evidence.missing);
+  const conflicts = evidenceList(evidence.conflicts);
+  const quality = evidenceQualityLabel(evidence.quality);
+  const nextStep = String(evidence.suggested_next_step || "").trim();
+  const managerSummary = String(evidence.manager_summary || "").trim();
+  return `
+    <section class="business-summary evidence-summary">
+      <div class="summary-head">
+        <div>
+          <h3>AI 判断依据</h3>
+          <p>${escapeHtml(quality)}</p>
+        </div>
+        <strong>${escapeHtml(evidence.evidence_type || "Evidence")}</strong>
+      </div>
+      ${managerSummary ? `<p class="evidence-manager-summary">${escapeHtml(managerSummary)}</p>` : ""}
+      ${facts.length ? `
+        <div class="summary-grid">
+          ${facts.map(([label, value]) => `
+            <div>
+              <span>${escapeHtml(label)}</span>
+              <strong>${escapeHtml(value)}</strong>
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+      <div class="evidence-decision-grid">
+        <div>
+          <span>缺什么证据</span>
+          <strong>${escapeHtml(missing.length ? missing.join("、") : "未发现关键缺失")}</strong>
+        </div>
+        <div>
+          <span>证据冲突</span>
+          <strong>${escapeHtml(conflicts.length ? conflicts.join("、") : "未发现明显冲突")}</strong>
+        </div>
+        <div>
+          <span>建议动作</span>
+          <strong>${escapeHtml(nextStep || "按公司审批规则处理")}</strong>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function approvalEvidenceOf(item) {
+  const raw = rawOf(item);
+  const snapshot = raw._approval_snapshot && typeof raw._approval_snapshot === "object"
+    ? raw._approval_snapshot
+    : (item._approval_snapshot && typeof item._approval_snapshot === "object" ? item._approval_snapshot : {});
+  const payload = snapshot.payload && typeof snapshot.payload === "object" ? snapshot.payload : {};
+  const evidence = payload.evidence && typeof payload.evidence === "object"
+    ? payload.evidence
+    : (snapshot.evidence && typeof snapshot.evidence === "object" ? snapshot.evidence : {});
+  return Object.keys(evidence).length ? evidence : null;
+}
+
+function approvalEvidenceFacts(evidence) {
+  const facts = evidence.facts && typeof evidence.facts === "object" ? evidence.facts : {};
+  const rows = [
+    ["申请金额", formatEvidenceMoney(facts.approval_amount)],
+    ["费用明细", numberLabel(facts.expense_row_count, "行")],
+    ["附件数量", numberLabel(facts.attachment_count, "个")],
+    ["已读附件", numberLabel(facts.readable_attachment_count, "个")],
+    ["附件金额", formatEvidenceMoney(facts.attachment_amount)],
+  ].filter(([, value]) => value);
+  const extra = Object.entries(facts)
+    .filter(([key]) => !["approval_amount", "expense_row_count", "attachment_count", "readable_attachment_count", "attachment_amount"].includes(key))
+    .slice(0, 4)
+    .map(([key, value]) => [evidenceFactLabel(key), evidenceValue(value)]);
+  return rows.concat(extra).filter(([, value]) => value).slice(0, 8);
+}
+
+function evidenceList(value) {
+  return Array.isArray(value) ? value.map((item) => String(item || "").trim()).filter(Boolean) : [];
+}
+
+function evidenceQualityLabel(value) {
+  const quality = String(value || "").toLowerCase();
+  if (quality === "complete") return "证据质量：完整";
+  if (quality === "partial") return "证据质量：部分完整";
+  if (quality === "failed") return "证据质量：读取失败";
+  if (quality === "pending") return "证据质量：分析中";
+  return "证据质量：未知";
+}
+
+function formatEvidenceMoney(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0 ? formatMoney(amount) : "";
+}
+
+function numberLabel(value, unit) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? `${number}${unit}` : "";
+}
+
+function evidenceFactLabel(key) {
+  return String(key || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function evidenceValue(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean).join("、");
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return String(value ?? "").trim();
 }
 
 function renderEvidenceCard(attachment) {

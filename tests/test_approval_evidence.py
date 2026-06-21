@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from app.services.approval_evidence import build_approval_expense_evidence
 from app.services.approval_snapshot_builder import _assessment_from_evidence
 from app.services.evidence import EVIDENCE_QUALITY_COMPLETE, EVIDENCE_QUALITY_PARTIAL, evidence_from_payload, evidence_payload
+from app.services.runtime_v5.feishu_resource_providers import _snapshot_payload
 
 
 def test_evidence_payload_round_trip_freezes_contract() -> None:
@@ -84,3 +85,35 @@ def test_snapshot_assessment_consumes_evidence_summary_not_widget_noise() -> Non
     assert "widget" not in assessment["reason"]
     assert "费用明细未成功还原" in assessment["reason"]
     assert "费用明细行" in assessment["missing_evidence"]
+
+
+def test_snapshot_payload_exposes_evidence_for_interaction_rendering() -> None:
+    snapshot = SimpleNamespace(
+        id="snapshot-1",
+        company_id="company-1",
+        object_type="approval",
+        object_id="approval-1",
+        snapshot_type="approval_current_judgment",
+        status="completed",
+        summary="需补充清晰费用明细。",
+        recommendation="补充后再审",
+        risk_level="review",
+        reasons=["费用明细未成功还原。"],
+        source_event_ids=["event-1"],
+        payload={
+            "evidence": {
+                "evidence_type": "approval_expense",
+                "quality": "partial",
+                "facts": {"approval_amount": 8902.33},
+                "missing": ["费用明细行"],
+                "conflicts": [],
+                "manager_summary": "费用明细未成功还原。",
+                "suggested_next_step": "请申请人补充清晰费用明细。",
+            }
+        },
+    )
+
+    payload = _snapshot_payload(snapshot)
+
+    assert payload["payload"]["evidence"]["quality"] == "partial"
+    assert payload["payload"]["evidence"]["missing"] == ["费用明细行"]

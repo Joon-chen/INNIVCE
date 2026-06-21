@@ -233,6 +233,37 @@ input, textarea {
   margin: 0 0 10px;
   font-size: 17px;
 }
+.evidence-summary {
+  border-color: #b9d7c9;
+  background: #fbfffd;
+}
+.evidence-manager-summary {
+  margin: 0 0 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.evidence-decision-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.evidence-decision-grid div {
+  padding: 10px;
+  border-radius: 8px;
+  background: #eef8f3;
+  border: 1px solid #d5eadf;
+}
+.evidence-decision-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.evidence-decision-grid strong {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.42;
+}
 .summary-head {
   display: flex;
   justify-content: space-between;
@@ -736,13 +767,15 @@ details summary {
 
 .approval-compact .summary-grid,
 .approval-compact .amount-check-grid,
-.approval-compact .evidence-grid {
+.approval-compact .evidence-grid,
+.approval-compact .evidence-decision-grid {
   gap: 8px;
 }
 
 .approval-compact .summary-grid div,
 .approval-compact .amount-check-grid div,
-.approval-compact .evidence-grid div {
+.approval-compact .evidence-grid div,
+.approval-compact .evidence-decision-grid div {
   padding: 8px 9px;
   min-height: 0;
   border-radius: 8px;
@@ -750,14 +783,16 @@ details summary {
 
 .approval-compact .summary-grid strong,
 .approval-compact .amount-check-grid strong,
-.approval-compact .evidence-grid strong {
+.approval-compact .evidence-grid strong,
+.approval-compact .evidence-decision-grid strong {
   font-size: 13px;
   line-height: 1.38;
 }
 
 .approval-compact .summary-grid span,
 .approval-compact .amount-check-grid small,
-.approval-compact .evidence-grid span {
+.approval-compact .evidence-grid span,
+.approval-compact .evidence-decision-grid span {
   font-size: 11px;
 }
 
@@ -813,13 +848,15 @@ details summary {
 
   .detail-page-mode .summary-grid,
   .detail-page-mode .amount-check-grid,
-  .detail-page-mode .evidence-grid {
+  .detail-page-mode .evidence-grid,
+  .detail-page-mode .evidence-decision-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .detail-page-mode .summary-grid div,
   .detail-page-mode .amount-check-grid div,
-  .detail-page-mode .evidence-grid div {
+  .detail-page-mode .evidence-grid div,
+  .detail-page-mode .evidence-decision-grid div {
     padding: 8px;
   }
 

@@ -3585,6 +3585,7 @@ def _snapshot_payload(snapshot: Snapshot) -> dict[str, Any]:
         "risk_level": snapshot.risk_level,
         "reasons": list(snapshot.reasons or []),
         "source_event_ids": list(snapshot.source_event_ids or []),
+        "payload": snapshot.payload if isinstance(snapshot.payload, dict) else {},
     }
 
 
