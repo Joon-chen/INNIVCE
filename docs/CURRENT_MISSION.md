@@ -4,14 +4,9 @@
 
 系统最高级规则见 `docs/V5_RUNTIME_CONSTITUTION.md`。
 V5 能力分类见 `docs/V5_CAPABILITY_TAXONOMY.md`。
+Capability Registry 模型见 `docs/CAPABILITY_REGISTRY_MODEL.md`。
 企业 AI OS 顶层定义见 `docs/ENTERPRISE_AI_OS_V1.md`。
 企业认知底座 V1 见 `docs/ENTERPRISE_COGNITIVE_FOUNDATION_V1.md`。
-企业认知底座 V1 冻结复盘见 `docs/ECF_V1_FREEZE_REVIEW.md`。
-Snapshot 生成节奏见 `docs/SNAPSHOT_TRIGGER_MATRIX.md`。
-OA 智能闭环设计见 `docs/OA_INTELLIGENCE_LOOP_DESIGN.md`。
-Insight 合同 V0 见 `docs/INSIGHT_CONTRACT_V0.md`。
-审批 Insight 样板见 `docs/APPROVAL_INSIGHT_SAMPLE.md`。
-Insight 展示边界见 `docs/INSIGHT_RENDERER_BOUNDARY.md`。
 历史阶段归档见 `docs/history/`。
 
 ## 当前阶段
@@ -19,26 +14,24 @@ Insight 展示边界见 `docs/INSIGHT_RENDERER_BOUNDARY.md`。
 当前进入：
 
 ```text
-V5 Capability Taxonomy Freeze Phase
+Capability Registry Design Phase
 ```
 
 背景：
 
-Enterprise Cognitive Foundation V1 已冻结。
-
-在进入 Task Cognitive Sample 前，需要先冻结 V5 业务域与能力分类，避免后续继续按飞书产品建立模块。
-
-当前冻结链路：
+V5 业务域已冻结为：
 
 ```text
-Raw Data
--> WorkEvent
--> Evidence
--> Snapshot
--> Insight
+People
+Communication
+Workspace
+Process
+Knowledge
+Business
+Intelligence
 ```
 
-Action 继续归 Runtime。
+在进入 Task Cognitive Sample 前，需要冻结 Capability Registry，避免能力目录、能力清册、治理中心、系统诊断继续混用飞书产品、原子能力和运行状态分类。
 
 ## 当前目标
 
@@ -51,25 +44,16 @@ Business Domain
 -> Provider
 ```
 
-最终业务域：
-
-```text
-People
-Communication
-Workspace
-Process
-Knowledge
-Business
-Intelligence
-```
-
 关键决策：
 
 - Calendar 归入 Workspace。
 - Approval 归入 Process。
-- 不建立 Approval Module / Task Module / Wiki Module 等飞书产品导向模型。
+- Capability 是能力目录展示对象。
+- Skill 是能力清册展示对象。
+- Governance Center 以 Capability / Skill / Provider 为治理对象。
+- System Diagnostics 保持 Runtime 视角，不参与能力分类。
 
-本阶段只做分类冻结，不实现页面和数据模型。
+本阶段只做模型冻结，不实现页面、数据库和 API。
 
 ## 当前禁止范围
 
@@ -94,22 +78,20 @@ Intelligence
 - 页面迁移实现。
 - 数据库迁移。
 - API 改造。
+- Domain 调整。
 
 ## 当前验收标准
 
-- Enterprise Cognitive Foundation V1 状态为 Frozen。
-- WorkEvent = 事实层。
-- Evidence = 判断依据层。
-- Snapshot = 当前认知层。
-- Insight = 建议层。
-- Action = Runtime 执行层。
 - V5 业务域冻结为 People / Communication / Workspace / Process / Knowledge / Business / Intelligence。
-- Task 未来归属 Workspace，而不是 Task Module。
-- Approval 未来归属 Process，而不是 Approval Module。
-- Calendar 未来归属 Workspace，而不是 Calendar Module。
+- Capability Registry 冻结 Domain -> Capability -> Skill -> Provider。
+- 能力目录以 Capability 为展示对象。
+- 能力清册以 Skill 为展示对象。
+- 治理中心以 Capability / Skill / Provider 为治理对象。
+- 系统诊断保持 Runtime 视角，不按业务域分类。
+- Task 未来归属 Workspace Capability，而不是 Task Module。
 
 ## 下一步计划
 
-1. 冻结 `docs/V5_CAPABILITY_TAXONOMY.md`。
+1. 冻结 `docs/CAPABILITY_REGISTRY_MODEL.md`。
 2. 进入 Task Cognitive Sample Selection。
-3. 分析 Task WorkEvent / Evidence / Snapshot / Insight 是否可复用。
+3. 分析 Task 是否复用 WorkEvent -> Evidence -> Snapshot -> Insight。

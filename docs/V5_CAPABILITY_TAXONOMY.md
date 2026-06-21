@@ -2,6 +2,8 @@
 
 本文档冻结 V5 业务域与能力体系。
 
+Capability Registry 的详细模型见 `docs/CAPABILITY_REGISTRY_MODEL.md`。
+
 核心原则：
 
 ```text
