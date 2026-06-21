@@ -10,6 +10,7 @@ from app.services.cognitive_foundation import (
     upsert_snapshot,
     write_memory_candidate,
 )
+from app.services.runtime_v5 import feishu_resource_providers
 from app.services.runtime_v5.feishu_resource_providers import (
     FeishuApprovalProvider,
     _approval_assessment,
@@ -216,6 +217,38 @@ def test_approval_completed_snapshot_displays_recommendation_and_reasons() -> No
     assert assessment["risk_level"] == "pass"
     assert assessment["source"] == "snapshot"
     assert "发票金额与表单一致" in assessment["reason"]
+
+
+def test_approval_query_completed_snapshot_skips_realtime_analysis(monkeypatch) -> None:
+    company_id = uuid4()
+    snapshot = Snapshot(
+        id=uuid4(),
+        company_id=company_id,
+        object_type="approval",
+        object_id="approval-1",
+        snapshot_type="approval_current_judgment",
+        status="completed",
+        recommendation="可通过",
+        risk_level="pass",
+        reasons=["已有完成快照"],
+    )
+    db = _WriteDb(scalar_result=snapshot)
+    provider = FeishuApprovalProvider(db=db)
+    request = _approval_request(company_id)
+    raw_item = {"instance_code": "approval-1", "approval_name": "报销审批"}
+    monkeypatch.setattr(feishu_resource_providers, "_active_feishu_app_config", lambda *args, **kwargs: None)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("completed snapshot should skip realtime analysis")
+
+    provider._fetch_approval_instance_detail = fail_if_called
+    provider._read_approval_attachments = fail_if_called
+
+    provider._enrich_approval_list_items(request, [raw_item])
+
+    assert raw_item["_approval_assessment"]["source"] == "snapshot"
+    assert raw_item["_approval_assessment"]["suggestion"] == "可通过"
+    assert raw_item["_approval_llm_ms"] == 0
 
 
 def test_approval_analysis_completed_writes_snapshot() -> None:

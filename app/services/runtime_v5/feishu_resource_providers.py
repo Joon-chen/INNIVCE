@@ -504,6 +504,9 @@ class FeishuApprovalProvider(FeishuResourceProvider):
         for raw_item in raw_items[:10]:
             if not isinstance(raw_item, dict):
                 continue
+            self._attach_approval_snapshot(request, raw_item)
+            if self._approval_has_completed_snapshot(raw_item):
+                continue
             detail = self._fetch_approval_instance_detail(request, raw_item)
             if detail:
                 detail_loaded += 1
@@ -525,6 +528,11 @@ class FeishuApprovalProvider(FeishuResourceProvider):
             if not isinstance(raw_item, dict):
                 continue
             self._record_approval_created(request, raw_item)
+            self._attach_approval_snapshot(request, raw_item)
+            if self._approval_has_completed_snapshot(raw_item):
+                raw_item["_approval_llm_ms"] = 0
+                raw_item["_approval_assessment"] = _approval_assessment(raw_item, attachment_results=[])
+                continue
             attachment_results = self._read_approval_attachments(request, raw_item)
             if attachment_results:
                 attachment_read_count += len(attachment_results)
@@ -681,6 +689,10 @@ class FeishuApprovalProvider(FeishuResourceProvider):
         )
         if snapshot is not None:
             raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
+
+    def _approval_has_completed_snapshot(self, raw_item: dict[str, Any]) -> bool:
+        snapshot = raw_item.get("_approval_snapshot") if isinstance(raw_item.get("_approval_snapshot"), dict) else {}
+        return snapshot.get("status") == "completed"
 
     def _approval_attachments_complete(self, raw_item: dict[str, Any], *, attachment_results: list[Any]) -> bool:
         detail = raw_item.get("instance_detail") if isinstance(raw_item.get("instance_detail"), dict) else {}
