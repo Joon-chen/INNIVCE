@@ -19,7 +19,7 @@ Task Runtime 飞书手工验收见 `docs/TASK_RUNTIME_SAMPLE_FEISHU_MANUAL_ACCEP
 当前进入：
 
 ```text
-Execution Identity Contract Design Completed
+Execution Identity Contract Guard Completed
 ```
 
 背景：
@@ -89,6 +89,16 @@ guid / summary / status / url
 - Task `complete_task` 目标路径冻结为 `USER_TOKEN` 优先。
 - Approval write 目标路径冻结为 `USER_TOKEN`。
 
+执行身份最小 Guard 已完成：
+
+- 新增 `ExecutionIdentityContract` / `CredentialOwner` 合同类型。
+- `ProviderRequest` 现在携带 `execution_identity_contract`。
+- Capability Registry Skill payload 现在输出 `identity_contract`。
+- Task `complete_task` 已在合同层标记为 `USER + USER_TOKEN`。
+- Approval `approve/reject` 已在合同层标记为 `USER + USER_TOKEN`。
+- Approval query 已在合同层标记为 `BOT + TENANT_TOKEN`。
+- 当前未接 User OAuth Token lookup，`authorization_status` 仍保持 `UNKNOWN`。
+
 ## 当前禁止范围
 
 本阶段不要做：
@@ -115,6 +125,7 @@ guid / summary / status / url
 - Task Provider USER_TOKEN 实现。
 - Approval Provider 全量 USER_TOKEN 迁移。
 - OAuth UI 改造。
+- WAITING_AUTHORIZATION 状态机落地。
 
 ## 当前验收标准
 
@@ -135,14 +146,16 @@ guid / summary / status / url
 - Execution Identity Contract Design 已完成。
 - 已冻结 `actor_identity` / `credential_mode` 双层模型。
 - 已冻结 Task / Approval 的目标身份路径。
+- Execution Identity Contract Guard 已完成。
+- Runtime ProviderRequest 已可传递 identity contract。
+- Capability Registry 已可展示 Skill identity contract。
 - 不修改数据库。
 - 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 进入 Execution Identity Contract Guard Phase。
-2. 新增最小合同类型定义。
-3. Capability Registry 增加 identity contract 字段。
-4. Contract Test 锁住 Task / Approval identity matrix。
-5. Runtime 执行前生成 identity contract。
-6. Task complete 缺少 USER_TOKEN 时返回 WAITING_AUTHORIZATION。
+1. 进入 User Token Readiness Phase。
+2. 审计现有 Feishu User OAuth Account lookup 能否被 Runtime 复用。
+3. 设计 `USER_TOKEN` lookup helper，不迁移全量 Provider。
+4. 只选择 Task `complete_task` 作为第一条 USER_TOKEN 执行样板。
+5. 缺少 USER_TOKEN 时再落地 `WAITING_AUTHORIZATION`。

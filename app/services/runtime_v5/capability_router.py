@@ -7,6 +7,10 @@ from uuid import uuid4
 from uuid import UUID
 
 from app.services.runtime_v5.capabilities import capability_for
+from app.services.runtime_v5.execution_identity import (
+    build_execution_identity_contract,
+    execution_identity_contract_payload,
+)
 from app.services.runtime_v5.models import (
     ExecutionResult,
     IntentResult,
@@ -237,14 +241,25 @@ def _provider_request(
     if capability is not None:
         params.setdefault("capability_label", capability.label)
         params.setdefault("capability_installed", capability.installed)
+    operation = _operation_for_source(plan.strategy, source)
+    identity_contract = build_execution_identity_contract(
+        strategy=plan.strategy,
+        source=source,
+        operation=operation,
+        execution_identity=permission.execution_identity,
+        context=context,
+        resource_scope=_resource_scope_for_intent(intent),
+    )
+    params.setdefault("execution_identity_contract", execution_identity_contract_payload(identity_contract))
     return ProviderRequest(
         source=source,
-        operation=_operation_for_source(plan.strategy, source),
+        operation=operation,
         intent=intent,
         planner=plan,
         context=context,
         execution_identity=permission.execution_identity,
         params=params,
+        execution_identity_contract=identity_contract,
     )
 
 
@@ -371,6 +386,21 @@ def _result_context_previous_results(result_context: ResultContext | None) -> tu
             answer="",
         ))
     return tuple(results)
+
+
+def _resource_scope_for_intent(intent: IntentResult) -> str:
+    normalized = str(intent.data_scope or "").strip().lower()
+    if normalized == "self":
+        return "SELF"
+    if normalized in {"person", "user"}:
+        return "USER"
+    if normalized == "department":
+        return "DEPARTMENT"
+    if normalized in {"project", "team"}:
+        return "TEAM"
+    if normalized in {"company", "organization"}:
+        return "COMPANY"
+    return normalized.upper() if normalized else "SELF"
 
 
 def _source_for_result_context(result_context: ResultContext) -> str:

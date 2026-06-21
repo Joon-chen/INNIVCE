@@ -17,6 +17,7 @@ from app.services.runtime_v5.models import (
     RuntimeScope,
 )
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider
+from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
 from app.services.runtime_v5.permission import check_runtime_permission
 from app.services.runtime_v5.runtime import run_runtime_v5
@@ -135,6 +136,57 @@ def test_runtime_v5_approval_query_runs_strategy_sources() -> None:
     assert runtime_state["status"] == "done"
     assert runtime_state["intent"] == "approval_query"
     assert runtime_state["actions"] == ()
+
+
+def test_runtime_v5_provider_request_carries_execution_identity_contract() -> None:
+    seen_contracts = []
+
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"complete_task": ("task.complete_task", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            seen_contracts.append(request.execution_identity_contract.payload())
+            assert request.params["execution_identity_contract"]["credential_mode"] == "USER_TOKEN"
+            return ProviderResult(source="task", status="success", result_type="task_complete", answer="done")
+
+    context = _context("完成任务")
+    intent = IntentResult(
+        question_type="action",
+        intent="task_complete",
+        data_scope="self",
+        confidence=0.9,
+        canonical_question="完成任务",
+    )
+    plan = PlannerResult(strategy="task_complete", sources=("task",))
+    permission = PermissionDecision(allowed=True, requires_confirmation=True, execution_identity="user")
+
+    result = CapabilityRouter({"task": TaskProvider()}).execute(
+        context=context,
+        intent=intent,
+        plan=plan,
+        permission=permission,
+    )
+
+    assert result.status == "success"
+    assert seen_contracts == [
+        {
+            "actor_identity": "USER",
+            "credential_mode": "USER_TOKEN",
+            "credential_owner": {
+                "company_id": str(context.runtime_scope.active_company_id),
+                "open_id": "ou_test",
+                "user_id": "",
+                "cli_profile": "",
+            },
+            "resource_scope": "SELF",
+            "requires_authorization": True,
+            "allows_cli_fallback": True,
+            "authorization_status": "UNKNOWN",
+            "fallback_used": False,
+            "reason": "task_complete:task.complete_task represents a user-owned resource or user action.",
+        }
+    ]
 
 
 def test_runtime_v5_task_query_outputs_enterprise_scope_context() -> None:

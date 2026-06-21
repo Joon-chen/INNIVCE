@@ -8,6 +8,9 @@ from uuid import UUID
 QuestionType = Literal["query", "analysis", "insight", "decision", "action"]
 DataScope = Literal["self", "person", "department", "company", "project", "organization", "external"]
 ExecutionIdentity = Literal["bot", "user"]
+ActorIdentity = Literal["BOT", "USER", "ADMIN", "SYSTEM", "UNKNOWN"]
+CredentialMode = Literal["TENANT_TOKEN", "USER_TOKEN", "CLI_PROFILE", "ADMIN_SESSION", "INTERNAL", "NONE", "UNKNOWN"]
+AuthorizationStatus = Literal["AUTHORIZED", "MISSING_AUTHORIZATION", "EXPIRED_AUTHORIZATION", "INSUFFICIENT_SCOPE", "IDENTITY_MISMATCH", "UNKNOWN"]
 RuntimeScopeType = Literal["single_company", "multi_company", "all_companies"]
 ProviderStatus = Literal["success", "partial", "denied", "error", "skipped"]
 RuntimeTaskStatus = Literal["pending", "running", "waiting", "done", "failed"]
@@ -137,6 +140,45 @@ class PermissionDecision:
 
 
 @dataclass(frozen=True)
+class CredentialOwner:
+    company_id: str = ""
+    open_id: str = ""
+    user_id: str = ""
+    cli_profile: str = ""
+
+
+@dataclass(frozen=True)
+class ExecutionIdentityContract:
+    actor_identity: ActorIdentity = "UNKNOWN"
+    credential_mode: CredentialMode = "UNKNOWN"
+    credential_owner: CredentialOwner = field(default_factory=CredentialOwner)
+    resource_scope: str = ""
+    requires_authorization: bool = False
+    allows_cli_fallback: bool = False
+    authorization_status: AuthorizationStatus = "UNKNOWN"
+    fallback_used: bool = False
+    reason: str = ""
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "actor_identity": self.actor_identity,
+            "credential_mode": self.credential_mode,
+            "credential_owner": {
+                "company_id": self.credential_owner.company_id,
+                "open_id": self.credential_owner.open_id,
+                "user_id": self.credential_owner.user_id,
+                "cli_profile": self.credential_owner.cli_profile,
+            },
+            "resource_scope": self.resource_scope,
+            "requires_authorization": self.requires_authorization,
+            "allows_cli_fallback": self.allows_cli_fallback,
+            "authorization_status": self.authorization_status,
+            "fallback_used": self.fallback_used,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class ProviderRequest:
     source: str
     operation: str
@@ -145,6 +187,7 @@ class ProviderRequest:
     context: RuntimeContext
     execution_identity: ExecutionIdentity
     params: dict[str, Any] = field(default_factory=dict)
+    execution_identity_contract: ExecutionIdentityContract = field(default_factory=ExecutionIdentityContract)
 
 
 @dataclass(frozen=True)

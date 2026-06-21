@@ -57,6 +57,28 @@ def test_skill_registry_payload_maps_capability_to_skills() -> None:
     assert approval_skills["approval.approve"]["provider_binding_count"] == 1
 
 
+def test_skill_registry_payload_freezes_execution_identity_contracts() -> None:
+    payload = CapabilityRegistryBuilder(company_id="company-1").skill_registry_payload()
+    capability_map = {item["capability_id"]: item for item in payload["capabilities"]}
+
+    task_update_skills = {skill["skill_id"]: skill for skill in capability_map["task_update"]["skills"]}
+    task_complete_identity = task_update_skills["task.complete_task"]["identity_contract"]
+    assert task_complete_identity["actor_identity"] == "USER"
+    assert task_complete_identity["credential_mode"] == "USER_TOKEN"
+    assert task_complete_identity["requires_authorization"] is True
+
+    approval_approve_skills = {skill["skill_id"]: skill for skill in capability_map["approval_approve"]["skills"]}
+    approval_approve_identity = approval_approve_skills["approval.approve"]["identity_contract"]
+    assert approval_approve_identity["actor_identity"] == "USER"
+    assert approval_approve_identity["credential_mode"] == "USER_TOKEN"
+
+    approval_query_skills = {skill["skill_id"]: skill for skill in capability_map["approval_query"]["skills"]}
+    approval_query_identity = approval_query_skills["approval.list_pending"]["identity_contract"]
+    assert approval_query_identity["actor_identity"] == "BOT"
+    assert approval_query_identity["credential_mode"] == "TENANT_TOKEN"
+    assert approval_query_identity["requires_authorization"] is False
+
+
 def test_governance_payload_accepts_findings_and_provider_health() -> None:
     builder = CapabilityRegistryBuilder(
         company_id="company-1",
@@ -108,6 +130,32 @@ def test_consistency_report_and_migration_assessment_are_available() -> None:
     assert "skill_registry" in assessment["ready_pages"]
     assert "governance_center" in assessment["ready_pages"]
     assert "system_diagnostics" in assessment["ready_pages"]
+
+
+def test_registry_health_is_healthy_after_skill_cleanup() -> None:
+    payload = CapabilityRegistryBuilder(company_id="company-1").build()
+    health = payload["registry_health"]
+
+    assert health["status"] == "healthy"
+    assert health["missing_capability"] == []
+    assert health["missing_skill"] == []
+    assert health["missing_provider"] == []
+    assert health["orphan_skills"] == []
+    assert health["orphan_provider"] == []
+
+
+def test_capability_lifecycle_guard_enforces_full_chain() -> None:
+    guard = CapabilityRegistryBuilder(company_id="company-1").lifecycle_guard_report()
+
+    assert guard == {
+        "status": "healthy",
+        "MissingDomainForCapability": [],
+        "MissingCapabilityForSkill": [],
+        "MissingSkillForRuntime": [],
+        "MissingProviderForSkill": [],
+        "OrphanSkill": [],
+        "OrphanProviderBinding": [],
+    }
 
 
 def test_mock_payload_can_drive_four_pages() -> None:
