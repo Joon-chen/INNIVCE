@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>审批工作台</title>
+  <link rel="stylesheet" href="/portal/assets/styles.css" />
+</head>
+<body>
+  <main class="portal">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">数字参谋</p>
+        <h1>审批工作台</h1>
+        <p>集中查看、判断和处理待审批事项。</p>
+      </div>
+      <button id="refreshBtn">刷新</button>
+    </header>
+
+    <section class="setup">
+      <label>
+        App Config ID
+        <input id="appConfigId" placeholder="飞书应用配置 ID" />
+      </label>
+      <label>
+        Open ID
+        <input id="openId" placeholder="当前用户 open_id" />
+      </label>
+      <label>
+        Admin Token
+        <input id="adminToken" placeholder="可留空" />
+      </label>
+    </section>
+
+    <section id="status" class="status">请输入参数后刷新。</section>
+
+    <section class="workspace">
+      <aside class="list">
+        <div class="section-title">待审批</div>
+        <div id="approvalList" class="approval-list"></div>
+      </aside>
+      <section class="detail">
+        <div class="section-title">详情</div>
+        <div id="approvalDetail" class="empty">选择一条审批查看详情。</div>
+      </section>
+    </section>
+  </main>
+  <section id="confirmSheet" class="confirm-sheet hidden">
+    <div class="confirm-card">
+      <h2 id="confirmTitle">确认操作</h2>
+      <p id="confirmSummary"></p>
+      <div class="confirm-actions">
+        <button id="confirmCancel" class="secondary">取消</button>
+        <button id="confirmSubmit">确认提交</button>
+      </div>
+    </div>
+  </section>
+  <script src="/portal/assets/app.js"></script>
+</body>
+</html>

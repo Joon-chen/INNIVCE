@@ -1,0 +1,11 @@
+from fastapi import APIRouter
+
+from app.api.routes.v5_administration_org_routes import router as administration_org_router
+from app.api.routes.v5_administration_permission_routes import router as administration_permission_router
+from app.api.routes.v5_administration_user_setting_routes import router as administration_user_setting_router
+
+router = APIRouter()
+
+router.include_router(administration_user_setting_router)
+router.include_router(administration_org_router)
+router.include_router(administration_permission_router)

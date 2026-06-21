@@ -1,0 +1,26 @@
+from fastapi import APIRouter
+
+from app.api.routes.feishu_admin_read_tool_approval_routes import router as read_tool_approval_router
+from app.api.routes.feishu_admin_read_tool_bitable_routes import router as read_tool_bitable_router
+from app.api.routes.feishu_admin_read_tool_calendar_routes import router as read_tool_calendar_router
+from app.api.routes.feishu_admin_read_tool_contact_routes import router as read_tool_contact_router
+from app.api.routes.feishu_admin_read_tool_drive_routes import router as read_tool_drive_router
+from app.api.routes.feishu_admin_read_tool_im_routes import router as read_tool_im_router
+from app.api.routes.feishu_admin_read_tool_knowledge_routes import router as read_tool_knowledge_router
+from app.api.routes.feishu_admin_read_tool_mail_routes import router as read_tool_mail_router
+from app.api.routes.feishu_admin_read_tool_meeting_routes import router as read_tool_meeting_router
+from app.api.routes.feishu_admin_read_tool_task_routes import router as read_tool_task_router
+from app.api.routes.feishu_admin_read_tool_wiki_routes import router as read_tool_wiki_router
+
+router = APIRouter()
+router.include_router(read_tool_approval_router)
+router.include_router(read_tool_bitable_router)
+router.include_router(read_tool_calendar_router)
+router.include_router(read_tool_contact_router)
+router.include_router(read_tool_drive_router)
+router.include_router(read_tool_im_router)
+router.include_router(read_tool_knowledge_router)
+router.include_router(read_tool_mail_router)
+router.include_router(read_tool_meeting_router)
+router.include_router(read_tool_task_router)
+router.include_router(read_tool_wiki_router)

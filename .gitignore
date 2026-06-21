@@ -1,0 +1,8 @@
+# Tool-Manage root .gitignore
+.DS_Store
+.codex-tmp/
+.homebrew-cache/
+homebrew/
+bin/
+tools/
+*.local

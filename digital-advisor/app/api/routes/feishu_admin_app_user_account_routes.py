@@ -1,0 +1,9 @@
+from fastapi import APIRouter
+
+from app.api.routes.feishu_admin_app_user_account_list_routes import router as admin_app_user_account_list_router
+from app.api.routes.feishu_admin_app_user_account_refresh_routes import router as admin_app_user_account_refresh_router
+
+router = APIRouter()
+
+router.include_router(admin_app_user_account_list_router)
+router.include_router(admin_app_user_account_refresh_router)

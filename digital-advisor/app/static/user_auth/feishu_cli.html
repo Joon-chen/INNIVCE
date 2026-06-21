@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>大飞哥个人能力授权</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #172033;
+      --muted: #667085;
+      --line: #e6e8ee;
+      --accent: #111827;
+      --ok: #067647;
+      --warn: #b54708;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    main {
+      width: min(560px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 18px 60px rgba(17, 24, 39, 0.08);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .identity {
+      margin: 20px 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 110px 1fr;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row span { color: var(--muted); }
+    .row strong {
+      overflow-wrap: anywhere;
+      font-weight: 600;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 18px 0;
+    }
+    button, a.button {
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      padding: 12px 16px;
+      font-size: 15px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button.secondary, a.button.secondary {
+      background: #eef0f4;
+      color: var(--text);
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #qrWrap {
+      display: none;
+      margin: 18px 0;
+      text-align: center;
+    }
+    #qrWrap img {
+      width: min(260px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #fff;
+    }
+    #status {
+      margin-top: 18px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #f3f4f6;
+      color: var(--muted);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 14px;
+    }
+    #status.ok { background: #ecfdf3; color: var(--ok); }
+    #status.warn { background: #fffaeb; color: var(--warn); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>大飞哥个人能力授权</h1>
+    <p>授权后，大飞哥才能按你本人原始授权范围读取个人飞书、日程、待办、审批等用户级资源。系统只能收紧权限，不能扩大权限。</p>
+
+    <div class="identity">
+      <div class="row"><span>公司</span><strong id="companyId">-</strong></div>
+      <div class="row"><span>飞书身份</span><strong id="openId">-</strong></div>
+      <div class="row"><span>授权方式</span><strong>Feishu CLI 用户级整体授权</strong></div>
+    </div>
+
+    <div class="actions">
+      <button id="startBtn">开始授权</button>
+      <button id="completeBtn" class="secondary" disabled>我已完成授权</button>
+      <a id="verifyLink" class="button secondary" href="#" target="_blank" rel="noreferrer" style="display:none">打开授权链接</a>
+    </div>
+
+    <div id="qrWrap">
+      <img id="qrCode" alt="飞书授权二维码" />
+      <p>请使用资源所有者本人的飞书账号扫码或打开授权链接。</p>
+    </div>
+
+    <div id="status">正在准备授权信息...</div>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const companyId = params.get("company_id") || "";
+    const openId = params.get("open_id") || "";
+    let deviceCode = "";
+
+    const els = {
+      companyId: document.getElementById("companyId"),
+      openId: document.getElementById("openId"),
+      startBtn: document.getElementById("startBtn"),
+      completeBtn: document.getElementById("completeBtn"),
+      verifyLink: document.getElementById("verifyLink"),
+      qrWrap: document.getElementById("qrWrap"),
+      qrCode: document.getElementById("qrCode"),
+      status: document.getElementById("status"),
+    };
+
+    els.companyId.textContent = companyId || "缺少 company_id";
+    els.openId.textContent = openId || "缺少 open_id";
+    els.startBtn.addEventListener("click", startAuthorization);
+    els.completeBtn.addEventListener("click", completeAuthorization);
+
+    if (!companyId || !openId) {
+      setStatus("授权链接缺少 company_id 或 open_id。请从大飞哥机器人发送的授权卡片进入。", "warn");
+      els.startBtn.disabled = true;
+    } else {
+      startAuthorization();
+    }
+
+    async function startAuthorization() {
+      els.startBtn.disabled = true;
+      setStatus("正在生成授权二维码...");
+      try {
+        const result = await api("/api/user-identity/oauth/feishu/cli/start", {
+          company_id: companyId,
+          open_id: openId,
+        });
+        deviceCode = result.device_code || "";
+        if (result.qr_code_data_url) {
+          els.qrCode.src = result.qr_code_data_url;
+          els.qrWrap.style.display = "block";
+        }
+        if (result.verification_url) {
+          els.verifyLink.href = result.verification_url;
+          els.verifyLink.style.display = "inline-flex";
+        }
+        els.completeBtn.disabled = !deviceCode;
+        setStatus("请完成飞书授权。授权完成后，点击“我已完成授权”。");
+      } catch (error) {
+        els.startBtn.disabled = false;
+        setStatus(error.message, "warn");
+      }
+    }
+
+    async function completeAuthorization() {
+      if (!deviceCode) {
+        setStatus("缺少本次授权 device_code，请重新开始授权。", "warn");
+        return;
+      }
+      els.completeBtn.disabled = true;
+      setStatus("正在确认授权身份...");
+      try {
+        const result = await api("/api/user-identity/oauth/feishu/cli/complete", {
+          company_id: companyId,
+          open_id: openId,
+          device_code: deviceCode,
+        });
+        const match = result.identity_match === true ? "身份一致" : "CLI 未返回 open_id，已按兼容模式完成";
+        setStatus(`授权完成：${match}\n你现在可以回到飞书，继续向大飞哥提问。`, "ok");
+      } catch (error) {
+        els.completeBtn.disabled = false;
+        setStatus(error.message, "warn");
+      }
+    }
+
+    async function api(path, body) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(JSON.stringify(data, null, 2) || response.statusText);
+      }
+      return data;
+    }
+
+    function setStatus(text, kind = "") {
+      els.status.className = kind;
+      els.status.textContent = text;
+    }
+  </script>
+</body>
+</html>

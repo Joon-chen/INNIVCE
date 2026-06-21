@@ -1,0 +1,11 @@
+from fastapi import APIRouter
+
+from app.api.routes.v5_administration_bootstrap_routes import router as administration_bootstrap_router
+from app.api.routes.v5_administration_entrypoint_status_routes import router as administration_entrypoint_status_router
+from app.api.routes.v5_administration_os_overview_routes import router as administration_os_overview_router
+
+router = APIRouter()
+
+router.include_router(administration_bootstrap_router)
+router.include_router(administration_os_overview_router)
+router.include_router(administration_entrypoint_status_router)

@@ -1,0 +1,11 @@
+from fastapi import APIRouter
+
+from app.api.routes.v5_intelligence_business_item_routes import router as intelligence_business_item_router
+from app.api.routes.v5_intelligence_low_signal_routes import router as intelligence_low_signal_router
+from app.api.routes.v5_intelligence_risk_noise_routes import router as intelligence_risk_noise_router
+
+router = APIRouter()
+
+router.include_router(intelligence_risk_noise_router)
+router.include_router(intelligence_low_signal_router)
+router.include_router(intelligence_business_item_router)
