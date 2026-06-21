@@ -15,7 +15,7 @@ Enterprise AI OS 的目标不是把一堆工具接进聊天窗口，而是让企
 变成：
 
 ```text
-系统感知事实 -> 系统整理证据 -> 系统形成认知 -> 系统建议动作 -> 人确认关键判断
+系统感知事实 -> 系统整理证据 -> 系统形成认知 -> 系统产生洞察 -> 洞察驱动动作 -> 人确认关键判断
 ```
 
 AI OS 必须减少管理者负担，而不是制造新的信息负担。
@@ -58,7 +58,7 @@ Cognitive Foundation
 其中 Cognitive Foundation 是企业认知底座：
 
 ```text
-WorkEvent -> Evidence -> Snapshot -> MemoryCandidate -> Memory
+WorkEvent -> Evidence -> Snapshot -> MemoryCandidate -> Memory -> Insight
 ```
 
 V1 已建立：
@@ -70,6 +70,7 @@ V1 已建立：
 下一步要补齐：
 
 - Evidence：证据层
+- Insight：洞察层，负责把认知转成可解释的行动理由
 
 ## 4. Evidence Layer
 
@@ -209,10 +210,12 @@ Approval 是第一条样板，因为它同时覆盖：
 但 Approval 的目标不是做审批工具，而是验证 AI OS 的通用闭环：
 
 ```text
-WorkEvent -> Evidence -> Snapshot -> Interaction -> Runtime Action -> MemoryCandidate
+WorkEvent -> Evidence -> Snapshot -> MemoryCandidate -> Insight -> Runtime Action
 ```
 
 审批中出现的 `widget...` 问题，本质不是审批问题，而是 Evidence Layer 缺失问题。
+
+完整 OA Intelligence Loop 见 `docs/OA_INTELLIGENCE_LOOP_DESIGN.md`。
 
 ## 9. Current Phase
 

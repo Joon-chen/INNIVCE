@@ -6,6 +6,7 @@
 企业 AI OS 顶层定义见 `docs/ENTERPRISE_AI_OS_V1.md`。
 企业认知底座 V1 见 `docs/ENTERPRISE_COGNITIVE_FOUNDATION_V1.md`。
 Snapshot 生成节奏见 `docs/SNAPSHOT_TRIGGER_MATRIX.md`。
+OA 智能闭环设计见 `docs/OA_INTELLIGENCE_LOOP_DESIGN.md`。
 历史阶段归档见 `docs/history/`。
 
 ## 当前阶段
@@ -13,36 +14,40 @@ Snapshot 生成节奏见 `docs/SNAPSHOT_TRIGGER_MATRIX.md`。
 当前进入：
 
 ```text
-Enterprise Evidence Layer V1
+OA Intelligence Loop Design Phase
 ```
 
 背景：
 
-Approval Runtime Sample 和 Cognitive Foundation V1 已建立，但系统仍缺少通用 Evidence Layer。
+Approval Runtime Sample、Cognitive Foundation V1 和 Approval Evidence 样板已建立。
 
-没有 Evidence Layer，AI 会直接面对原始业务系统数据，例如飞书表单 widget、OCR 片段、附件残缺文本；管理者也会看到技术噪音。这会让 AI OS 退化成“把复杂性转交给人”。
+下一步不是把审批继续做成单点工具，而是明确 Digital Advisor 如何通过飞书 OA 原始数据长期沉淀企业认知，并把认知反哺到员工日常 OA 工作中。
+
+关键调整：
+
+Action 不直接由 AI 或 Snapshot 驱动，而是由 Insight 驱动。
 
 ## 当前目标
 
-建立 AI OS 的通用证据层：
+建立 AI OS 的通用智能闭环：
 
 ```text
-Raw System Data
+OA Raw Data
+-> WorkEvent
 -> Evidence
 -> Snapshot
--> Interaction
--> Runtime Action
+-> MemoryCandidate
+-> Insight
+-> Action
 ```
 
-先以 Approval 作为第一条样板验证：
+本阶段目标：
 
-- Evidence Contract。
-- Approval Form Evidence。
-- Approval Attachment Evidence。
-- Approval Expense Evidence。
-- Snapshot Builder 消费 Evidence，而不是 raw widget form。
-- Portal / Card 展示 Evidence Summary，不展示技术解析噪音。
-- Detail / Portal 支持展开 Evidence 明细，尽量在 AI OS 内完成核对和处理，不默认跳回飞书原生页面。
+- 定义 OA Intelligence Loop。
+- 明确 Insight 与 Evidence / Snapshot / MemoryCandidate / Action 的边界。
+- 明确 `Insight -> Action` 是动作前置原则。
+- 明确 AI OS 优先在 Bot + Detail View + Management Portal 内闭环。
+- 保持 Approval 只是第一条样板，不把审批变成系统边界。
 
 ## 当前禁止范围
 
@@ -53,6 +58,7 @@ Raw System Data
 - Workflow Engine。
 - Memory Engine。
 - Insight Engine。
+- 跨业务 Action 实现。
 - 跨业务全量实现。
 - Task / Mail / Meeting / Customer 业务开发。
 - Batch Approval。
@@ -64,18 +70,19 @@ Raw System Data
 ## 当前验收标准
 
 - AI OS 层面能区分 Raw Data、Evidence、Snapshot。
+- AI OS 层面能区分 Evidence、Snapshot、Insight、Action。
 - 管理者不再看到 `widget...`、JSON 结构异常、OCR 原始噪音。
 - 技术解析失败被表达为 Evidence quality，不直接等同业务高风险。
 - Snapshot 原因来自 Evidence Summary。
 - Interaction 展示 Live Data + Evidence Summary + Snapshot Judgment。
 - 管理者能直接知道：能不能处理、缺什么、下一步怎么做。
 - 管理者能在详情页核对费用明细和附件基本情况，用于判断证据冲突。
+- Action 必须由 Insight 驱动，不能直接由 raw data 或 snapshot 驱动。
 
 ## 下一步计划
 
-1. 冻结 Evidence Contract V1。
-2. 实现 Approval Form Normalizer V0。
-3. 实现 Approval Expense Evidence Builder V0。
-4. 让 Approval Snapshot Builder 消费 Evidence。
-5. 让 Portal Detail 展示 Evidence Summary。
-6. 让 Portal Detail 展开费用明细和附件基本情况。
+1. 冻结 OA Intelligence Loop Design。
+2. 定义 Insight Contract V0。
+3. 定义 Approval Insight Sample。
+4. 明确 Insight 如何驱动 Runtime Action。
+5. 再决定是否进入 Insight Engine V0。
