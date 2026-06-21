@@ -47,13 +47,19 @@ class FeishuApprovalService:
         *,
         open_id: str | None,
         limit: int = 8,
+        enrich_details: bool = True,
     ) -> dict[str, Any]:
         if not open_id:
             return {"available": False, "items": [], "error": "缺少 open_id，无法精确查询待审批任务"}
 
         resources = self.list_approval_resources(db)
         names_by_code = {item.approval_code: item.approval_name for item in resources}
-        live_result = await self.fetch_user_pending_tasks(open_id=open_id, limit=limit, names_by_code=names_by_code)
+        live_result = await self.fetch_user_pending_tasks(
+            open_id=open_id,
+            limit=limit,
+            names_by_code=names_by_code,
+            enrich_details=enrich_details,
+        )
         if live_result["available"]:
             return live_result
 
@@ -90,7 +96,8 @@ class FeishuApprovalService:
                     break
 
         if items:
-            await self.enrich_tasks_with_instance_details(items)
+            if enrich_details:
+                await self.enrich_tasks_with_instance_details(items)
             return {"available": True, "items": items, "errors": errors}
         if errors:
             return {"available": False, "items": [], "error": errors[0]}
@@ -102,6 +109,7 @@ class FeishuApprovalService:
         open_id: str,
         limit: int,
         names_by_code: dict[str, str],
+        enrich_details: bool = True,
     ) -> dict[str, Any]:
         params = {
             "user_id": open_id,
@@ -123,7 +131,8 @@ class FeishuApprovalService:
                 item.setdefault("approval_name", names_by_code.get(code, code))
             else:
                 item.setdefault("approval_name", "审批")
-        await self.enrich_tasks_with_instance_details(items)
+        if enrich_details:
+            await self.enrich_tasks_with_instance_details(items)
         return {"available": True, "items": items}
 
     async def query_tasks(

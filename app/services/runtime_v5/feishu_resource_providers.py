@@ -400,6 +400,7 @@ class FeishuApprovalProvider(FeishuResourceProvider):
                     self.db,
                     open_id=open_id,
                     limit=limit,
+                    enrich_details=False,
                 )
             )
         except Exception as exc:
@@ -431,13 +432,7 @@ class FeishuApprovalProvider(FeishuResourceProvider):
                 enriched_item.setdefault("title", detail_name)
             metadata["detail_loaded"] = True
 
-        step_started = perf_counter()
-        attachment_results = self._read_approval_attachments(request, raw_item)
-        metadata["substeps"].append({"step": "approval_attachments", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success" if attachment_results else "empty", "count": len(attachment_results)})
-        if attachment_results:
-            raw_item["_attachment_results"] = attachment_results
-            enriched_item["_attachment_results"] = attachment_results
-            metadata["attachment_read_count"] = len(attachment_results)
+        metadata["substeps"].append({"step": "approval_attachments", "duration_ms": 0, "status": "skipped_async", "count": 0})
 
         enriched_item["raw"] = raw_item
         return enriched_item, metadata

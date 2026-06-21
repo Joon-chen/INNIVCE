@@ -2683,6 +2683,44 @@ def test_extract_approval_task_items_accepts_feishu_task_list() -> None:
     assert _extract_approval_task_items(data) == [{"task_id": "task_1"}, {"task_id": "task_2"}]
 
 
+def test_fetch_user_pending_tasks_can_skip_instance_detail_enrichment() -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.paths = []
+
+        async def api_get(self, path, params=None):
+            self.paths.append(path)
+            if path == "/open-apis/approval/v4/tasks/query":
+                return {
+                    "data": {
+                        "task_list": [
+                            {
+                                "task_id": "task_1",
+                                "process_code": "approval-1",
+                                "definition_code": "definition-1",
+                            }
+                        ]
+                    }
+                }
+            raise AssertionError(f"unexpected detail fetch: {path}")
+
+    client = FakeClient()
+    service = FeishuApprovalService(None, client=client)
+
+    result = asyncio.run(
+        service.fetch_user_pending_tasks(
+            open_id="ou_user",
+            limit=20,
+            names_by_code={"definition-1": "报销审批"},
+            enrich_details=False,
+        )
+    )
+
+    assert result["available"] is True
+    assert result["items"][0]["approval_name"] == "报销审批"
+    assert client.paths == ["/open-apis/approval/v4/tasks/query"]
+
+
 def test_format_pending_approval_tasks_is_personal_pending_list() -> None:
     lines = _format_pending_approval_tasks(
         [
