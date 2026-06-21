@@ -16,6 +16,7 @@ from app.services.runtime_v5.feishu_resource_providers import (
     FeishuApprovalProvider,
     _approval_assessment,
     _approval_item,
+    _approval_snapshot_risk_level,
 )
 
 
@@ -331,6 +332,44 @@ def test_approval_analysis_completed_writes_snapshot() -> None:
         }
     }
     assert raw_item["_approval_snapshot"]["status"] == "completed"
+
+
+def test_approval_snapshot_risk_level_treats_missing_parse_as_review() -> None:
+    risk_level = _approval_snapshot_risk_level(
+        {
+            "suggestion": "补充后再审",
+            "detailed_reason": "费用明细字段格式异常，无法准确判断费用项目；建议申请人补充清晰完整的费用明细。",
+        }
+    )
+
+    assert risk_level == "review"
+
+
+def test_approval_snapshot_risk_level_keeps_strong_risk_as_high() -> None:
+    risk_level = _approval_snapshot_risk_level(
+        {
+            "suggestion": "补充后再审",
+            "detailed_reason": "无票据支撑，存在虚假报销或费用归属不清风险。",
+        }
+    )
+
+    assert risk_level == "high"
+
+
+def test_approval_assessment_normalizes_legacy_high_snapshot_without_strong_signal() -> None:
+    assessment = _approval_assessment(
+        {
+            "_approval_snapshot": {
+                "status": "completed",
+                "recommendation": "补充后再审",
+                "risk_level": "high",
+                "reasons": ["费用明细字段格式异常，建议申请人补充清晰完整的费用明细。"],
+            }
+        },
+        attachment_results=[],
+    )
+
+    assert assessment["risk_level"] == "review"
 
 
 def test_approval_pending_snapshot_only_stores_cognitive_state() -> None:

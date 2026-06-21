@@ -184,6 +184,10 @@ function approvalRiskCounts() {
 }
 
 function approvalRiskGroup(item) {
+  const riskLevel = String(item.assessment?.risk_level || item.risk_level || "").toLowerCase();
+  if (["pass", "low"].includes(riskLevel)) return "pass";
+  if (["high", "critical"].includes(riskLevel)) return "hold";
+  if (["review", "medium", "pending"].includes(riskLevel)) return "review";
   const suggestion = String(suggestionOf(item) || "");
   if (["可通过", "可初步通过"].includes(suggestion)) return "pass";
   if (["拒绝", "补充后再审"].includes(suggestion)) return "hold";

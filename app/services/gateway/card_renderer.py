@@ -996,6 +996,13 @@ def _approval_workbench_grouped_items(items: tuple[dict[str, Any], ...]) -> dict
 
 def _approval_workbench_group_key(item: dict[str, Any]) -> str:
     assessment = item.get("assessment") if isinstance(item.get("assessment"), dict) else {}
+    risk_level = str(assessment.get("risk_level") or "").strip().lower()
+    if risk_level in {"pass", "low"}:
+        return "pass"
+    if risk_level in {"high", "critical"}:
+        return "hold"
+    if risk_level in {"review", "medium", "pending"}:
+        return "review"
     suggestion = str(assessment.get("suggestion") or "")
     if suggestion in {"可通过", "可初步通过"}:
         return "pass"

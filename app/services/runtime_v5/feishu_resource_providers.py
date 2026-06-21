@@ -3475,11 +3475,20 @@ def _approval_assessment(raw: dict[str, Any], *, attachment_results: list[Any]) 
         if snapshot.get("status") == "completed":
             reasons = snapshot.get("reasons") if isinstance(snapshot.get("reasons"), list) else []
             reason = "；".join(str(item) for item in reasons if str(item).strip())
+            suggestion = str(snapshot.get("recommendation") or "需关注")
+            snapshot_assessment = {
+                "suggestion": suggestion,
+                "reason": reason or str(snapshot.get("summary") or ""),
+                "detailed_reason": reason or str(snapshot.get("summary") or ""),
+            }
+            risk_level = str(snapshot.get("risk_level") or "review")
+            if suggestion == "补充后再审" and risk_level == "high" and not _approval_assessment_has_high_risk_signal(snapshot_assessment):
+                risk_level = "review"
             return {
-                "suggestion": str(snapshot.get("recommendation") or "需关注"),
+                "suggestion": suggestion,
                 "reason": reason or str(snapshot.get("summary") or "已完成审批分析"),
                 "detailed_reason": reason or str(snapshot.get("summary") or ""),
-                "risk_level": str(snapshot.get("risk_level") or "review"),
+                "risk_level": risk_level,
                 "source": "snapshot",
             }
         return {
@@ -3585,9 +3594,41 @@ def _approval_snapshot_risk_level(assessment: dict[str, Any]) -> str:
     suggestion = str(assessment.get("suggestion") or "")
     if suggestion in {"可通过", "可初步通过"}:
         return "pass"
-    if suggestion in {"拒绝", "补充后再审"}:
+    if suggestion == "拒绝":
+        return "high"
+    if suggestion == "补充后再审" and _approval_assessment_has_high_risk_signal(assessment):
         return "high"
     return "review"
+
+
+def _approval_assessment_has_high_risk_signal(assessment: dict[str, Any]) -> bool:
+    values: list[str] = []
+    for key in ("detailed_reason", "reason"):
+        value = str(assessment.get(key) or "").strip()
+        if value:
+            values.append(value)
+    for key in ("risk_points", "reasons"):
+        value = assessment.get(key)
+        if isinstance(value, list):
+            values.extend(str(item) for item in value if str(item).strip())
+    text = "；".join(values)
+    if not text:
+        return False
+    high_terms = (
+        "虚假",
+        "伪造",
+        "无票据支撑",
+        "无法核实",
+        "无法验证",
+        "资金风险",
+        "重复报销",
+        "超预算",
+        "不属于公司业务",
+        "明显冲突",
+        "重大风险",
+        "高风险",
+    )
+    return any(term in text for term in high_terms)
 
 
 def _approval_snapshot_reasons(assessment: dict[str, Any]) -> list[str]:
