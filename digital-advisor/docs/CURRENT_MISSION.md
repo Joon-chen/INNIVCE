@@ -16,29 +16,29 @@ Task Runtime Sample 已完成 `task_query` / `task_complete` 的最小闭环合�
 
 本阶段验证真实飞书写入缺少用户授权时，Bot 能否展示授权入口，并在授权后重试同一动作。
 
-当前已完成 Runtime V5 授权卡接入：
+当前链路：
 
 ```text
-ProviderResult.waiting_authorization
-→ RuntimeResult.authorization
-→ InteractionPayload.authorization
-→ Feishu Authorization Card
+Task Query
+→ RuntimeResult.task_list
+→ Feishu Task Card
+→ RuntimeActionInput
+→ Runtime
+→ Waiting Confirmation / Waiting Authorization
+→ Tool
+→ RuntimeResult
 ```
 
 已完成：
 
-- `waiting_authorization` 保留为 Runtime Result Type，不再被折回普通 `task_complete`。
-- RuntimeResult 标准输出 `metadata.authorization`。
-- RuntimeResult 标准输出 `authorize_user_identity` action。
-- InteractionPayload 标准输出 `payload_type = authorization`。
-- 授权入口指向 `/api/user-identity/oauth/feishu/start`。
-- Card / Portal 只需渲染 InteractionPayload，不需要解释 Provider 失败逻辑。
-- Feishu Gateway 可从 Runtime V5 Trace 中读取 `authorize_user_identity` action。
-- Runtime V5 授权等待会发送现有 User Identity Authorization Card，而不是普通文本。
+- `waiting_authorization` 保留为 Runtime Result Type。
+- RuntimeResult 输出 `metadata.authorization` 与 `authorize_user_identity` action。
+- Feishu Gateway 可发送现有 User Identity Authorization Card。
+- `RuntimeResult.task_list` 可渲染为飞书任务卡。
+- Task 卡片完成按钮只携带 `RuntimeActionInput`，不直接执行 Provider。
+- `runtime_action_input` 卡片 action 已接入 Runtime 主链路。
 
 ## 当前禁止范围
-
-本阶段不要做：
 
 - 全量 OAuth UI 改造。
 - 全量 Provider 迁移。
@@ -58,41 +58,36 @@ ProviderResult.waiting_authorization
 
 ## 当前验收标准
 
-- `ProviderResult.result_type = waiting_authorization` 可进入 RuntimeResult。
-- `RuntimeResult.status = waiting_authorization`。
-- `RuntimeResult.actions[0].action = authorize_user_identity`。
-- `InteractionPayload.payload_type = authorization`。
-- 授权 action 包含 `url / resource_type / channel / authorization_status`。
-- 交互层不生成授权 URL，不处理授权业务逻辑。
 - Feishu Gateway 能从 Runtime V5 RuntimeResult 发送授权卡。
-- 授权卡发送结果写入 Gateway audit payload。
+- Feishu Gateway 能从 Runtime V5 `task_list` 发送任务卡。
+- Card Action 必须进入 `RuntimeActionInput`，不得直连 Provider。
+- 缺少 USER_TOKEN 时必须返回 `waiting_authorization`。
 
 ## 当前验证
 
-已通过：
-
 ```text
-tests/test_execution_identity_user_token.py
-tests/test_runtime_v5.py
-tests/test_capability_registry_builder.py
-tests/test_v5_architecture.py
-tests/test_gateway_feishu.py
-ruff check
+tests/test_gateway_feishu.py::test_handle_feishu_command_sends_task_list_runtime_result_card
+tests/test_gateway_feishu.py::test_runtime_action_input_card_action_enters_runtime
+tests/test_gateway_feishu.py::test_build_runtime_result_card_renders_task_complete_action_input
+tests/test_runtime_v5.py::test_runtime_v5_task_complete_waiting_confirmation_executes_and_returns_task_complete
+tests/test_runtime_v5.py::test_runtime_v5_task_complete_failed_provider_returns_failed_task_complete
+tests/test_execution_identity_user_token.py::test_task_complete_missing_user_token_returns_waiting_authorization
+tests/test_execution_identity_user_token.py::test_task_complete_authorized_user_token_executes_task_provider
+tests/test_runtime_v5.py::test_runtime_v5_waiting_authorization_builds_authorization_interaction_payload
+py_compile: changed gateway/feishu files
+cloud health: ok
 ```
 
 已知未处理：
 
 - `tests/test_feishu_provider_boundary.py` 当前存在 Feishu API 路径/timeout/能力清单断言漂移，和本阶段 USER_TOKEN 变更无直接关系。
+- 当前部分旧文件仍有历史 `ruff E501/F401` 噪音，本阶段不做无关格式清理。
 
 ## 下一步计划
-
-下一步继续：
 
 ```text
 Real Feishu Manual Acceptance
 ```
-
-目标：
 
 - 在真实飞书中触发一次 `task_complete` 缺授权。
 - 验证 Bot/Card 是否展示授权入口。
