@@ -15,7 +15,7 @@ Task Runtime 样板合同评审见 `docs/TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`
 当前进入：
 
 ```text
-Enterprise Scope Model Review Phase
+Task Runtime Sample Contract Test Phase
 ```
 
 背景：
@@ -28,15 +28,17 @@ Capability Registry 项目已验收通过，并进入维护状态：
 
 ## 当前目标
 
-Task Runtime Sample 实现前，先冻结企业级 Scope Model。
+Enterprise Scope Model 已冻结，最小 Scope Contract 已落地。
 
 Digital Advisor 是企业数字参谋，不是个人助手。
 
-当前目标是统一 Query 范围：
+当前已冻结 Query 范围：
 
 ```text
 SELF / USER / TEAM / DEPARTMENT / COMPANY
 ```
+
+当前目标回到 Task Runtime Sample，先补合同测试，不做完整业务迁移。
 
 ## 当前禁止范围
 
@@ -57,21 +59,20 @@ SELF / USER / TEAM / DEPARTMENT / COMPANY
 - Task Snapshot / Insight 实现。
 - Task Create WAITING_INPUT 实现。
 - Task Runtime Sample 实现。
+- Task UI / Portal / SidePanel 迁移。
 
 ## 当前验收标准
 
-- 输出 Enterprise Scope Model Review。
-- 冻结 `SELF / USER / TEAM / DEPARTMENT / COMPANY`。
-- 明确 Scope 数据模型。
-- 明确 Scope -> Permission 映射。
-- 输出 Task / Approval / People / Business Query Scope Matrix。
-- 明确 RuntimeActionInput 是否需要 Scope。
-- 明确 RuntimeResult 是否需要 Scope。
-- 明确对 Task Runtime Contract 的影响。
-- 不修改运行代码、数据库或业务逻辑。
+- `RuntimeResult.metadata.scope_context` 已存在。
+- `RuntimeActionInput.metadata.scope_context` 可透传。
+- 普通员工 COMPANY scoped query 被 Policy 拒绝。
+- 输出 `task_query` / `task_complete` Contract Test。
+- 收敛 `complete_task` vs `task_complete` 命名。
+- 不修改数据库。
+- 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 进入 Enterprise Scope Contract Test Phase。
-2. 先补 Scope Contract Test。
-3. 再回到 Task Runtime Sample Contract Test Phase。
+1. 补 `task_query` Contract Test。
+2. 补 `task_complete` Contract Test。
+3. 只做最小命名收敛，不做 UI / Snapshot / Insight。
