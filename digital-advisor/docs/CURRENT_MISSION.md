@@ -8,6 +8,7 @@ Capability Registry 模型见 `docs/CAPABILITY_REGISTRY_MODEL.md`。
 Registry fallback 退役评审见 `docs/REGISTRY_FALLBACK_DEPRECATION_REVIEW.md`。
 Task 认知样板设计见 `docs/TASK_COGNITIVE_SAMPLE_DESIGN.md`。
 Task Runtime 样板合同评审见 `docs/TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`。
+Task Runtime 样板验收评审见 `docs/TASK_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md`。
 企业级 Scope 模型评审见 `docs/ENTERPRISE_SCOPE_MODEL_REVIEW.md`。
 
 ## 当前阶段
@@ -15,7 +16,7 @@ Task Runtime 样板合同评审见 `docs/TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`
 当前进入：
 
 ```text
-Task Runtime Sample Minimal Implementation Completed
+Task Runtime Sample Acceptance Review Completed
 ```
 
 背景：
@@ -38,7 +39,7 @@ Digital Advisor 是企业数字参谋，不是个人助手。
 SELF / USER / TEAM / DEPARTMENT / COMPANY
 ```
 
-Task Runtime Sample 最小闭环已完成。
+Task Runtime Sample 验收评审已完成。
 
 当前已验证：
 
@@ -51,6 +52,14 @@ task_query
 task_complete
 → InteractionPayload feedback
 ```
+
+真实 Feishu Task 只读抽样已验证：
+
+```text
+guid / summary / status / url
+```
+
+当前 Provider/RuntimeResult 可以把真实 `guid` 转成 `RuntimeActionInput.target.task_guid`。
 
 ## 当前禁止范围
 
@@ -83,11 +92,13 @@ task_complete
 - `task_complete` 可通过 Runtime State 执行并返回 `RuntimeResult`。
 - `InteractionPayload` 只消费 `RuntimeResult` 并输出 feedback。
 - `complete_task` 已收敛为 Runtime result_type `task_complete`。
+- 真实 Feishu Task 只读样本字段已验证。
+- 真实 Feishu `complete_task` 写操作尚未验收。
 - 不修改数据库。
 - 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 进入 Task Runtime Sample Acceptance Review。
-2. 检查真实 Feishu Task Provider 数据字段是否足够支撑完成动作。
+1. 进入 Task Runtime Sample Feishu Manual Acceptance。
+2. 准备一条明确可完成的测试任务，验证真实完成动作。
 3. 继续禁止 Task Portal / Insight / Snapshot 扩展。

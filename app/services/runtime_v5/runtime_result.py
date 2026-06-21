@@ -252,7 +252,7 @@ def _task_complete_action(
         confirmed=False,
         confirmation_token=action_id,
         source_ui="card",
-        message=f"完成任务：{title}" if title else "完成任务",
+        message="完成任务",
         sources=("task",),
         metadata={"scope_context": scope_context or {"scope": "SELF", "company_id": company_id, "filters": {}}},
     )

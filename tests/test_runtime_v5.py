@@ -185,7 +185,14 @@ def test_runtime_v5_task_query_to_complete_closes_runtime_interaction_loop() -> 
                     status="success",
                     result_type="task_list",
                     count=1,
-                    items=({"title": "跟进客户", "task_guid": "task/1"},),
+                    items=(
+                        {
+                            "summary": "明天提醒我跟进客户合同",
+                            "guid": "26c359e1-8e45-4faa-b3b6-34a87fdff1a0",
+                            "status": "todo",
+                            "url": "https://applink.feishu.cn/client/todo/detail?guid=26c359e1-8e45-4faa-b3b6-34a87fdff1a0",
+                        },
+                    ),
                     answer="你有 1 条任务。",
                 )
             calls.append((request.operation, request.params["task_guid"]))
@@ -208,7 +215,7 @@ def test_runtime_v5_task_query_to_complete_closes_runtime_interaction_loop() -> 
     assert runtime_result["result_type"] == "task_list"
     assert runtime_result["actions"][0]["action"] == "task_complete"
     assert action_input["intent"] == "task_complete"
-    assert action_input["target"]["task_guid"] == "task/1"
+    assert action_input["target"]["task_guid"] == "26c359e1-8e45-4faa-b3b6-34a87fdff1a0"
     assert action_input["context"]["company_id"] == runtime_result["metadata"]["company_id"]
     interaction_payload = interaction_payload_from_runtime_result(runtime_result_from_payload(runtime_result))
     assert interaction_payload.actions[0]["runtime_action_input"] == action_input
@@ -237,7 +244,7 @@ def test_runtime_v5_task_query_to_complete_closes_runtime_interaction_loop() -> 
         providers={"task": TaskProvider()},
     )
 
-    assert calls == [("complete_task", "task/1")]
+    assert calls == [("complete_task", "26c359e1-8e45-4faa-b3b6-34a87fdff1a0")]
     assert completed.composed.result_context is not None
     assert completed.composed.result_context.result_type == "task_complete"
     runtime_result = completed.composed.metadata["runtime_result"]
