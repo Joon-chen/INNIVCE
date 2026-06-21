@@ -1,5 +1,7 @@
 # Enterprise Cognitive Foundation V1
 
+V1 冻结结论见 `docs/ECF_V1_FREEZE_REVIEW.md`。
+
 本文档定义 Digital Advisor 企业认知系统的最小闭环。Approval 是第一条样板链路，但本阶段目标不是做审批专属缓存，而是建立可复制到 Task / Meeting / Customer 的认知数据底座。
 
 ## 1. 目标
