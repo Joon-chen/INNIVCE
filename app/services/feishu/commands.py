@@ -315,13 +315,20 @@ async def handle_feishu_command_result(
             actions=user_identity_authorization_actions,
         )
         if not authorization_card_sent:
-            await feishu_replies.send_smart_reply(
+            runtime_result_reply = await _send_runtime_result_card_if_supported(
                 app_config=app_config,
                 reply_target=reply_target,
-                reply=reply,
-                route_path=getattr(dispatch_result, "route_path", None),
+                trace_payload=dispatch_result.agent_runtime_trace,
                 chat_id=chat_id,
             )
+            if runtime_result_reply is None:
+                await feishu_replies.send_smart_reply(
+                    app_config=app_config,
+                    reply_target=reply_target,
+                    reply=reply,
+                    route_path=getattr(dispatch_result, "route_path", None),
+                    chat_id=chat_id,
+                )
     result = FeishuCommandResult(
         handled=True,
         status="handled",
@@ -454,6 +461,33 @@ def _trace_value(trace_payload: dict[str, Any] | None, key: str) -> Any:
     if not isinstance(trace_payload, dict):
         return None
     return trace_payload.get(key)
+
+
+async def _send_runtime_result_card_if_supported(
+    *,
+    app_config: FeishuAppConfig,
+    reply_target: dict[str, str],
+    trace_payload: dict[str, Any] | None,
+    chat_id: str | None,
+) -> dict[str, Any] | None:
+    runtime_result = _runtime_result_from_trace(trace_payload)
+    if not runtime_result:
+        return None
+    return await feishu_replies.send_runtime_result_reply(
+        app_config=app_config,
+        reply_target=reply_target,
+        runtime_result=runtime_result,
+        chat_id=chat_id,
+    )
+
+
+def _runtime_result_from_trace(trace_payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(trace_payload, dict):
+        return None
+    composed = trace_payload.get("composed") if isinstance(trace_payload.get("composed"), dict) else {}
+    metadata = composed.get("metadata") if isinstance(composed.get("metadata"), dict) else {}
+    runtime_result = metadata.get("runtime_result")
+    return runtime_result if isinstance(runtime_result, dict) else None
 
 
 def _runtime_v5_progress_notice_text(command: str, chat_id: str | None) -> str:

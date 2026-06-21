@@ -73,6 +73,7 @@ def feishu_card_responders() -> tuple[GatewayCardResponder, ...]:
         confirmation_card_entrypoint.feishu_runtime_approval_batch_confirm_responder(),
         confirmation_card_entrypoint.feishu_runtime_approval_single_confirm_responder(),
         confirmation_card_entrypoint.feishu_runtime_approval_detail_action_responder(),
+        confirmation_card_entrypoint.feishu_runtime_action_input_responder(),
     )
     if settings.feishu_bot_runtime_v5_enabled:
         return runtime_responders

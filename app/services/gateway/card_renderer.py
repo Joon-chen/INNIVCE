@@ -182,6 +182,26 @@ def build_interactive_card(
     return card
 
 
+def build_runtime_result_card(runtime_result: dict[str, Any], *, chat_id: str | None = None) -> dict[str, Any] | None:
+    """Render a RuntimeResult that already carries Interaction-safe actions."""
+
+    result_type = str(runtime_result.get("result_type") or "").strip()
+    if result_type != "task_list":
+        return None
+    elements = _render_task_list_result_card(runtime_result, chat_id=chat_id)
+    if not elements:
+        return None
+    title = str(runtime_result.get("title") or "任务").strip()
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Template routing
 # ---------------------------------------------------------------------------
@@ -200,6 +220,96 @@ def _render_card_elements(*, card_hint: str, raw_answer: str, chat_id: str | Non
     if card_hint == "confirmation":
         return _render_confirmation_card(raw_answer, chat_id=chat_id)
     return _render_text_fallback(raw_answer)
+
+
+def _render_task_list_result_card(
+    runtime_result: dict[str, Any],
+    *,
+    chat_id: str | None = None,
+) -> list[dict[str, Any]]:
+    items = runtime_result.get("items") if isinstance(runtime_result.get("items"), list) else []
+    actions = runtime_result.get("actions") if isinstance(runtime_result.get("actions"), list) else []
+    if not items:
+        summary = str(runtime_result.get("summary") or "没有找到待处理任务。").strip()
+        return [{"tag": "div", "text": {"tag": "lark_md", "content": summary}}]
+
+    actions_by_index: dict[int, dict[str, Any]] = {}
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        try:
+            index = int(action.get("index"))
+        except (TypeError, ValueError):
+            continue
+        if action.get("runtime_action_input"):
+            actions_by_index[index] = action
+
+    elements: list[dict[str, Any]] = []
+    summary = str(runtime_result.get("summary") or "").strip()
+    if summary:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
+        elements.append({"tag": "hr"})
+    for index, item in enumerate(items[:8]):
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("raw") if isinstance(item.get("raw"), dict) else item
+        title = _task_item_title(raw)
+        detail_parts = [
+            _task_item_text(raw, ("due_at", "due_time", "deadline", "start_time")),
+            _task_item_text(raw, ("owner", "assignee", "assignee_name", "creator_name")),
+            _task_item_text(raw, ("status", "state")),
+        ]
+        detail = "｜".join(part for part in detail_parts if part)
+        content = f"**{index + 1}. {title}**"
+        if detail:
+            content += f"\n{detail}"
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": content}})
+        action = actions_by_index.get(index)
+        if action:
+            elements.append(
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": str(action.get("label") or "完成")},
+                            "type": "primary",
+                            "value": {
+                                "kind": "runtime_action_input",
+                                "chat_id": chat_id or "",
+                                "action": str(action.get("action") or "execute"),
+                                "runtime_action_input": action.get("runtime_action_input"),
+                            },
+                        }
+                    ],
+                }
+            )
+    if len(items) > 8:
+        elements.append(
+            {
+                "tag": "note",
+                "elements": [{"tag": "plain_text", "content": f"还有 {len(items) - 8} 个任务未展示。"}],
+            }
+        )
+    return elements
+
+
+def _task_item_title(item: dict[str, Any]) -> str:
+    return str(
+        item.get("title")
+        or item.get("summary")
+        or item.get("name")
+        or item.get("task_guid")
+        or "未命名任务"
+    ).strip()
+
+
+def _task_item_text(item: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, "", [], {}):
+            return str(value)
+    return ""
 
 
 # ---------------------------------------------------------------------------

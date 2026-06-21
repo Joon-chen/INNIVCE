@@ -71,6 +71,14 @@ def feishu_runtime_approval_detail_action_responder() -> GatewayCardResponder:
     )
 
 
+def feishu_runtime_action_input_responder() -> GatewayCardResponder:
+    return GatewayCardResponder(
+        kind="runtime_action_input",
+        handle_message=handle_feishu_runtime_action_input_message,
+        handle_response=handle_feishu_runtime_action_input_response,
+    )
+
+
 async def handle_feishu_runtime_confirmation_response(
     db: Session,
     app_config: FeishuAppConfig,
@@ -210,6 +218,26 @@ async def handle_feishu_runtime_approval_detail_action_message(
     return handled
 
 
+async def handle_feishu_runtime_action_input_response(
+    db: Session,
+    app_config: FeishuAppConfig,
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    handled, action = await _handle_runtime_action_input(db, app_config, payload)
+    if handled:
+        return {"toast": {"type": "info", "content": "已进入处理队列。"}}
+    return {"toast": {"type": "warning", "content": f"暂不支持操作：{action or '未知'}"}}
+
+
+async def handle_feishu_runtime_action_input_message(
+    db: Session,
+    app_config: FeishuAppConfig,
+    payload: dict[str, Any],
+) -> bool:
+    handled, _action = await _handle_runtime_action_input(db, app_config, payload)
+    return handled
+
+
 async def _handle_runtime_confirmation(
     db: Session,
     app_config: FeishuAppConfig,
@@ -316,6 +344,54 @@ async def _handle_runtime_confirmation(
     _enqueue_runtime_card_reply(
         app_config=app_config,
         command=command,
+        identity=identity,
+        chat_id=chat_id,
+        reply_target=reply_target,
+    )
+    return True, action
+
+
+async def _handle_runtime_action_input(
+    db: Session,
+    app_config: FeishuAppConfig,
+    payload: dict[str, Any],
+) -> tuple[bool, str]:
+    card_action = parse_gateway_card_action(payload)
+    if card_action is None or card_action.kind != "runtime_action_input":
+        return False, ""
+    action = str(card_action.action or card_action.value.get("action") or "").strip()
+    runtime_action_input = card_action.value.get("runtime_action_input")
+    if not isinstance(runtime_action_input, dict):
+        return False, action
+
+    identity = feishu_identity.get_sender_identity(db, app_config, payload)
+    chat_id = card_action.chat_id or str(card_action.value.get("chat_id") or "").strip() or None
+    reply_target = _reply_target(chat_id=chat_id, open_id=identity.open_id)
+    if not chat_id or not reply_target:
+        return False, action
+
+    normalized_input = _runtime_action_input_for_card(
+        runtime_action_input,
+        app_config=app_config,
+        identity=identity,
+        chat_id=chat_id,
+    )
+    session_context = load_session_context(chat_id)
+    session_context["runtime_v5_action_input"] = normalized_input
+    save_session_context(chat_id, session_context)
+    _record_action_trace(
+        chat_id,
+        {
+            "kind": "runtime_action_input",
+            "action": action or str(normalized_input.get("intent") or ""),
+            "status": "queued",
+            "action_id": str(normalized_input.get("action_id") or ""),
+            "strategy": str(normalized_input.get("strategy") or ""),
+        },
+    )
+    _enqueue_runtime_card_reply(
+        app_config=app_config,
+        command=str(normalized_input.get("message") or "处理这个任务"),
         identity=identity,
         chat_id=chat_id,
         reply_target=reply_target,
@@ -1095,6 +1171,31 @@ def _save_runtime_confirmation_action_input(
         sources=pending.get("sources") if isinstance(pending.get("sources"), list) else [],
     )
     save_session_context(chat_id, session_context)
+
+
+def _runtime_action_input_for_card(
+    payload: dict[str, Any],
+    *,
+    app_config: FeishuAppConfig,
+    identity: Any,
+    chat_id: str,
+) -> dict[str, Any]:
+    normalized = dict(payload)
+    context = normalized.get("context") if isinstance(normalized.get("context"), dict) else {}
+    normalized["context"] = {
+        **context,
+        "company_id": str(context.get("company_id") or app_config.company_id),
+        "chat_id": str(context.get("chat_id") or chat_id),
+        "user_id": str(
+            context.get("user_id")
+            or getattr(identity, "user_id", "")
+            or getattr(identity, "open_id", "")
+            or ""
+        ),
+        "open_id": str(context.get("open_id") or getattr(identity, "open_id", "") or ""),
+        "source_ui": str(context.get("source_ui") or "card"),
+    }
+    return normalized
 
 
 def _save_single_approval_runtime_action_input(

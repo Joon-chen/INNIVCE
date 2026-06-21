@@ -8,6 +8,7 @@ from app.services.gateway.card_renderer import (
     should_use_interactive_card,
     card_hint_for_route,
     build_interactive_card,
+    build_runtime_result_card,
 )
 
 
@@ -87,4 +88,21 @@ async def send_smart_reply(
         app_config=app_config,
         reply_target=reply_target,
         text=reply,
+    )
+
+
+async def send_runtime_result_reply(
+    *,
+    app_config: FeishuAppConfig,
+    reply_target: GatewayReplyTarget | dict[str, Any],
+    runtime_result: dict[str, Any],
+    chat_id: str | None = None,
+) -> dict[str, Any] | None:
+    card = build_runtime_result_card(runtime_result, chat_id=chat_id)
+    if card is None or not getattr(app_config, "app_secret", None):
+        return None
+    return await send_interactive_reply(
+        app_config=app_config,
+        reply_target=reply_target,
+        card=card,
     )

@@ -12,10 +12,12 @@ from app.services.feishu.commands import (
     handle_feishu_command,
     handle_feishu_command_result,
 )
+from app.services.feishu.confirmation_card_entrypoint import handle_feishu_runtime_action_input_message
 from app.services.feishu_event_entrypoint import receive_feishu_event_payload
 from app.services.feishu.identity import BotIdentity
 from app.services.gateway.audit import write_gateway_message_audit
 from app.services.gateway.card_actions import gateway_card_action_message_id, gateway_card_action_value, parse_gateway_card_action
+from app.services.gateway.card_renderer import build_runtime_result_card
 from app.services.gateway.card_responder import (
     GatewayCardResponder,
     dispatch_gateway_card_action_message,
@@ -545,9 +547,18 @@ def test_handle_feishu_command_sends_authorization_card_for_user_identity_action
     identity = BotIdentity(open_id="ou_1", role="member", access_scope="personal")
     send_calls = {"text": [], "card": []}
 
-    monkeypatch.setattr("app.services.feishu.commands.feishu_identity.get_sender_identity", lambda *args, **kwargs: identity)
-    monkeypatch.setattr("app.services.feishu.commands.command_handlers.load_approval_context", lambda *args, **kwargs: [])
-    monkeypatch.setattr("app.services.feishu.commands.command_handlers.record_command_context", lambda db_arg, *args: db_arg.commit())
+    monkeypatch.setattr(
+        "app.services.feishu.commands.feishu_identity.get_sender_identity",
+        lambda *args, **kwargs: identity,
+    )
+    monkeypatch.setattr(
+        "app.services.feishu.commands.command_handlers.load_approval_context",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.feishu.commands.command_handlers.record_command_context",
+        lambda db_arg, *args: db_arg.commit(),
+    )
     monkeypatch.setattr(
         "app.services.feishu.command_handlers.bot_runtime.employee_bot_answer_result",
         lambda *args, **kwargs: SimpleNamespace(
@@ -758,6 +769,243 @@ def test_handle_feishu_command_sends_authorization_card_from_runtime_v5_result(m
     assert send_calls["card"][0]["actions"][0]["url"] == auth_url
     assert db.added[-1].payload["user_identity_card_sent"] is True
     assert db.added[-1].payload["user_identity_required"] is True
+
+
+def test_handle_feishu_command_sends_task_list_runtime_result_card(monkeypatch) -> None:
+    class FakeDb:
+        def __init__(self):
+            self.added = []
+            self.commits = 0
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            self.commits += 1
+
+        def scalar(self, query):
+            return None
+
+    db = FakeDb()
+    company_id = uuid4()
+    app_config = SimpleNamespace(
+        id=uuid4(),
+        company_id=company_id,
+        app_id="cli_1",
+        name="大飞哥",
+        app_secret="secret",
+    )
+    identity = BotIdentity(open_id="ou_1", role="member", access_scope="personal")
+    send_calls = {"runtime_result": [], "smart": []}
+    runtime_action_input = {
+        "action_id": "task_complete_0_task_1",
+        "action_type": "execute",
+        "intent": "task_complete",
+        "strategy": "task_complete",
+        "target": {"task_guid": "task_1", "title": "写周报"},
+        "confirmation": {"confirmed": False, "token": "task_complete_0_task_1"},
+        "context": {"company_id": str(company_id), "source_ui": "card"},
+        "message": "完成任务",
+        "sources": ["task"],
+        "metadata": {},
+    }
+
+    monkeypatch.setattr("app.services.feishu.commands.settings.feishu_bot_ai_mode_enabled", True)
+    monkeypatch.setattr("app.services.feishu.commands.feishu_identity.get_sender_identity", lambda *args, **kwargs: identity)
+    monkeypatch.setattr("app.services.feishu.commands.command_handlers.load_approval_context", lambda *args, **kwargs: [])
+    monkeypatch.setattr("app.services.feishu.commands.command_handlers.record_command_context", lambda db_arg, *args: db_arg.commit())
+    monkeypatch.setattr(
+        "app.services.feishu.command_handlers.bot_runtime.employee_bot_answer_result",
+        lambda *args, **kwargs: SimpleNamespace(
+            answer="找到 1 个任务。",
+            trace_payload={
+                "runtime_version": "v5",
+                "route_path": "feishu_task_query",
+                "route_label": "查询任务",
+                "composed": {
+                    "metadata": {
+                        "runtime_result": {
+                            "result_type": "task_list",
+                            "status": "success",
+                            "title": "任务",
+                            "summary": "找到 1 个任务。",
+                            "items": [{"raw": {"task_guid": "task_1", "title": "写周报", "status": "todo"}}],
+                            "actions": [
+                                {
+                                    "action": "task_complete",
+                                    "label": "完成",
+                                    "target_ui": "card",
+                                    "index": 0,
+                                    "runtime_action_input": runtime_action_input,
+                                }
+                            ],
+                            "metadata": {"company_id": str(company_id)},
+                        }
+                    }
+                },
+            },
+        ),
+    )
+
+    async def fake_send_runtime_result_reply(*args, **kwargs):
+        send_calls["runtime_result"].append(kwargs)
+        return {"code": 0}
+
+    async def fake_send_smart_reply(*args, **kwargs):
+        send_calls["smart"].append(kwargs)
+        return {"code": 0}
+
+    async def fake_send_authorization_card(*args, **kwargs):
+        return False
+
+    async def fake_quick_sync(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "app.services.feishu.commands.feishu_replies.send_runtime_result_reply",
+        fake_send_runtime_result_reply,
+    )
+    monkeypatch.setattr("app.services.feishu.commands.feishu_replies.send_smart_reply", fake_send_smart_reply)
+    monkeypatch.setattr("app.services.feishu.command_handlers.sync_commands.quick_sync_for_question", fake_quick_sync)
+    monkeypatch.setattr(
+        "app.services.feishu.commands.authorization_card_entrypoint.send_user_identity_authorization_card",
+        fake_send_authorization_card,
+    )
+
+    result = asyncio.run(
+        handle_feishu_command_result(
+            db,
+            app_config,
+            {
+                "header": {"event_id": "evt_1", "event_type": "im.message.receive_v1", "app_id": "cli_1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou_1"}, "sender_type": "user"},
+                    "message": {
+                        "message_id": "om_1",
+                        "chat_id": "oc_1",
+                        "chat_type": "p2p",
+                        "message_type": "text",
+                        "content": '{"text":"我的任务"}',
+                    },
+                },
+            },
+        )
+    )
+
+    assert result.handled is True
+    assert send_calls["smart"] == []
+    assert len(send_calls["runtime_result"]) == 1
+    sent_action_input = send_calls["runtime_result"][0]["runtime_result"]["actions"][0]["runtime_action_input"]
+    assert sent_action_input == runtime_action_input
+
+
+def test_runtime_action_input_card_action_enters_runtime(monkeypatch) -> None:
+    class FakeDb:
+        pass
+
+    app_config = SimpleNamespace(id=uuid4(), company_id="company_1")
+    identity = BotIdentity(open_id="ou_1", role="member", access_scope="personal")
+    saved_contexts = []
+    enqueued = []
+    runtime_action_input = {
+        "action_id": "task_complete_0_task_1",
+        "action_type": "execute",
+        "intent": "task_complete",
+        "strategy": "task_complete",
+        "target": {"task_guid": "task_1", "title": "写周报"},
+        "confirmation": {"confirmed": False, "token": "task_complete_0_task_1"},
+        "context": {"company_id": "company_1", "source_ui": "card"},
+        "message": "完成任务",
+        "sources": ["task"],
+        "metadata": {},
+    }
+
+    monkeypatch.setattr(
+        "app.services.feishu.confirmation_card_entrypoint.feishu_identity.get_sender_identity",
+        lambda *args, **kwargs: identity,
+    )
+    monkeypatch.setattr("app.services.feishu.confirmation_card_entrypoint.load_session_context", lambda chat_id: {})
+    monkeypatch.setattr(
+        "app.services.feishu.confirmation_card_entrypoint.save_session_context",
+        lambda chat_id, context: saved_contexts.append((chat_id, context)),
+    )
+    monkeypatch.setattr(
+        "app.services.feishu.confirmation_card_entrypoint._enqueue_runtime_card_reply",
+        lambda **kwargs: enqueued.append(kwargs),
+    )
+
+    handled = asyncio.run(
+        handle_feishu_runtime_action_input_message(
+            FakeDb(),
+            app_config,
+            {
+                "event": {
+                    "action": {
+                        "value": {
+                            "kind": "runtime_action_input",
+                            "chat_id": "oc_1",
+                            "action": "task_complete",
+                            "runtime_action_input": runtime_action_input,
+                        }
+                    },
+                    "message": {"chat_id": "oc_1"},
+                }
+            },
+        )
+    )
+
+    assert handled is True
+    assert saved_contexts[0][0] == "oc_1"
+    saved_input = saved_contexts[0][1]["runtime_v5_action_input"]
+    assert saved_input["intent"] == "task_complete"
+    assert saved_input["context"]["company_id"] == "company_1"
+    assert saved_input["context"]["chat_id"] == "oc_1"
+    assert saved_input["context"]["open_id"] == "ou_1"
+    assert enqueued[0]["command"] == "完成任务"
+
+
+def test_build_runtime_result_card_renders_task_complete_action_input() -> None:
+    runtime_action_input = {
+        "action_id": "task_complete_0_task_1",
+        "action_type": "execute",
+        "intent": "task_complete",
+        "strategy": "task_complete",
+        "target": {"task_guid": "task_1", "title": "写周报"},
+        "confirmation": {"confirmed": False, "token": "task_complete_0_task_1"},
+        "context": {"company_id": "company_1", "source_ui": "card"},
+        "message": "完成任务",
+        "sources": ["task"],
+        "metadata": {},
+    }
+
+    card = build_runtime_result_card(
+        {
+            "result_type": "task_list",
+            "title": "任务",
+            "summary": "找到 1 个任务。",
+            "items": [{"raw": {"task_guid": "task_1", "title": "写周报", "status": "todo"}}],
+            "actions": [
+                {
+                    "action": "task_complete",
+                    "label": "完成",
+                    "index": 0,
+                    "runtime_action_input": runtime_action_input,
+                }
+            ],
+        },
+        chat_id="oc_1",
+    )
+
+    assert card is not None
+    button = next(
+        action
+        for element in card["elements"]
+        if element.get("tag") == "action"
+        for action in element["actions"]
+    )
+    assert button["value"]["kind"] == "runtime_action_input"
+    assert button["value"]["chat_id"] == "oc_1"
+    assert button["value"]["runtime_action_input"] == runtime_action_input
 
 
 def test_handle_feishu_command_routes_employee_calendar_create_to_runtime_auth_card(monkeypatch) -> None:
