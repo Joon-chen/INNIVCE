@@ -267,6 +267,14 @@ def test_console_system_logs_can_filter_gateway_reason() -> None:
     assert '["agent_runtime_step_count", "Agent步数"]' in console_app
     assert "rowAction: showSystemLogDetail" in console_app
     assert "function showSystemLogDetail(item)" in console_app
+    assert "function diagnosticStatusRows" in console_app
+    assert "diagnostics_payload" in console_app
+    assert 'diagnostics_source: registry?.diagnostics_payload ? "diagnostics_payload" : "system_logs"' in console_app
+    assert "diagnostics.${key}" in console_app
+    assert '["runtime", "Runtime"' in console_app
+    assert "Result Context" in console_app
+    assert "Response Experience" in console_app
+    assert "Action State" in console_app
     assert "tool_steps: item.agent_runtime_tool_steps || []" in console_app
     assert "workflow_steps: item.agent_runtime_workflow_steps || []" in console_app
     assert 'data-action="view-gateway-card-issues"' in console_html

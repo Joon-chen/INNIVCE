@@ -1906,9 +1906,34 @@ async function loadSystemLogs() {
   }
   params.set("limit", "100");
   const data = await safeLoad(`/api/v5/system/logs?${params.toString()}`);
-  renderChips("systemLogStats", data?.counts || {});
-  renderChips("systemLogCategoryStats", data?.category_counts || {});
-  renderTable("systemLatestErrorsTable", data?.latest_errors || [], [
+  const registry = await loadCapabilityRegistry({ silent: true });
+  const diagnosticsRows = diagnosticStatusRows(registry?.diagnostics_payload, registry?.generated_at);
+  if (registry?.diagnostics_payload) {
+    const summary = registry.diagnostics_payload.summary || {};
+    logCapabilityRegistryDiff(
+      "diagnostics_payload",
+      {
+        system_logs: data?.items?.length || 0,
+        latest_errors: data?.latest_errors?.length || 0,
+      },
+      {
+        status: summary.status || "unknown",
+        runtime_status: summary.runtime_status || "unknown",
+        provider_status: summary.provider_status || "unknown",
+        action_state_status: summary.action_state_status || "unknown",
+      },
+      {
+        diagnostics_payload_coverage: registryCoverage(7, diagnosticsRows.length),
+      },
+    );
+  }
+  const rows = registry?.diagnostics_payload ? diagnosticsRows : (data?.items || []);
+  const latestErrors = registry?.diagnostics_payload
+    ? diagnosticsRows.filter((item) => item.severity !== "info")
+    : (data?.latest_errors || []);
+  renderChips("systemLogStats", registry?.diagnostics_payload ? (registry.diagnostics_payload.summary || {}) : (data?.counts || {}));
+  renderChips("systemLogCategoryStats", registry?.diagnostics_payload ? diagnosticStatusCounts(diagnosticsRows) : (data?.category_counts || {}));
+  renderTable("systemLatestErrorsTable", latestErrors, [
     ["severity", "级别"],
     ["category", "分类"],
     ["action", "动作"],
@@ -1917,7 +1942,7 @@ async function loadSystemLogs() {
     ["error", "错误"],
     ["created_at", "时间"],
   ], { compactId: true, emptyMessage: "暂无错误日志" });
-  renderTable("systemLogsTable", data?.items || [], [
+  renderTable("systemLogsTable", rows, [
     ["severity", "级别"],
     ["category", "分类"],
     ["status", "状态"],
@@ -1952,13 +1977,25 @@ async function loadSystemLogs() {
     rowAction: showSystemLogDetail,
   });
   showResult("systemLogResult", {
+    diagnostics_source: registry?.diagnostics_payload ? "diagnostics_payload" : "system_logs",
     severity_counts: data?.severity_counts || {},
-    latest: (data?.items || []).slice(0, 10),
+    latest: rows.slice(0, 10),
   });
 }
 
 function showSystemLogDetail(item) {
   if (!item) return;
+  if (item.registry_source === "diagnostics_payload") {
+    showResult("systemLogResult", {
+      diagnostics_source: "diagnostics_payload",
+      category: item.category,
+      status: item.status,
+      reason: item.reason,
+      payload: item.diagnostics_payload || {},
+      generated_at: item.created_at,
+    });
+    return;
+  }
   showResult("systemLogResult", {
     summary: item.summary,
     action: item.action,
@@ -3650,6 +3687,62 @@ function governanceFindingRows(governancePayload) {
     registry_source: "governance_payload",
     finding_id: finding.finding_id,
   }));
+}
+
+function diagnosticStatusRows(diagnosticsPayload, generatedAt) {
+  if (!diagnosticsPayload) return [];
+  const summary = diagnosticsPayload.summary || {};
+  const sections = [
+    ["runtime", "Runtime", diagnosticsPayload.runtime || { status: summary.runtime_status }],
+    ["provider", "Provider", { status: summary.provider_status, providers: diagnosticsPayload.providers || [] }],
+    ["permission", "Permission", diagnosticsPayload.permission || { status: summary.permission_status }],
+    ["result_context", "Result Context", diagnosticsPayload.result_context || { status: summary.result_context_status }],
+    ["response_experience", "Response Experience", diagnosticsPayload.response_experience || { status: summary.response_experience_status }],
+    ["follow_up", "Follow-up", diagnosticsPayload.follow_up || { status: "healthy" }],
+    ["action_state", "Action State", diagnosticsPayload.action_state || { status: summary.action_state_status }],
+  ];
+  return sections.map(([key, label, payload]) => {
+    const status = payload.status || "unknown";
+    return {
+      severity: status === "healthy" || status === "ok" ? "info" : "warning",
+      category: key,
+      status,
+      reason: diagnosticReason(key, payload),
+      action: `diagnostics.${key}`,
+      target_type: "runtime_health",
+      target_id: key,
+      actor: "capability_registry",
+      provider: key === "provider" ? (payload.providers || []).map((item) => item.provider_id).join(" / ") : "",
+      used_agent_runtime: key === "runtime" || key === "action_state",
+      final_answer_owner: "agent_runtime",
+      route_path: "",
+      route_label: label,
+      error: payload.last_error || "",
+      created_at: generatedAt || "",
+      diagnostics_payload: payload,
+      registry_source: "diagnostics_payload",
+    };
+  });
+}
+
+function diagnosticReason(key, payload) {
+  if (key === "provider") {
+    const failed = (payload.providers || []).filter((item) => !["healthy", "ok"].includes(item.status));
+    return failed.length ? `${failed.length} provider degraded` : "all providers healthy";
+  }
+  if (key === "action_state") return `failed_action_count=${payload.failed_action_count || 0}`;
+  if (key === "permission") return `missing_scope_count=${payload.missing_scope_count || 0}`;
+  if (key === "result_context") return `missing_company_id_count=${payload.missing_company_id_count || 0}`;
+  if (key === "response_experience") return `slow_response_count=${payload.slow_response_count || 0}`;
+  if (key === "follow_up") return `pending_follow_up_count=${payload.pending_follow_up_count || 0}`;
+  return payload.last_error || "runtime healthy";
+}
+
+function diagnosticStatusCounts(rows) {
+  return (rows || []).reduce((acc, item) => {
+    acc[item.status || "unknown"] = (acc[item.status || "unknown"] || 0) + 1;
+    return acc;
+  }, {});
 }
 
 function registryCoverage(total, covered) {
