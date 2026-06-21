@@ -106,6 +106,9 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
     )
     if snapshot is not None and str(event.id) in set(snapshot.source_event_ids or []):
         return {"ok": True, "status": "skipped_completed", "object_id": event.object_id, "event_id": str(event.id)}
+    if snapshot is not None and getattr(snapshot, "updated_at", None) and getattr(event, "created_at", None):
+        if snapshot.updated_at >= event.created_at:
+            return {"ok": True, "status": "skipped_current_snapshot", "object_id": event.object_id, "event_id": str(event.id)}
     app_config = _active_feishu_app_config(db, event.company_id)
     if app_config is None:
         return {"ok": False, "error": "missing_feishu_app_config", "object_id": event.object_id}
