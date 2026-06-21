@@ -13,6 +13,14 @@ class PortalPendingApprovalsRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=50)
 
 
+class PortalApprovalDetailRequest(BaseModel):
+    app_config_id: UUID
+    open_id: str
+    chat_id: str | None = None
+    instance_code: str
+    task_id: str | None = None
+
+
 class PortalApprovalActionRequest(FeishuApprovalActionRequest):
     app_config_id: UUID
     chat_id: str | None = None

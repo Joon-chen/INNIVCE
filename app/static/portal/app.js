@@ -6,6 +6,7 @@ const state = {
   initialIndex: -1,
   detailOnly: false,
   riskFilter: "all",
+  detailLoads: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -243,6 +244,54 @@ function renderDetail() {
   `;
   $("approveBtn").addEventListener("click", () => submitAction("approve"));
   $("rejectBtn").addEventListener("click", () => submitAction("reject"));
+  ensureSelectedDetailLoaded(item, state.selectedIndex);
+}
+
+async function ensureSelectedDetailLoaded(item, index) {
+  const instanceCode = instanceCodeOf(item);
+  if (!instanceCode || index < 0) return;
+  const key = `${instanceCode}:${item.task_id || item.id || ""}`;
+  if (state.detailLoads[key] || item._live_detail_loaded) return;
+  state.detailLoads[key] = "loading";
+  try {
+    const data = await postJson("/api/portal/approvals/detail", {
+      app_config_id: $("appConfigId").value.trim(),
+      open_id: $("openId").value.trim(),
+      chat_id: state.chatId,
+      instance_code: instanceCode,
+      task_id: item.task_id || item.id || "",
+    });
+    if (!data.available || !data.item) {
+      state.detailLoads[key] = "failed";
+      return;
+    }
+    state.items[index] = mergeApprovalDetailItem(item, data.item);
+    state.detailLoads[key] = "loaded";
+    if (state.selectedIndex === index) {
+      renderList();
+      renderDetail();
+      setStatus("已补全审批实时详情。");
+    }
+  } catch (_error) {
+    state.detailLoads[key] = "failed";
+  }
+}
+
+function mergeApprovalDetailItem(current, detail) {
+  const currentRaw = rawOf(current);
+  const detailRaw = detail.raw && typeof detail.raw === "object" ? detail.raw : {};
+  return {
+    ...current,
+    ...detail,
+    assessment: current.assessment || detail.assessment,
+    raw: {
+      ...currentRaw,
+      ...detailRaw,
+      instance_detail: detailRaw.instance_detail || detail.instance_detail || currentRaw.instance_detail,
+      _approval_snapshot: currentRaw._approval_snapshot,
+    },
+    _live_detail_loaded: true,
+  };
 }
 
 async function submitAction(action) {
@@ -304,7 +353,7 @@ function actionPayload(item, action, comment, openId, flags) {
     app_config_id: $("appConfigId").value.trim(),
     chat_id: state.chatId,
     approval_code: item.approval_code || item.definition_code || "",
-    instance_code: item.instance_code || item.process_code || "",
+    instance_code: instanceCodeOf(item),
     task_id: item.task_id || item.id || "",
     action,
     comment,
@@ -358,6 +407,14 @@ function serialOf(item) {
   return item.serial_number || raw.serial_number || detail.serial_number
     || item.instance_code || item.process_code || raw.instance_code || raw.process_code
     || detail.instance_code || detail.process_code || instance.code || instance.instance_code || item.id || raw.id || "";
+}
+
+function instanceCodeOf(item) {
+  const raw = rawOf(item);
+  const detail = detailOf(item);
+  const instance = raw.instance && typeof raw.instance === "object" ? raw.instance : {};
+  return item.instance_code || item.process_code || raw.instance_code || raw.process_code
+    || detail.instance_code || detail.process_code || instance.code || instance.instance_code || "";
 }
 
 function suggestionOf(item) {
@@ -458,7 +515,7 @@ function compactItem(item) {
     applicant: applicantOf(item),
     amount: amountOf(item),
     approval_code: item.approval_code || item.definition_code,
-    instance_code: item.instance_code || item.process_code,
+    instance_code: instanceCodeOf(item),
     task_id: item.task_id || item.id,
     instance_detail: item.instance_detail || null,
   };

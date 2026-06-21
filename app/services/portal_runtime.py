@@ -3,10 +3,12 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.routes.portal_request_models import PortalApprovalActionRequest, PortalPendingApprovalsRequest
+from app.api.routes.portal_request_models import PortalApprovalActionRequest, PortalApprovalDetailRequest, PortalPendingApprovalsRequest
 from app.core.config import settings
 from app.services.feishu import get_feishu_app_or_404
+from app.services.feishu.approval import FeishuApprovalService
 from app.services.feishu.cli_profile import feishu_app_cli_profile
+from app.services.runtime_v5.feishu_resource_providers import _approval_item
 from app.services.runtime_v5.context import load_portal_session_context, load_result_context, load_session_context
 from app.services.runtime_v5.feishu_resource_providers import build_feishu_provider_registry
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
@@ -79,6 +81,52 @@ def portal_cached_approvals_payload(
             "runtime_version": "v5",
             "runtime_status": interaction_payload.status or "not_executed",
             "interaction_payload": interaction_payload_payload(interaction_payload),
+        },
+    }
+
+
+def portal_approval_detail_payload(
+    db: Session,
+    data: PortalApprovalDetailRequest,
+    x_admin_token: str | None,
+) -> dict[str, Any]:
+    _require_portal_session(
+        chat_id=data.chat_id,
+        app_config_id=data.app_config_id,
+        open_id=data.open_id,
+        x_admin_token=x_admin_token,
+    )
+    instance_code = str(data.instance_code or "").strip()
+    if not instance_code:
+        return {"available": False, "item": {}, "error": "missing_instance_code", "metadata": {}}
+    app_config = get_feishu_app_or_404(db, data.app_config_id)
+    detail = _run_portal_async(
+        FeishuApprovalService(app_config).get_instance(
+            instance_code=instance_code,
+            user_id_type="open_id",
+        )
+    )
+    raw_detail = detail.get("data") if isinstance(detail.get("data"), dict) else detail
+    if not isinstance(raw_detail, dict):
+        return {"available": False, "item": {}, "error": "invalid_detail_payload", "metadata": {}}
+    raw_item = {
+        "instance_code": instance_code,
+        "process_code": instance_code,
+        "task_id": data.task_id or "",
+        "instance_detail": raw_detail,
+    }
+    for key in ("approval_code", "definition_code", "approval_name", "definition_name", "serial_number", "status"):
+        value = raw_detail.get(key)
+        if value not in (None, "", [], {}):
+            raw_item[key] = value
+    return {
+        "available": True,
+        "item": _approval_item(raw_item),
+        "error": "",
+        "metadata": {
+            "runtime_version": "v5",
+            "source": "feishu_live_instance_detail",
+            "instance_code": instance_code,
         },
     }
 
@@ -239,3 +287,15 @@ def _approval_action_result_context(data: PortalApprovalActionRequest, *, compan
         },
         answer="Portal 审批动作上下文",
     )
+
+
+def _run_portal_async(coro):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coro)).result()
