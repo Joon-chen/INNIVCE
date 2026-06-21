@@ -791,6 +791,7 @@ def _with_runtime_state_metadata(result_context: ResultContext, state) -> Result
 def _result_context_with_scope(context: RuntimeContext, result_context: ResultContext) -> ResultContext:
     company_id = str(context.runtime_scope.active_company_id or "")
     company_ids = [str(item) for item in context.runtime_scope.company_ids]
+    scope_context = _scope_context_from_runtime(context=context, result_context=result_context, company_id=company_id)
     return replace(
         result_context,
         metadata={
@@ -798,6 +799,7 @@ def _result_context_with_scope(context: RuntimeContext, result_context: ResultCo
             "company_id": company_id,
             "company_ids": company_ids,
             "scope_type": context.runtime_scope.scope_type,
+            "scope_context": scope_context,
             "tenant_isolated": True,
         },
         items=tuple(
@@ -809,6 +811,36 @@ def _result_context_with_scope(context: RuntimeContext, result_context: ResultCo
             for item in result_context.items
         ),
     )
+
+
+def _scope_context_from_runtime(*, context: RuntimeContext, result_context: ResultContext, company_id: str) -> dict[str, Any]:
+    existing = result_context.metadata.get("scope_context")
+    if isinstance(existing, dict) and existing.get("scope"):
+        return {**existing, "company_id": str(existing.get("company_id") or company_id)}
+    data_scope = str(result_context.metadata.get("data_scope") or "")
+    return {
+        "scope": _enterprise_scope(data_scope),
+        "company_id": company_id,
+        "department_id": context.runtime_scope.active_department_id,
+        "object_type": "project" if context.runtime_scope.active_project_id else "",
+        "object_id": context.runtime_scope.active_project_id,
+        "filters": {},
+    }
+
+
+def _enterprise_scope(data_scope: str) -> str:
+    normalized = data_scope.strip().lower()
+    if normalized == "self":
+        return "SELF"
+    if normalized in {"person", "user"}:
+        return "USER"
+    if normalized == "department":
+        return "DEPARTMENT"
+    if normalized == "company":
+        return "COMPANY"
+    if normalized in {"project", "team"}:
+        return "TEAM"
+    return "COMPANY" if normalized == "organization" else "SELF"
 
 
 def _sync_current_approval_item(context: RuntimeContext, result_context) -> None:

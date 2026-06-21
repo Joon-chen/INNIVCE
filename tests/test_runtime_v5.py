@@ -18,6 +18,7 @@ from app.services.runtime_v5.models import (
 )
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
+from app.services.runtime_v5.permission import check_runtime_permission
 from app.services.runtime_v5.runtime import run_runtime_v5
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload, runtime_action_input_from_payload
 from app.services.runtime_v5.runtime_missing_params import (
@@ -57,7 +58,15 @@ def _context(
     )
 
 
-def _command_plan(strategy: str, *, result_type: str | None = None, target_ui: str = "card", question_type: str = "query") -> CommandPlan:
+def _command_plan(
+    strategy: str,
+    *,
+    result_type: str | None = None,
+    target_ui: str = "card",
+    question_type: str = "query",
+    data_scope: str = "self",
+    sources: tuple[str, ...] = ("approval",),
+) -> CommandPlan:
     intent = result_type or strategy
     return CommandPlan(
         intent=intent,
@@ -68,11 +77,11 @@ def _command_plan(strategy: str, *, result_type: str | None = None, target_ui: s
         intent_result=IntentResult(
             question_type=question_type,  # type: ignore[arg-type]
             intent=intent,
-            data_scope="self",
+            data_scope=data_scope,  # type: ignore[arg-type]
             confidence=0.9,
             canonical_question=intent,
         ),
-        planner_result=PlannerResult(strategy=strategy, sources=("approval",)),
+        planner_result=PlannerResult(strategy=strategy, sources=sources),
     )
 
 
@@ -126,6 +135,37 @@ def test_runtime_v5_approval_query_runs_strategy_sources() -> None:
     assert runtime_state["status"] == "done"
     assert runtime_state["intent"] == "approval_query"
     assert runtime_state["actions"] == ()
+
+
+def test_runtime_v5_task_query_outputs_enterprise_scope_context() -> None:
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"list_my_tasks": ("task.list_my_tasks", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "list_my_tasks"
+            return ProviderResult(
+                source="task",
+                status="success",
+                result_type="task_list",
+                count=1,
+                items=({"title": "跟进客户", "task_guid": "task/1"},),
+                answer="你有 1 条任务。",
+            )
+
+    result = run_runtime_v5(
+        context=_context("我的任务"),
+        providers={"task": TaskProvider()},
+    )
+
+    assert result.intent.intent == "task_query"
+    assert result.composed.result_context is not None
+    scope_context = result.composed.result_context.metadata["scope_context"]
+    assert scope_context["scope"] == "SELF"
+    assert scope_context["company_id"]
+    runtime_scope_context = result.composed.metadata["runtime_result"]["metadata"]["scope_context"]
+    assert runtime_scope_context["scope"] == "SELF"
+    assert runtime_scope_context["company_id"] == scope_context["company_id"]
 
 
 def test_runtime_v5_approval_detail_runtime_result_exposes_sidepanel_actions() -> None:
@@ -431,6 +471,34 @@ def test_runtime_action_input_builder_requires_company_id() -> None:
             strategy="approval_approve",
             company_id="",
         )
+
+
+def test_runtime_action_input_preserves_enterprise_scope_context() -> None:
+    payload = build_runtime_action_input_payload(
+        action_id="task_complete_1",
+        action_type="execute",
+        intent="task_complete",
+        strategy="task_complete",
+        company_id="company_1",
+        target={"task_guid": "task/1"},
+        confirmed=True,
+        confirmation_token="task_complete_1",
+        source_ui="card",
+        sources=["task"],
+        metadata={
+            "scope_context": {
+                "scope": "SELF",
+                "company_id": "company_1",
+                "filters": {},
+            },
+        },
+    )
+
+    assert payload["metadata"]["scope_context"] == {
+        "scope": "SELF",
+        "company_id": "company_1",
+        "filters": {},
+    }
 
 
 def test_runtime_pending_action_contract_preserves_action_input_context() -> None:
@@ -1512,6 +1580,54 @@ def test_runtime_result_payload_serializes_builder_output() -> None:
     assert [action["action"] for action in payload["actions"]] == ["approve", "reject"]
     assert payload["metadata"]["company_id"] == "company_1"
     assert payload["metadata"]["strategy"] == "approval_detail"
+
+
+def test_runtime_result_includes_enterprise_scope_context_for_task_query() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    result = build_runtime_result(
+        command_plan=_command_plan("task_query", result_type="task_query", sources=("task",)),
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(
+            answer="你有 1 条任务。",
+            result_context=ResultContext(
+                result_type="task_list",
+                count=1,
+                items=({"title": "跟进客户", "task_guid": "task/1"},),
+            ),
+        ),
+    )
+
+    payload = runtime_result_payload(result)
+
+    assert payload["result_type"] == "task_list"
+    assert payload["metadata"]["scope_context"] == {
+        "scope": "SELF",
+        "company_id": "company_1",
+        "filters": {},
+    }
+
+
+def test_runtime_permission_denies_company_scope_for_ordinary_employee() -> None:
+    company_id = uuid4()
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_member", role="member"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="所有延期任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="所有延期任务",
+    )
+    plan = PlannerResult(strategy="task_query", sources=("task",))
+
+    permission = check_runtime_permission(context=context, intent=intent, plan=plan)
+
+    assert permission.allowed is False
+    assert permission.reason == "permission_denied"
 
 
 def test_runtime_v5_interaction_payload_preserves_runtime_result_actions() -> None:

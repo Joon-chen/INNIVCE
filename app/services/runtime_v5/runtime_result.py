@@ -26,6 +26,11 @@ def build_runtime_result(
     )
     result_metadata = result_context.metadata if result_context is not None else {}
     company_id = str(result_metadata.get("company_id") or command_plan.context_scope.get("company_id") or "")
+    scope_context = _scope_context(
+        company_id=company_id,
+        data_scope=str(command_plan.intent_result.data_scope or ""),
+        result_metadata=result_metadata,
+    )
     title = label_for_strategy(command_plan.planner_result.strategy) or command_plan.intent
     return RuntimeResult(
         result_type=result_type,
@@ -41,6 +46,7 @@ def build_runtime_result(
             "intent": command_plan.intent,
             "question_type": command_plan.intent_result.question_type,
             "data_scope": command_plan.intent_result.data_scope,
+            "scope_context": scope_context,
             "sources": list(command_plan.planner_result.sources),
             "permission_allowed": permission.allowed,
             "requires_confirmation": permission.requires_confirmation,
@@ -48,6 +54,32 @@ def build_runtime_result(
             "result_context": result_metadata,
         },
     )
+
+
+def _scope_context(*, company_id: str, data_scope: str, result_metadata: dict[str, Any]) -> dict[str, Any]:
+    existing = result_metadata.get("scope_context")
+    if isinstance(existing, dict) and existing.get("scope"):
+        return {**existing, "company_id": str(existing.get("company_id") or company_id)}
+    return {
+        "scope": _enterprise_scope(data_scope),
+        "company_id": company_id,
+        "filters": {},
+    }
+
+
+def _enterprise_scope(data_scope: str) -> str:
+    normalized = data_scope.strip().lower()
+    if normalized == "self":
+        return "SELF"
+    if normalized in {"person", "user"}:
+        return "USER"
+    if normalized == "department":
+        return "DEPARTMENT"
+    if normalized == "company":
+        return "COMPANY"
+    if normalized in {"project", "team"}:
+        return "TEAM"
+    return "COMPANY" if normalized == "organization" else "SELF"
 
 
 def runtime_result_from_payload(payload: dict[str, Any]) -> RuntimeResult:
