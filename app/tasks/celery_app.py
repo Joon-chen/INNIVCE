@@ -522,6 +522,7 @@ def bot_runtime_card_reply_task(
         from app.services.feishu import bot_runtime
         from app.services.feishu import replies as feishu_replies
         from app.services.feishu.identity import BotIdentity
+        from app.services.runtime_v5.action_observer import record_action_trace, write_runtime_action_audit
         from app.services.runtime_v5.context import clear_result_context, load_session_context, save_session_context
 
         app_config = db.get(FeishuAppConfig, UUID(app_config_id))

@@ -1,4 +1,5 @@
 import app.tasks.celery_app as celery_module
+from types import SimpleNamespace
 from uuid import uuid4
 
 from app.tasks.celery_app import auto_v5_resource_sync_task, celery_app
@@ -93,3 +94,72 @@ def test_v5_resource_auto_sync_skips_manual_review_resources() -> None:
     policy = {"resource_types": [], "statuses": [], "limit_resources": 10}
 
     assert celery_module._v5_auto_sync_resources(DummyDb(), company_id="company", policy=policy) == []
+
+
+def test_bot_runtime_card_reply_task_records_trace_without_local_scope_error(monkeypatch) -> None:
+    class DummyDb:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+            self.app_config = SimpleNamespace(id=uuid4(), company_id=uuid4(), app_id="cli_1", name="大飞哥")
+
+        def get(self, model, item_id):
+            return self.app_config
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed = True
+
+    db = DummyDb()
+    traces = []
+    audits = []
+    sent = []
+
+    async def fake_send_smart_reply(**kwargs):
+        sent.append(kwargs)
+        return {"code": 0}
+
+    monkeypatch.setattr(celery_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        "app.services.feishu.bot_runtime.employee_bot_answer_result",
+        lambda *args, **kwargs: SimpleNamespace(
+            answer="任务已创建。",
+            trace_payload={
+                "execution_status": "success",
+                "strategy": "task_create",
+                "question_type": "action",
+                "route_path": "task_create",
+            },
+        ),
+    )
+    monkeypatch.setattr("app.services.feishu.replies.send_smart_reply", fake_send_smart_reply)
+    monkeypatch.setattr("app.services.runtime_v5.action_observer.record_action_trace", lambda *args: traces.append(args))
+    monkeypatch.setattr(
+        "app.services.runtime_v5.action_observer.write_runtime_action_audit",
+        lambda *args, **kwargs: audits.append(kwargs),
+    )
+    monkeypatch.setattr("app.services.runtime_v5.context.load_session_context", lambda chat_id: {})
+    monkeypatch.setattr("app.services.runtime_v5.context.clear_result_context", lambda *args, **kwargs: None)
+
+    result = celery_module.bot_runtime_card_reply_task(
+        str(db.app_config.id),
+        "创建一个任务：明天3点会",
+        "创建一个任务：明天3点会",
+        {"open_id": "ou_1", "role": "member", "access_scope": "personal"},
+        "oc_1",
+        {"receive_id_type": "chat_id", "receive_id": "oc_1"},
+    )
+
+    assert result["ok"] is True
+    assert db.commits == 1
+    assert db.rollbacks == 0
+    assert db.closed is True
+    assert traces
+    assert audits
+    assert sent[0]["reply"] == "任务已创建。"
