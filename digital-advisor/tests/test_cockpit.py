@@ -390,6 +390,7 @@ def test_console_employee_agent_workbench_surfaces_identity_boundaries() -> None
     assert "latest?.enterprise_identity_boundary" in console_app
     assert "latest?.user_identity_boundary" in console_app
     assert 'id="dataLayerBoard"' in console_html
+    assert "<h3>能力域</h3>" in console_html
     assert 'id="toolFamilyBoard"' in console_html
     assert 'id="entrypointBoard"' in console_html
     assert "知识库模块稍后接入" not in console_html

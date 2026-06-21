@@ -158,3 +158,49 @@ Registry Fallback Deprecation Review
 - 修复 diff 日志缺失。
 
 不允许继续扩展 Registry 概念。
+
+## 观察记录
+
+### 2026-06-21 云端控制台观察
+
+环境：
+
+```text
+https://ai.gaustek.com/console
+company = 固势
+```
+
+观察结果：
+
+| 页面 | 观察结果 | 结论 |
+| --- | --- | --- |
+| 能力目录 | 显示 7 个 Domain：People / Communication / Workspace / Process / Knowledge / Business / Intelligence | `catalog_payload` 已接管 |
+| 能力清册 | 显示 `skill_count = 84`，`missing_provider_count = 0` | `skill_registry_payload` 已接管 |
+| 治理中心 | `governance_source = governance_payload`，`governance_actions = []` | `governance_payload` 已接管，空状态符合 healthy Registry |
+| 系统诊断 | `diagnostics_source = diagnostics_payload`，7 个诊断维度均为 healthy | `diagnostics_payload` 已接管 |
+
+Console diff 已观察到：
+
+```text
+catalog_payload
+skill_registry_payload
+governance_payload
+diagnostics_payload
+```
+
+发现的问题：
+
+- 能力目录已显示 Domain，但标题仍为 `9 个 Tool`，容易误导。
+
+处理：
+
+- 将标题改为 `能力域`。
+- 未改变布局。
+- 未改变交互。
+- 未移除 fallback。
+
+观察结论：
+
+Registry Payload 已覆盖四个页面。
+
+fallback 当前仍建议保留。
