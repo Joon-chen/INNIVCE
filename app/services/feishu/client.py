@@ -389,6 +389,35 @@ class FeishuClient:
             raise HTTPException(status_code=502, detail={"message": "Feishu user API failed", "path": path, "body": body})
         return body
 
+    async def api_patch_user(
+        self,
+        path: str,
+        *,
+        user_access_token: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        headers = {"Authorization": f"Bearer {user_access_token}"}
+        async with httpx.AsyncClient(timeout=settings.request_timeout_seconds) as client:
+            response = await client.patch(url, json=payload or {}, headers=headers)
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"raw": response.text}
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Feishu user API HTTP error",
+                    "path": path,
+                    "status_code": response.status_code,
+                    "body": body,
+                },
+            )
+        if body.get("code") != 0:
+            raise HTTPException(status_code=502, detail={"message": "Feishu user API failed", "path": path, "body": body})
+        return body
+
     async def api_post(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.raw.request("POST", path, payload=payload or {}, error_label="Feishu API")
 

@@ -56,11 +56,13 @@ class FeishuTaskService:
         task_guid: str,
         completed_at: str,
         user_id_type: str = "open_id",
+        user_access_token: str | None = None,
     ) -> dict[str, Any]:
-        return await self.client.api_patch(
-            f"/open-apis/task/v2/tasks/{quote(task_guid, safe='')}?user_id_type={user_id_type or 'open_id'}",
-            {"task": {"completed_at": completed_at}, "update_fields": ["completed_at"]},
-        )
+        path = f"/open-apis/task/v2/tasks/{quote(task_guid, safe='')}?user_id_type={user_id_type or 'open_id'}"
+        payload = {"task": {"completed_at": completed_at}, "update_fields": ["completed_at"]}
+        if user_access_token:
+            return await self.client.api_patch_user(path, user_access_token=user_access_token, payload=payload)
+        return await self.client.api_patch(path, payload)
 
     async def reopen_task(
         self,

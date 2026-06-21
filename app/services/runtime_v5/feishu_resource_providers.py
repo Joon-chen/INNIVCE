@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
@@ -34,8 +34,10 @@ from app.services.cognitive_foundation import (
 from app.services.feishu.drive import FeishuDriveService
 from app.services.feishu.meeting import FeishuMeetingService
 from app.services.feishu.okr import FeishuOkrService
+from app.services.feishu.task import FeishuTaskService
 from app.services.llm.approval_advisor import generate_approval_llm_advice
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
+from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
 from app.services.runtime_v5.models import ProviderRequest, ProviderResult, RuntimeContext
 from app.services.tools.base import ToolContext, ToolExecutionStatus, ToolRequest
 from app.services.tools.providers.feishu_api import feishu_write_confirmation_token
@@ -1084,6 +1086,9 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 params=params,
             )
 
+        if request.operation == "complete_task":
+            return self._execute_task_complete_with_user_token(request, params=_task_tool_params(request))
+
         if request.operation != "create_task":
             return self._execute_task_tool(
                 request,
@@ -1166,6 +1171,119 @@ class FeishuTaskProvider(FeishuResourceProvider):
             error=result.error or "",
         )
 
+    def _execute_task_complete_with_user_token(
+        self,
+        request: ProviderRequest,
+        *,
+        params: dict[str, Any],
+    ) -> ProviderResult:
+        task_guid = str(params.get("task_guid") or params.get("guid") or params.get("task_id") or "").strip()
+        if not task_guid:
+            return _missing_params_result(
+                source="task",
+                result_type="task_complete",
+                operation=request.operation,
+                missing=("task_guid",),
+                answer="完成任务还缺少任务 ID。",
+                error="missing_task_guid",
+            )
+
+        company_id = request.context.runtime_scope.active_company_id
+        app_config = _active_feishu_app_config(self.db, company_id)
+        token_resolution = _run_async(
+            resolve_feishu_user_access_token(
+                self.db,
+                company_id=company_id,
+                open_id=request.context.identity.open_id,
+                app_config=app_config,
+            )
+        )
+        identity_contract = request.execution_identity_contract.payload()
+        identity_contract["authorization_status"] = token_resolution.authorization_status
+        if not token_resolution.authorized:
+            return ProviderResult(
+                source="task",
+                status="denied",
+                result_type="waiting_authorization",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": token_resolution.error,
+                    "execution_identity_contract": identity_contract,
+                    "waiting_authorization": True,
+                    "provider_boundary": "user_token_required",
+                },
+                answer="完成任务需要本人飞书授权。请先完成飞书用户授权后再执行。",
+                error=token_resolution.error or "missing_user_token",
+            )
+
+        if app_config is None:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_complete",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "missing_feishu_app_config",
+                    "execution_identity_contract": identity_contract,
+                },
+                answer="没有找到当前公司的飞书应用配置，暂时不能完成任务。",
+                error="missing_feishu_app_config",
+            )
+
+        try:
+            complete_task = FeishuTaskService(app_config).complete_task
+            payload = _run_async(
+                complete_task(
+                    task_guid=task_guid,
+                    completed_at=_task_completed_at(params),
+                    user_id_type=str(params.get("user_id_type") or "open_id"),
+                    user_access_token=token_resolution.user_access_token,
+                )
+            )
+        except Exception as exc:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_complete",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "",
+                    "execution_identity_contract": identity_contract,
+                    "error_type": "provider_execution_failed",
+                    "tool_error": str(exc),
+                },
+                answer="任务完成失败，原始错误已记录到 Runtime Result。",
+                error=str(exc),
+            )
+
+        data = _feishu_response_data(payload)
+        raw_task = data.get("task") if isinstance(data, dict) and isinstance(data.get("task"), dict) else {"guid": task_guid}
+        item = _task_item(raw_task)
+        title = str(item.get("title") or task_guid)
+        return ProviderResult(
+            source="task",
+            status="success",
+            result_type="task_complete",
+            count=1,
+            items=(item,),
+            metadata={
+                "operation": request.operation,
+                "credential_mode": "USER_TOKEN",
+                "authorization_status": token_resolution.authorization_status,
+                "account_id": token_resolution.account_id,
+                "execution_identity_contract": identity_contract,
+                "raw": payload,
+            },
+            answer=f"任务已完成：{title}",
+            error="",
+        )
+
     def _execute_task_tool(
         self,
         request: ProviderRequest,
@@ -1206,6 +1324,13 @@ def _task_result_type(operation: str) -> str:
     if operation == "complete_task":
         return "task_complete"
     return operation
+
+
+def _task_completed_at(params: dict[str, Any]) -> str:
+    completed_at = str(params.get("completed_at") or "").strip()
+    if completed_at:
+        return completed_at
+    return str(int(datetime.now(UTC).timestamp() * 1000))
 
 
 class FeishuCalendarProvider(FeishuResourceProvider):
