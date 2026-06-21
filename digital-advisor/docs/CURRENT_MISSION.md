@@ -12,37 +12,49 @@ Capability Registry 影子校验见 `docs/CAPABILITY_REGISTRY_SHADOW_VERIFICATIO
 Skill Registry 治理计划见 `docs/SKILL_REGISTRY_CLEANUP_PLAN.md`。
 Registry UI 冻结评审见 `docs/REGISTRY_UI_FREEZE_REVIEW.md`。
 Registry fallback 观察期见 `docs/REGISTRY_FALLBACK_OBSERVATION.md`。
+Registry fallback 退役评审见 `docs/REGISTRY_FALLBACK_DEPRECATION_REVIEW.md`。
+Task 认知样板设计见 `docs/TASK_COGNITIVE_SAMPLE_DESIGN.md`。
 
 ## 当前阶段
 
 当前进入：
 
 ```text
-Registry Fallback Observation Phase
+Task Cognitive Sample Design Phase
 ```
 
 背景：
 
-Registry UI V1 已冻结。
+Capability Registry 项目已验收通过，并进入维护状态。
 
-四个页面已接入 Registry Payload：
+Registry fallback 已进入退役评审：
 
-- 能力目录 -> `catalog_payload`
-- 能力清册 -> `skill_registry_payload`
-- 治理中心 -> `governance_payload`
-- 系统诊断 -> `diagnostics_payload`
+- Registry Payload 是四个页面的主事实来源。
+- 旧数据源按“立即废弃 / 保留一个版本周期 / 长期保留”分级。
+- 不继续扩展 Registry。
 
 ## 当前目标
 
-观察 fallback 是否仍被需要。
+恢复主线，设计 Task 认知样板。
 
-目标是确认：
+目标是验证 Task 是否可以复用：
 
-- Registry Payload 持续稳定覆盖四个页面。
-- Registry Health 持续 healthy。
-- `capability-registry-diff` 没有暴露阻塞缺口。
-- fallback 保留但不再作为主数据源。
-- 不提前移除 fallback。
+```text
+Workspace
+-> Capability
+-> Skill
+-> Provider
+```
+
+以及认知链路：
+
+```text
+WorkEvent
+-> Evidence
+-> Snapshot
+-> Insight
+-> Runtime Action
+```
 
 ## 当前禁止范围
 
@@ -51,27 +63,31 @@ Registry UI V1 已冻结。
 - 新数据库表。
 - Event Bus / Workflow / Memory / Evidence / Snapshot / Insight Engine。
 - 第二套 Runtime。
-- Task 业务代码 / Tool / Runtime Action / UI。
+- Task 业务代码 / Tool / Provider / Runtime Action / UI。
 - 数据库迁移。
 - Domain 调整。
 - UI 重构。
 - Shadow Panel。
 - 业务逻辑改造。
-- 移除旧数据源 fallback。
 - Registry 概念扩展。
+- 立即移除旧数据源 fallback。
+- USER Resolver / DATE Resolver。
+- Calendar / Meeting / Customer 样板。
 
 ## 当前验收标准
 
-- 输出 Registry Fallback Observation。
-- 明确观察指标。
-- 明确观察期禁止范围。
-- 明确进入 fallback 移除评审的条件。
+- 输出 Registry Fallback Deprecation Review。
+- 输出 Task Cognitive Sample Design。
+- 明确 Task 属于 Workspace，不建立 Task Module。
+- 明确 Capability / Skill / Provider 映射。
+- 明确 Task Snapshot 不替代实时 Task 状态。
+- 明确 Insight 只给建议，Action 继续归 Runtime。
 - 不修改运行代码。
 - 不修改数据库。
 - 不修改业务逻辑。
 
 ## 下一步计划
 
-1. 观察四个页面真实使用情况。
-2. 收集 `capability-registry-diff`。
-3. 稳定后进入 Registry Fallback Deprecation Review。
+1. 评审 `task_query` / `task_complete` Contract。
+2. 确认 Task Runtime Sample 最小验收标准。
+3. 稳定后再决定是否进入 Task Runtime Sample Implementation。
