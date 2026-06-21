@@ -39,21 +39,30 @@ class _FakeDb:
 
 
 def _request(*, company_id, open_id="ou_user", params=None, operation="complete_task") -> ProviderRequest:
-    if operation == "create_event":
+    if operation in {"create_event", "list_events"}:
         source = "calendar"
-        intent_name = "calendar_create"
-        message = "创建一个会议：明天下午5点开会"
-        default_params = {"summary": "明天下午5点开会", "start": "2026-06-23T17:00:00+08:00", "end": "2026-06-23T18:00:00+08:00"}
+        intent_name = "calendar_create" if operation == "create_event" else "calendar_query"
+        message = "创建一个会议：明天下午5点开会" if operation == "create_event" else "查看我的日程"
+        default_params = (
+            {"summary": "明天下午5点开会", "start": "2026-06-23T17:00:00+08:00", "end": "2026-06-23T18:00:00+08:00"}
+            if operation == "create_event"
+            else {}
+        )
     else:
         source = "task"
-        intent_name = "task_create" if operation == "create_task" else "task_complete"
-        message = "创建任务" if operation == "create_task" else "完成任务"
-        default_params = {"summary": "明天4点开会"} if operation == "create_task" else {"task_guid": "task-guid-1"}
+        if operation in {"list_my_tasks", "search_tasks"}:
+            intent_name = "task_query"
+            message = "查看我的任务"
+            default_params = {}
+        else:
+            intent_name = "task_create" if operation == "create_task" else "task_complete"
+            message = "创建任务" if operation == "create_task" else "完成任务"
+            default_params = {"summary": "明天4点开会"} if operation == "create_task" else {"task_guid": "task-guid-1"}
     return ProviderRequest(
         source=source,
         operation=operation,
         intent=IntentResult(
-            question_type="action",
+            question_type="query" if operation in {"list_my_tasks", "search_tasks", "list_events"} else "action",
             intent=intent_name,
             data_scope="self",
             confidence=0.9,
@@ -151,6 +160,28 @@ def test_task_service_create_task_uses_user_token_post():
     ]
 
 
+def test_task_service_list_tasks_uses_user_token_get():
+    calls = []
+
+    class FakeClient:
+        async def api_get_user(self, path, *, user_access_token, params=None):
+            calls.append((path, user_access_token, params))
+            return {"code": 0, "data": {"items": [{"guid": "task-guid-1", "summary": "明天4点开会"}]}}
+
+        async def api_get(self, _path, params=None):
+            raise AssertionError("tenant token get must not be used when user token is provided")
+
+    result = feishu_resource_providers._run_async(
+        FeishuTaskService(SimpleNamespace(), client=FakeClient()).list_tasks(
+            page_size=20,
+            user_access_token="user-token",
+        )
+    )
+
+    assert result["data"]["items"][0]["summary"] == "明天4点开会"
+    assert calls == [("/open-apis/task/v2/tasks", "user-token", {"page_size": 20})]
+
+
 def test_calendar_service_create_event_uses_user_token_post():
     calls = []
 
@@ -189,6 +220,30 @@ def test_calendar_service_create_event_uses_user_token_post():
             },
         )
     ]
+
+
+def test_calendar_service_list_events_uses_user_token_get():
+    calls = []
+
+    class FakeClient:
+        async def api_get_user(self, path, *, user_access_token, params=None):
+            calls.append((path, user_access_token, params))
+            return {"code": 0, "data": {"items": [{"event_id": "event-1", "summary": "会议"}]}}
+
+        async def api_get(self, _path, params=None):
+            raise AssertionError("tenant token get must not be used when user token is provided")
+
+    result = feishu_resource_providers._run_async(
+        FeishuCalendarService(SimpleNamespace(), client=FakeClient()).list_primary_events(
+            page_size=20,
+            user_access_token="user-token",
+        )
+    )
+
+    assert result["data"]["items"][0]["summary"] == "会议"
+    assert calls[0][0] == "/open-apis/calendar/v4/calendars/primary/events"
+    assert calls[0][1] == "user-token"
+    assert calls[0][2]["page_size"] == 50
 
 
 def test_calendar_create_missing_user_token_returns_waiting_authorization():
@@ -273,6 +328,43 @@ def test_task_complete_authorized_user_token_executes_task_provider(monkeypatch)
     assert calls[0]["user_access_token"] == "user-token"
 
 
+def test_task_query_authorized_user_token_reads_task_provider(monkeypatch):
+    company_id = uuid4()
+    app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
+
+    class TokenResolution:
+        user_access_token = "user-token"
+        authorization_status = "AUTHORIZED"
+        account_id = "account-1"
+        error = ""
+        authorized = True
+
+    async def fake_resolve_user_token(*_args, **_kwargs):
+        return TokenResolution()
+
+    class FakeTaskService:
+        def __init__(self, app_config):
+            self.app_config = app_config
+
+        async def list_tasks(self, **kwargs):
+            calls.append(kwargs)
+            return {"code": 0, "data": {"items": [{"guid": "task-guid-1", "summary": "明天4点开会"}]}}
+
+    monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
+    monkeypatch.setattr(feishu_resource_providers, "FeishuTaskService", FakeTaskService)
+
+    provider = FeishuTaskProvider(db=_FakeDb(app_config=app_config))
+    result = provider.execute(_request(company_id=company_id, operation="list_my_tasks"))
+
+    assert result.status == "success"
+    assert result.result_type == "task_list"
+    assert result.items[0]["title"] == "明天4点开会"
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
+    assert result.metadata["authorization_status"] == "AUTHORIZED"
+    assert calls[0]["user_access_token"] == "user-token"
+
+
 def test_task_create_authorized_user_token_executes_task_provider(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
@@ -342,6 +434,43 @@ def test_calendar_create_authorized_user_token_executes_calendar_provider(monkey
     assert result.status == "success"
     assert result.result_type == "calendar_create"
     assert result.items[0]["title"] == "明天下午5点开会"
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
+    assert result.metadata["authorization_status"] == "AUTHORIZED"
+    assert calls[0]["user_access_token"] == "user-token"
+
+
+def test_calendar_query_authorized_user_token_reads_calendar_provider(monkeypatch):
+    company_id = uuid4()
+    app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
+
+    class TokenResolution:
+        user_access_token = "user-token"
+        authorization_status = "AUTHORIZED"
+        account_id = "account-1"
+        error = ""
+        authorized = True
+
+    async def fake_resolve_user_token(*_args, **_kwargs):
+        return TokenResolution()
+
+    class FakeCalendarService:
+        def __init__(self, app_config):
+            self.app_config = app_config
+
+        async def list_primary_events(self, **kwargs):
+            calls.append(kwargs)
+            return {"code": 0, "data": {"items": [{"event_id": "event-1", "summary": "会议"}]}}
+
+    monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
+    monkeypatch.setattr(feishu_resource_providers, "FeishuCalendarService", FakeCalendarService)
+
+    provider = FeishuCalendarProvider(db=_FakeDb(app_config=app_config))
+    result = provider.execute(_request(company_id=company_id, operation="list_events"))
+
+    assert result.status == "success"
+    assert result.result_type == "calendar_event_list"
+    assert result.items[0]["title"] == "会议"
     assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["authorization_status"] == "AUTHORIZED"
     assert calls[0]["user_access_token"] == "user-token"

@@ -20,6 +20,7 @@ class FeishuCalendarService:
         end_time: datetime | None = None,
         page_size: int = 50,
         page_token: str | None = None,
+        user_access_token: str | None = None,
     ) -> dict[str, Any]:
         now = datetime.now(UTC)
         start = start_time or now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -31,7 +32,10 @@ class FeishuCalendarService:
         }
         if page_token:
             params["page_token"] = page_token
-        return await self.client.api_get("/open-apis/calendar/v4/calendars/primary/events", params=params)
+        path = "/open-apis/calendar/v4/calendars/primary/events"
+        if user_access_token:
+            return await self.client.api_get_user(path, user_access_token=user_access_token, params=params)
+        return await self.client.api_get(path, params=params)
 
     async def create_event(
         self,

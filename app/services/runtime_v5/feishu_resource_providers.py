@@ -1227,13 +1227,77 @@ class FeishuTaskProvider(FeishuResourceProvider):
         operation: str,
         params: dict[str, Any],
     ) -> ProviderResult:
-        result = self._execute_tool(
-            request,
-            tool_name=tool_name,
-            params=params,
+        company_id = request.context.runtime_scope.active_company_id
+        app_config = _active_feishu_app_config(self.db, company_id)
+        token_resolution = _run_async(
+            resolve_feishu_user_access_token(
+                self.db,
+                company_id=company_id,
+                open_id=request.context.identity.open_id,
+                app_config=app_config,
+            )
         )
-        status = _provider_status(result)
-        payload = _tool_payload(result)
+        identity_contract = request.execution_identity_contract.payload()
+        identity_contract["authorization_status"] = token_resolution.authorization_status
+        if not token_resolution.authorized:
+            return ProviderResult(
+                source="task",
+                status="denied",
+                result_type="waiting_authorization",
+                metadata={
+                    "operation": operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": token_resolution.error,
+                    "execution_identity_contract": identity_contract,
+                    "waiting_authorization": True,
+                    "provider_boundary": "user_token_required",
+                },
+                answer="查询任务需要本人飞书授权。请先完成飞书用户授权后再执行。",
+                error=token_resolution.error or "missing_user_token",
+            )
+        if app_config is None:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_list",
+                metadata={
+                    "operation": operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "missing_feishu_app_config",
+                    "execution_identity_contract": identity_contract,
+                },
+                answer="没有找到当前公司的飞书应用配置，暂时不能查询任务。",
+                error="missing_feishu_app_config",
+            )
+        try:
+            payload = _run_async(
+                FeishuTaskService(app_config).list_tasks(
+                    page_size=int(params.get("page_size") or params.get("limit") or 50),
+                    page_token=str(params.get("page_token") or "") or None,
+                    user_access_token=token_resolution.user_access_token,
+                )
+            )
+            status = "success"
+            error = ""
+        except Exception as exc:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_list",
+                metadata={
+                    "operation": operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "",
+                    "execution_identity_contract": identity_contract,
+                    "error_type": "provider_execution_failed",
+                    "tool_error": str(exc),
+                },
+                answer="任务查询失败，原始错误已记录到 Runtime Result。",
+                error=str(exc),
+            )
         raw_items = _items_from_payload(payload)
         items = tuple(_task_item(item) for item in raw_items)
         return ProviderResult(
@@ -1245,11 +1309,14 @@ class FeishuTaskProvider(FeishuResourceProvider):
             metadata={
                 "operation": operation,
                 "tool_name": tool_name,
+                "credential_mode": "USER_TOKEN",
+                "authorization_status": token_resolution.authorization_status,
+                "account_id": token_resolution.account_id,
+                "execution_identity_contract": identity_contract,
                 "query": params.get("query") or params.get("keyword") or "",
-                **_provider_error_metadata(result),
             },
             answer=_task_list_answer(items, query=str(params.get("query") or params.get("keyword") or "")),
-            error=result.error or "",
+            error=error,
         )
 
     def _execute_task_complete_with_user_token(
@@ -1457,24 +1524,94 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         if tool_name is None:
             return _tool_not_installed_result("calendar", request.operation)
         if request.operation == "list_events":
-            result = self._execute_tool(
-                request,
-                tool_name=tool_name,
-                params={**_calendar_tool_params(request), "response_format": "raw_json"},
+            params = _calendar_tool_params(request)
+            company_id = request.context.runtime_scope.active_company_id
+            app_config = _active_feishu_app_config(self.db, company_id)
+            token_resolution = _run_async(
+                resolve_feishu_user_access_token(
+                    self.db,
+                    company_id=company_id,
+                    open_id=request.context.identity.open_id,
+                    app_config=app_config,
+                )
             )
-            status = _provider_status(result)
-            payload = _tool_payload(result)
+            identity_contract = request.execution_identity_contract.payload()
+            identity_contract["authorization_status"] = token_resolution.authorization_status
+            if not token_resolution.authorized:
+                return ProviderResult(
+                    source="calendar",
+                    status="denied",
+                    result_type="waiting_authorization",
+                    metadata={
+                        "operation": request.operation,
+                        "credential_mode": "USER_TOKEN",
+                        "authorization_status": token_resolution.authorization_status,
+                        "authorization_error": token_resolution.error,
+                        "execution_identity_contract": identity_contract,
+                        "waiting_authorization": True,
+                        "provider_boundary": "user_token_required",
+                    },
+                    answer="查询日程需要本人飞书授权。请先完成飞书用户授权后再执行。",
+                    error=token_resolution.error or "missing_user_token",
+                )
+            if app_config is None:
+                return ProviderResult(
+                    source="calendar",
+                    status="error",
+                    result_type="calendar_event_list",
+                    metadata={
+                        "operation": request.operation,
+                        "credential_mode": "USER_TOKEN",
+                        "authorization_status": token_resolution.authorization_status,
+                        "authorization_error": "missing_feishu_app_config",
+                        "execution_identity_contract": identity_contract,
+                    },
+                    answer="没有找到当前公司的飞书应用配置，暂时不能查询日程。",
+                    error="missing_feishu_app_config",
+                )
+            try:
+                payload = _run_async(
+                    FeishuCalendarService(app_config).list_primary_events(
+                        page_size=int(params.get("page_size") or params.get("limit") or 50),
+                        page_token=str(params.get("page_token") or "") or None,
+                        user_access_token=token_resolution.user_access_token,
+                    )
+                )
+            except Exception as exc:
+                return ProviderResult(
+                    source="calendar",
+                    status="error",
+                    result_type="calendar_event_list",
+                    metadata={
+                        "operation": request.operation,
+                        "credential_mode": "USER_TOKEN",
+                        "authorization_status": token_resolution.authorization_status,
+                        "authorization_error": "",
+                        "execution_identity_contract": identity_contract,
+                        "error_type": "provider_execution_failed",
+                        "tool_error": str(exc),
+                    },
+                    answer="日程查询失败，原始错误已记录到 Runtime Result。",
+                    error=str(exc),
+                )
             raw_items = _items_from_payload(payload)
             items = tuple(_calendar_item(item) for item in raw_items)
             return ProviderResult(
                 source="calendar",
-                status=status,
+                status="success",
                 result_type="calendar_event_list",
                 count=len(items),
                 items=items,
-                metadata={"operation": request.operation, "tool_name": tool_name, **_provider_error_metadata(result)},
+                metadata={
+                    "operation": request.operation,
+                    "tool_name": tool_name,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "account_id": token_resolution.account_id,
+                    "execution_identity_contract": identity_contract,
+                },
                 answer=_calendar_list_answer(items),
-                error=result.error or "",
+                error="",
             )
         if request.operation == "create_event":
             return self._execute_calendar_create_with_user_token(request, params=_calendar_tool_params(request))
