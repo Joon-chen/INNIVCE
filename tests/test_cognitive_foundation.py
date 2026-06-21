@@ -281,7 +281,36 @@ def test_approval_analysis_completed_writes_snapshot() -> None:
     assert snapshot.snapshot_type == "approval_current_judgment"
     assert snapshot.recommendation == "需关注"
     assert snapshot.risk_level == "review"
+    assert snapshot.payload == {
+        "assessment": {
+            "suggestion": "需关注",
+            "reason": "供应商名称需核对",
+            "detailed_reason": "供应商名称和发票抬头不完全一致",
+        }
+    }
     assert raw_item["_approval_snapshot"]["status"] == "completed"
+
+
+def test_approval_pending_snapshot_only_stores_cognitive_state() -> None:
+    company_id = uuid4()
+    db = _WriteDb()
+    provider = FeishuApprovalProvider(db=db)
+    request = _approval_request(company_id)
+    raw_item = {
+        "instance_code": "approval-1",
+        "approval_name": "报销审批",
+        "status": "PENDING",
+        "serial_number": "202606210001",
+    }
+
+    provider._write_approval_pending_snapshot(request, raw_item)
+
+    snapshot = db.added[0]
+    assert snapshot.status == "pending_analysis"
+    assert snapshot.recommendation == "分析中"
+    assert snapshot.payload == {"cognitive_state": "pending_analysis"}
+    assert "status" not in snapshot.payload
+    assert "serial_number" not in snapshot.payload
 
 
 def _approval_request(company_id):

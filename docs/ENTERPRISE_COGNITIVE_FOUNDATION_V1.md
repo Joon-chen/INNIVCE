@@ -81,12 +81,16 @@ updated_at
 语义规则：
 
 - Snapshot 保存系统对业务对象的当前认知状态。
+- Snapshot 只保存 AI Cognitive State，不保存业务对象状态。
+- Approval Snapshot 不是审批缓存；审批列表、审批状态、申请人、金额、审批详情必须来自 Feishu live data。
+- 最终展示由 Live Approval Data 与 Approval Snapshot 合并输出。
 - Snapshot 可以更新，WorkEvent 不可更新。
 - `status` 至少支持 `pending_analysis`、`analysis_running`、`completed`、`failed`。
 - `recommendation` 是给业务用户看的建议，例如 `可通过`、`需关注`、`高风险`。
 - `risk_level` 是稳定枚举，例如 `pass`、`review`、`high`。
 - `reasons` 必须来自已完成分析，不得基于未完成附件生成。
 - `source_event_ids` 必须指向生成该 Snapshot 的 WorkEvent。
+- Snapshot payload 只允许保存 AI 分析结果或认知状态，不允许保存审批状态快照。
 
 Approval Snapshot 读取规则：
 

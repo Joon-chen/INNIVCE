@@ -625,7 +625,7 @@ class FeishuApprovalProvider(FeishuResourceProvider):
             risk_level="pending",
             reasons=["附件或 AI 分析尚未完成"],
             source_event_ids=list(raw_item.get("_approval_event_ids") or []),
-            payload={"item": _approval_snapshot_safe_item(raw_item)},
+            payload={"cognitive_state": "pending_analysis"},
         )
         raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
 
@@ -648,7 +648,7 @@ class FeishuApprovalProvider(FeishuResourceProvider):
             object_id=object_id,
             source="ai_analysis",
             actor="system",
-            payload={"assessment": assessment, "item": _approval_snapshot_safe_item(raw_item)},
+            payload={"assessment": assessment},
         )
         source_event_ids = list(raw_item.get("_approval_event_ids") or [])
         source_event_ids.append(str(analysis_event.id))
@@ -665,7 +665,7 @@ class FeishuApprovalProvider(FeishuResourceProvider):
             risk_level=_approval_snapshot_risk_level(assessment),
             reasons=_approval_snapshot_reasons(assessment),
             source_event_ids=source_event_ids,
-            payload={"assessment": assessment, "item": _approval_snapshot_safe_item(raw_item)},
+            payload={"assessment": assessment},
         )
         raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
 

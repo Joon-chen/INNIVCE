@@ -15,20 +15,22 @@ Runtime V1 冻结复盘见 `docs/RUNTIME_V1_FREEZE_REVIEW.md`。
 当前阶段进入：
 
 ```text
-Approval Cognitive Integration Phase
+Approval Snapshot Builder Phase
 ```
 
 Enterprise Cognitive Foundation V1 的三层底座已建立。本阶段把 Approval 查询接入认知闭环：
 
 ```text
-Approval -> WorkEvent -> Snapshot -> Bot Read Snapshot
+Live Approval Data + Approval Snapshot -> Bot / Card / Portal Output
 ```
 
 ## 当前目标
 
 以 Approval 作为第一条认知样板链路：
 
-- Approval Query 读取 Snapshot。
+- Approval List 必须实时查询 Feishu。
+- Approval Intelligence 必须读取 Snapshot。
+- 最终展示由 Live Approval Data 与 Approval Snapshot 合并输出。
 - Snapshot 不存在或 `status != completed` 时，只能展示“分析中”。
 - Snapshot completed 后，展示 `recommendation / risk_level / reasons`。
 - `approval_analysis_completed` 必须写入 Snapshot。
@@ -45,6 +47,8 @@ Approval -> WorkEvent -> Snapshot -> Bot Read Snapshot
 - 跨公司聚合。
 - Mail / Meeting / Customer / Task Snapshot。
 - Approval 专属 Snapshot 表。
+- 使用 Snapshot 替代实时审批状态。
+- 将审批状态、审批列表、申请人、金额等业务事实缓存到 Snapshot。
 - Bot / Card / Portal 直接实时生成 AI 建议。
 - Batch Migration、transfer/add_sign execution、USER Resolver。
 - Diagnostics / Observability 重构。
@@ -56,7 +60,8 @@ Approval -> WorkEvent -> Snapshot -> Bot Read Snapshot
 - MemoryCandidate 标准模型已冻结。
 - Approval Cognitive Lifecycle 已冻结。
 - WorkEvent 写入语义必须是 append-only。
-- Approval Snapshot 是 Bot 展示 AI 判断的唯一来源。
+- Approval Snapshot 是 Bot 展示 AI 判断的唯一来源，不是审批状态来源。
+- Approval 状态、审批列表和审批详情仍来自 Feishu live data。
 - 附件未完成或 AI 分析未完成时，Bot 显示“分析中”。
 - `approval_analysis_completed` 会写入 completed Snapshot。
 - 所有三层数据必须携带 `company_id`。
@@ -64,6 +69,6 @@ Approval -> WorkEvent -> Snapshot -> Bot Read Snapshot
 
 ## 下一步计划
 
-- 部署 Approval Snapshot 读取/写入链路。
-- 用真实飞书审批查询验证：首次无 completed Snapshot 时展示“分析中”；分析完成后展示 Snapshot 建议。
+- 冻结 Snapshot Builder 输出边界：只写 AI Cognitive State。
+- 验证 Approval Query：实时审批数据 + Snapshot 建议合并展示。
 - 观察是否需要独立异步 Attachment Processor；暂不引入 WorkEvent Engine。
