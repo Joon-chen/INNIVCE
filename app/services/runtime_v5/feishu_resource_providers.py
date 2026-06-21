@@ -1089,16 +1089,24 @@ class FeishuTaskProvider(FeishuResourceProvider):
         if request.operation == "complete_task":
             return self._execute_task_complete_with_user_token(request, params=_task_tool_params(request))
 
-        if request.operation != "create_task":
-            return self._execute_task_tool(
-                request,
-                tool_name=tool_name,
-                operation=request.operation,
-                is_write=is_write,
-                params=_task_tool_params(request),
-            )
+        if request.operation == "create_task":
+            return self._execute_task_create_with_user_token(request, params=_task_tool_params(request))
 
-        summary = str(request.params.get("summary") or request.intent.canonical_question or request.context.current_message).strip()
+        return self._execute_task_tool(
+            request,
+            tool_name=tool_name,
+            operation=request.operation,
+            is_write=is_write,
+            params=_task_tool_params(request),
+        )
+
+    def _execute_task_create_with_user_token(
+        self,
+        request: ProviderRequest,
+        *,
+        params: dict[str, Any],
+    ) -> ProviderResult:
+        summary = str(params.get("summary") or request.intent.canonical_question or request.context.current_message).strip()
         if not summary:
             return _missing_params_result(
                 source="task",
@@ -1108,34 +1116,106 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 answer="创建任务还缺少任务标题。",
                 error="missing_task_summary",
             )
-        result = self._execute_tool(
-            request,
-            tool_name=tool_name,
-            confirm_write=True,
-            params={
-                "summary": summary,
-                "response_format": "raw_json",
-            },
+
+        company_id = request.context.runtime_scope.active_company_id
+        app_config = _active_feishu_app_config(self.db, company_id)
+        token_resolution = _run_async(
+            resolve_feishu_user_access_token(
+                self.db,
+                company_id=company_id,
+                open_id=request.context.identity.open_id,
+                app_config=app_config,
+            )
         )
-        status = _provider_status(result)
-        payload = _tool_payload(result)
-        task_id = _first_nested_value(payload, ("task_id", "id", "guid"))
-        url = _first_nested_value(payload, ("url", "app_link", "link"))
+        identity_contract = request.execution_identity_contract.payload()
+        identity_contract["authorization_status"] = token_resolution.authorization_status
+        if not token_resolution.authorized:
+            return ProviderResult(
+                source="task",
+                status="denied",
+                result_type="waiting_authorization",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": token_resolution.error,
+                    "execution_identity_contract": identity_contract,
+                    "waiting_authorization": True,
+                    "provider_boundary": "user_token_required",
+                },
+                answer="创建任务需要本人飞书授权。请先完成飞书用户授权后再执行。",
+                error=token_resolution.error or "missing_user_token",
+            )
+
+        if app_config is None:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_create",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "missing_feishu_app_config",
+                    "execution_identity_contract": identity_contract,
+                },
+                answer="没有找到当前公司的飞书应用配置，暂时不能创建任务。",
+                error="missing_feishu_app_config",
+            )
+
+        try:
+            payload = _run_async(
+                FeishuTaskService(app_config).create_task(
+                    summary=summary,
+                    description=str(params.get("description") or "") or None,
+                    due=params.get("due") if isinstance(params.get("due"), dict) else None,
+                    members=params.get("members") if isinstance(params.get("members"), list) else None,
+                    tasklists=params.get("tasklists") if isinstance(params.get("tasklists"), list) else None,
+                    client_token=str(params.get("client_token") or "") or None,
+                    user_id_type=str(params.get("user_id_type") or "open_id"),
+                    user_access_token=token_resolution.user_access_token,
+                )
+            )
+        except Exception as exc:
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_create",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "",
+                    "execution_identity_contract": identity_contract,
+                    "error_type": "provider_execution_failed",
+                    "tool_error": str(exc),
+                },
+                answer="任务创建失败，原始错误已记录到 Runtime Result。",
+                error=str(exc),
+            )
+
+        data = _feishu_response_data(payload)
+        raw_task = data.get("task") if isinstance(data, dict) and isinstance(data.get("task"), dict) else data
+        item = _task_item(raw_task if isinstance(raw_task, dict) else {"summary": summary})
+        task_id = str(item.get("task_guid") or item.get("guid") or item.get("id") or "")
+        url = str(item.get("url") or item.get("app_link") or item.get("link") or "")
         return ProviderResult(
             source="task",
-            status=status,
+            status="success",
             result_type="task_create",
-            count=1 if status == "success" else 0,
-            items=({"title": summary, "task_id": task_id, "url": url},) if status == "success" else (),
+            count=1,
+            items=({"title": str(item.get("title") or summary), "task_id": task_id, "url": url},),
             metadata={
                 "operation": request.operation,
-                "tool_name": tool_name,
+                "credential_mode": "USER_TOKEN",
+                "authorization_status": token_resolution.authorization_status,
+                "account_id": token_resolution.account_id,
+                "execution_identity_contract": identity_contract,
                 "summary": summary,
-                "tool_answer": result.answer,
-                **_provider_error_metadata(result),
+                "raw": payload,
             },
-            answer=f"已创建任务：{summary}" if status == "success" else _tool_failure_answer("任务创建", result),
-            error=result.error or "",
+            answer=f"已创建任务：{summary}",
+            error="",
         )
 
     def _execute_task_query(

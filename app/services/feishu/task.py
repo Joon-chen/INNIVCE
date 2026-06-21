@@ -33,6 +33,7 @@ class FeishuTaskService:
         tasklists: list[dict[str, Any]] | None = None,
         client_token: str | None = None,
         user_id_type: str = "open_id",
+        user_access_token: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"summary": summary}
         if description:
@@ -45,8 +46,11 @@ class FeishuTaskService:
             payload["tasklists"] = tasklists
         if client_token:
             payload["client_token"] = client_token
+        path = f"/open-apis/task/v2/tasks?user_id_type={user_id_type or 'open_id'}"
+        if user_access_token:
+            return await self.client.api_post_user(path, user_access_token=user_access_token, payload=payload)
         return await self.client.api_post(
-            f"/open-apis/task/v2/tasks?user_id_type={user_id_type or 'open_id'}",
+            path,
             payload,
         )
 
