@@ -31,6 +31,7 @@ from app.services.cognitive_foundation import (
     get_snapshot,
     upsert_snapshot,
 )
+from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.drive import FeishuDriveService
 from app.services.feishu.meeting import FeishuMeetingService
 from app.services.feishu.okr import FeishuOkrService
@@ -1413,6 +1414,25 @@ def _task_completed_at(params: dict[str, Any]) -> str:
     return str(int(datetime.now(UTC).timestamp() * 1000))
 
 
+def _calendar_time_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and value:
+        return value
+    if value is None:
+        raise ValueError("Feishu calendar create requires start/end time.")
+    if isinstance(value, (int, float)):
+        return {"timestamp": str(int(value))}
+    text = str(value).strip()
+    if text.isdigit():
+        return {"timestamp": text}
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Feishu calendar create requires ISO datetime or timestamp for start/end time.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return {"timestamp": str(int(parsed.timestamp()))}
+
+
 class FeishuCalendarProvider(FeishuResourceProvider):
     source = "calendar"
 
@@ -1457,39 +1477,7 @@ class FeishuCalendarProvider(FeishuResourceProvider):
                 error=result.error or "",
             )
         if request.operation == "create_event":
-            missing = [key for key in ("summary", "start", "end") if not str(request.params.get(key) or "").strip()]
-            if missing:
-                return _missing_params_result(
-                    source="calendar",
-                    result_type="calendar_create",
-                    operation=request.operation,
-                    missing=missing,
-                    answer="创建日程还需要主题、开始时间和结束时间。你可以说：明天下午 3 点到 4 点创建一个会议，主题是项目进度。",
-                    error="missing_calendar_time",
-                )
-            result = self._execute_tool(
-                request,
-                tool_name=tool_name,
-                confirm_write=is_write,
-                params={**_calendar_tool_params(request), "response_format": "raw_json"},
-            )
-            status = _provider_status(result)
-            payload = _tool_payload(result)
-            summary = str(request.params.get("summary") or "")
-            event_id = _first_nested_value(payload, ("event_id", "id", "calendar_event_id"))
-            url = _first_nested_value(payload, ("url", "app_link", "link"))
-            return ProviderResult(
-                source="calendar",
-                status=status,
-                result_type="calendar_create",
-                count=1 if status == "success" else 0,
-                items=({"title": summary, "start": request.params.get("start"), "end": request.params.get("end"), "event_id": event_id, "url": url},)
-                if status == "success"
-                else (),
-                metadata={"operation": request.operation, "tool_name": tool_name, **_provider_error_metadata(result)},
-                answer=f"已创建日程：{summary}" if status == "success" else _tool_failure_answer("日程创建", result),
-                error=result.error or "",
-            )
+            return self._execute_calendar_create_with_user_token(request, params=_calendar_tool_params(request))
         return ProviderResult(
             source="calendar",
             status="error",
@@ -1501,6 +1489,135 @@ class FeishuCalendarProvider(FeishuResourceProvider):
             },
             answer=f"日程能力已进入 V5，但这个操作还没有接入：{request.operation}。",
             error=f"unsupported_operation:{request.operation}",
+        )
+
+    def _execute_calendar_create_with_user_token(
+        self,
+        request: ProviderRequest,
+        *,
+        params: dict[str, Any],
+    ) -> ProviderResult:
+        missing = [key for key in ("summary", "start", "end") if not str(params.get(key) or "").strip()]
+        if missing:
+            return _missing_params_result(
+                source="calendar",
+                result_type="calendar_create",
+                operation=request.operation,
+                missing=missing,
+                answer="创建日程还需要主题、开始时间和结束时间。你可以说：明天下午 3 点到 4 点创建一个会议，主题是项目进度。",
+                error="missing_calendar_time",
+            )
+
+        company_id = request.context.runtime_scope.active_company_id
+        app_config = _active_feishu_app_config(self.db, company_id)
+        token_resolution = _run_async(
+            resolve_feishu_user_access_token(
+                self.db,
+                company_id=company_id,
+                open_id=request.context.identity.open_id,
+                app_config=app_config,
+            )
+        )
+        identity_contract = request.execution_identity_contract.payload()
+        identity_contract["authorization_status"] = token_resolution.authorization_status
+        if not token_resolution.authorized:
+            return ProviderResult(
+                source="calendar",
+                status="denied",
+                result_type="waiting_authorization",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": token_resolution.error,
+                    "execution_identity_contract": identity_contract,
+                    "waiting_authorization": True,
+                    "provider_boundary": "user_token_required",
+                },
+                answer="创建日程需要本人飞书授权。请先完成飞书用户授权后再执行。",
+                error=token_resolution.error or "missing_user_token",
+            )
+
+        if app_config is None:
+            return ProviderResult(
+                source="calendar",
+                status="error",
+                result_type="calendar_create",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "missing_feishu_app_config",
+                    "execution_identity_contract": identity_contract,
+                },
+                answer="没有找到当前公司的飞书应用配置，暂时不能创建日程。",
+                error="missing_feishu_app_config",
+            )
+
+        summary = str(params.get("summary") or "").strip()
+        try:
+            payload = _run_async(
+                FeishuCalendarService(app_config).create_event(
+                    calendar_id=str(params.get("calendar_id") or "primary"),
+                    summary=summary,
+                    description=str(params.get("description") or "") or None,
+                    start_time=_calendar_time_payload(params.get("start_time") or params.get("start")),
+                    end_time=_calendar_time_payload(params.get("end_time") or params.get("end")),
+                    recurrence=str(params.get("recurrence") or params.get("rrule") or "") or None,
+                    attendee_ids=[str(item) for item in params.get("attendee_ids") or []] if isinstance(params.get("attendee_ids"), list) else None,
+                    attendees=params.get("attendees") if isinstance(params.get("attendees"), list) else None,
+                    user_id_type=str(params.get("user_id_type") or "open_id"),
+                    need_notification=params.get("need_notification") is not False,
+                    user_access_token=token_resolution.user_access_token,
+                )
+            )
+        except Exception as exc:
+            return ProviderResult(
+                source="calendar",
+                status="error",
+                result_type="calendar_create",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": token_resolution.authorization_status,
+                    "authorization_error": "",
+                    "execution_identity_contract": identity_contract,
+                    "error_type": "provider_execution_failed",
+                    "tool_error": str(exc),
+                },
+                answer="日程创建失败，原始错误已记录到 Runtime Result。",
+                error=str(exc),
+            )
+
+        data = _feishu_response_data(payload)
+        event = data.get("event") if isinstance(data, dict) and isinstance(data.get("event"), dict) else data
+        event_id = _first_nested_value(event, ("event_id", "id", "calendar_event_id"))
+        url = _first_nested_value(event, ("url", "app_link", "link"))
+        return ProviderResult(
+            source="calendar",
+            status="success",
+            result_type="calendar_create",
+            count=1,
+            items=(
+                {
+                    "title": summary,
+                    "start": params.get("start"),
+                    "end": params.get("end"),
+                    "event_id": event_id,
+                    "url": url,
+                },
+            ),
+            metadata={
+                "operation": request.operation,
+                "credential_mode": "USER_TOKEN",
+                "authorization_status": token_resolution.authorization_status,
+                "account_id": token_resolution.account_id,
+                "execution_identity_contract": identity_contract,
+                "summary": summary,
+                "raw": payload,
+            },
+            answer=f"已创建日程：{summary}",
+            error="",
         )
 
 

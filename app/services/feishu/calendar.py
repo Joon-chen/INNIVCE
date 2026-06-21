@@ -46,6 +46,7 @@ class FeishuCalendarService:
         attendees: list[dict[str, Any]] | None = None,
         user_id_type: str = "open_id",
         need_notification: bool = True,
+        user_access_token: str | None = None,
     ) -> dict[str, Any]:
         calendar = quote(calendar_id or "primary", safe="")
         payload: dict[str, Any] = {
@@ -60,7 +61,11 @@ class FeishuCalendarService:
         }
         if recurrence:
             payload["recurrence"] = recurrence
-        created = await self.client.api_post(f"/open-apis/calendar/v4/calendars/{calendar}/events", payload)
+        path = f"/open-apis/calendar/v4/calendars/{calendar}/events"
+        if user_access_token:
+            created = await self.client.api_post_user(path, user_access_token=user_access_token, payload=payload)
+        else:
+            created = await self.client.api_post(path, payload)
         invitees = _attendees(attendee_ids, attendees)
         if not invitees:
             return created
@@ -69,11 +74,13 @@ class FeishuCalendarService:
         if not event_id:
             raise RuntimeError("Feishu calendar event create response missing event_id; cannot add attendees.")
         event = quote(event_id, safe="")
+        attendee_path = f"/open-apis/calendar/v4/calendars/{calendar}/events/{event}/attendees?user_id_type={user_id_type or 'open_id'}"
+        attendee_payload = {"attendees": invitees, "need_notification": need_notification}
         try:
-            await self.client.api_post(
-                f"/open-apis/calendar/v4/calendars/{calendar}/events/{event}/attendees?user_id_type={user_id_type or 'open_id'}",
-                {"attendees": invitees, "need_notification": need_notification},
-            )
+            if user_access_token:
+                await self.client.api_post_user(attendee_path, user_access_token=user_access_token, payload=attendee_payload)
+            else:
+                await self.client.api_post(attendee_path, attendee_payload)
         except Exception:
             try:
                 await self.client.api_delete(f"/open-apis/calendar/v4/calendars/{calendar}/events/{event}")
