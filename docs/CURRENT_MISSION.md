@@ -9,33 +9,32 @@ Runtime V1 冻结复盘见 `docs/RUNTIME_V1_FREEZE_REVIEW.md`。
 第二业务样板选择见 `docs/SECOND_BUSINESS_SAMPLE_SELECTION.md`。
 审批验收复盘见 `docs/APPROVAL_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md`。
 企业认知底座 V1 见 `docs/ENTERPRISE_COGNITIVE_FOUNDATION_V1.md`。
+Snapshot 生成节奏见 `docs/SNAPSHOT_TRIGGER_MATRIX.md`。
 
 ## 当前阶段
 
 当前阶段进入：
 
 ```text
-Approval Snapshot Builder Async Boundary
+Approval Snapshot Builder Alignment Phase
 ```
 
-Enterprise Cognitive Foundation V1 的三层底座已建立。本阶段把 Approval 查询接入认知闭环：
+Snapshot Trigger Matrix 已建立。本阶段按矩阵修正 Approval Snapshot Builder：
 
 ```text
-Live Approval Data + Approval Snapshot -> Bot / Card / Portal Output
+WorkEvent -> Snapshot Builder -> Snapshot
 ```
 
 ## 当前目标
 
-以 Approval 作为第一条认知样板链路：
+定义 Snapshot 触发规则：
 
-- Approval List 必须实时查询 Feishu。
-- Approval Intelligence 必须读取 Snapshot。
-- 最终展示由 Live Approval Data 与 Approval Snapshot 合并输出。
-- Snapshot 不存在或 `status != completed` 时，只能展示“分析中”。
-- Bot Query 永远不触发附件读取或 AI 分析。
-- Snapshot Builder 负责附件完成后的 AI 分析。
-- Snapshot Builder 负责写入 completed Snapshot。
-- Bot / Card / Portal / SidePanel 不直接使用实时 AI 判断作为展示依据。
+- Snapshot 不由 Query 触发。
+- Snapshot 不由用户打开页面触发。
+- Snapshot 由 WorkEvent 驱动。
+- Bot / Card / Portal / SidePanel 只读取 Snapshot。
+- Snapshot Builder 根据 WorkEvent 判断是否需要重建 Snapshot。
+- Approval 是第一条按 Trigger Matrix 对齐的样板。
 
 ## 当前禁止范围
 
@@ -52,6 +51,7 @@ Live Approval Data + Approval Snapshot -> Bot / Card / Portal Output
 - 将审批状态、审批列表、申请人、金额等业务事实缓存到 Snapshot。
 - Bot / Card / Portal 直接实时生成 AI 建议。
 - 在 Bot Query 链路中执行附件读取或 AI 分析。
+- 由 Query / Portal / SidePanel 触发 Snapshot Builder。
 - Batch Migration、transfer/add_sign execution、USER Resolver。
 - Diagnostics / Observability 重构。
 
@@ -65,12 +65,14 @@ Live Approval Data + Approval Snapshot -> Bot / Card / Portal Output
 - Approval Snapshot 是 Bot 展示 AI 判断的唯一来源，不是审批状态来源。
 - Approval 状态、审批列表和审批详情仍来自 Feishu live data。
 - 附件未完成或 AI 分析未完成时，Bot 显示“分析中”。
-- `approval.snapshot.build` 负责写入 completed Snapshot。
+- `attachment_processed` 是 Approval AI 分析的主要触发事件。
+- `approval_analysis_completed` 负责写入 completed Snapshot。
 - 所有三层数据必须携带 `company_id`。
 - 不建立审批专属快照表。
+- 同一批 live data 和同一批 completed Snapshot 下，多次查询结果必须一致。
 
 ## 下一步计划
 
-- 部署异步 Snapshot Builder。
-- 用真实飞书审批查询验证：Bot 首次查询快速返回“分析中”，Builder 完成后再次查询展示 Snapshot 建议。
-- 观察 Builder 是否需要重试/去重策略；暂不引入 WorkEvent Engine。
+- 部署 WorkEvent 驱动的 Approval Snapshot Builder。
+- 验证 Bot Query 不写 WorkEvent、不写 Snapshot、不触发 Builder。
+- 验证重复查询在同一批 Snapshot 下结果稳定。

@@ -2,7 +2,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.models.entities import Snapshot
+from app.models.entities import Snapshot, WorkEvent
+from app.services.approval_snapshot_builder import build_approval_snapshot_from_work_event
 from app.services.cognitive_foundation import (
     MEMORY_CANDIDATE_STATUS,
     append_cognitive_work_event,
@@ -251,34 +252,45 @@ def test_approval_query_completed_snapshot_skips_realtime_analysis(monkeypatch) 
     assert raw_item["_approval_llm_ms"] == 0
 
 
-def test_approval_query_missing_snapshot_enqueues_builder_without_realtime_analysis(monkeypatch) -> None:
+def test_approval_query_missing_snapshot_does_not_enqueue_builder_or_realtime_analysis(monkeypatch) -> None:
     company_id = uuid4()
     db = _WriteDb()
     provider = FeishuApprovalProvider(db=db)
     request = _approval_request(company_id)
     raw_item = {"instance_code": "approval-1", "approval_name": "报销审批"}
-    enqueued = []
     monkeypatch.setattr(feishu_resource_providers, "_active_feishu_app_config", lambda *args, **kwargs: None)
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("bot query must not run realtime approval analysis")
 
-    def fake_enqueue(request_arg, raw_item_arg):
-        enqueued.append((request_arg, raw_item_arg))
-        return True
-
     provider._fetch_approval_instance_detail = fail_if_called
     provider._read_approval_attachments = fail_if_called
     provider._write_approval_analysis_snapshot = fail_if_called
-    provider._enqueue_approval_snapshot_build = fake_enqueue
 
     provider._enrich_approval_list_items(request, [raw_item])
 
-    snapshot = db.added[1]
-    assert snapshot.status == "pending_analysis"
+    assert db.added == []
+    assert raw_item["_approval_snapshot"]["status"] == "pending_analysis"
     assert raw_item["_approval_assessment"]["suggestion"] == "分析中"
     assert raw_item["_approval_llm_ms"] == 0
-    assert enqueued == [(request, raw_item)]
+    assert not raw_item.get("_approval_snapshot_builder_enqueued")
+
+
+def test_approval_snapshot_builder_skips_approval_created_event() -> None:
+    event = WorkEvent(
+        id=uuid4(),
+        company_id=uuid4(),
+        event_type="approval_created",
+        object_type="approval",
+        object_id="approval-1",
+        payload={"item": {"instance_code": "approval-1"}},
+    )
+
+    assert build_approval_snapshot_from_work_event(_WriteDb(), event) == {
+        "ok": True,
+        "status": "skipped_non_trigger",
+        "event_id": str(event.id),
+    }
 
 
 def test_approval_analysis_completed_writes_snapshot() -> None:

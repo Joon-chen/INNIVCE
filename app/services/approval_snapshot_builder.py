@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import FeishuAppConfig
+from app.models.entities import FeishuAppConfig, WorkEvent
 from app.services.cognitive_foundation import append_cognitive_work_event, get_completed_snapshot, upsert_snapshot
 from app.services.feishu import approval_formatters
 from app.services.feishu.approval import FeishuApprovalService, approval_attachment_refs
@@ -23,6 +24,7 @@ from app.services.runtime_v5.feishu_resource_providers import (
 )
 
 APPROVAL_SNAPSHOT_TYPE = "approval_current_judgment"
+APPROVAL_TRIGGER_EVENT_TYPES = ("attachment_processed", "approval_form_changed", "approval_attachment_changed")
 
 
 def build_approval_snapshot(
@@ -36,13 +38,14 @@ def build_approval_snapshot(
     object_id = approval_formatters.approval_instance_code(item)
     if not object_id:
         return {"ok": False, "error": "missing_approval_object_id"}
-    if get_completed_snapshot(
+    completed = get_completed_snapshot(
         db,
         company_id=company_uuid,
         object_type="approval",
         object_id=object_id,
         snapshot_type=APPROVAL_SNAPSHOT_TYPE,
-    ):
+    )
+    if completed:
         return {"ok": True, "status": "skipped_completed", "object_id": object_id}
 
     app_config = _active_feishu_app_config(db, company_uuid)
@@ -74,55 +77,67 @@ def build_approval_snapshot(
     refs = approval_attachment_refs(detail.get("form") if isinstance(detail, dict) else None)
     attachment_results = _read_approval_attachments(app_config, raw_item, refs=refs) if refs else []
     if refs and not attachment_results:
-        upsert_snapshot(
-            db,
-            company_id=company_uuid,
-            object_type="approval",
-            object_id=object_id,
-            snapshot_type=APPROVAL_SNAPSHOT_TYPE,
-            status="pending_analysis",
-            summary="审批附件仍在分析中。",
-            recommendation="分析中",
-            risk_level="pending",
-            reasons=["附件或 AI 分析尚未完成"],
-            source_event_ids=[],
-            payload={"cognitive_state": "pending_analysis"},
-        )
         return {"ok": True, "status": "pending_attachment", "object_id": object_id}
-    source_event_ids: list[str] = []
-    if refs:
-        attachment_event = append_cognitive_work_event(
-            db,
-            company_id=company_uuid,
-            event_type="attachment_processed",
-            object_type="approval",
-            object_id=object_id,
-            source="approval_snapshot_builder",
-            actor="system",
-            payload={"attachments": [_attachment_result_payload(result) for result in attachment_results]},
-        )
-        source_event_ids.append(str(attachment_event.id))
+    attachment_event = append_cognitive_work_event(
+        db,
+        company_id=company_uuid,
+        event_type="attachment_processed",
+        object_type="approval",
+        object_id=object_id,
+        source="approval_snapshot_builder",
+        actor="system",
+        payload={
+            "item": item,
+            "attachments": [_attachment_result_payload(result) for result in attachment_results],
+        },
+    )
+    return build_approval_snapshot_from_work_event(db, attachment_event, actor=actor)
 
+
+def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, actor: str = "system") -> dict[str, Any]:
+    if event.object_type != "approval" or event.event_type not in APPROVAL_TRIGGER_EVENT_TYPES:
+        return {"ok": True, "status": "skipped_non_trigger", "event_id": str(event.id)}
+    snapshot = get_completed_snapshot(
+        db,
+        company_id=event.company_id,
+        object_type="approval",
+        object_id=event.object_id,
+        snapshot_type=APPROVAL_SNAPSHOT_TYPE,
+    )
+    if snapshot is not None and str(event.id) in set(snapshot.source_event_ids or []):
+        return {"ok": True, "status": "skipped_completed", "object_id": event.object_id, "event_id": str(event.id)}
+    app_config = _active_feishu_app_config(db, event.company_id)
+    if app_config is None:
+        return {"ok": False, "error": "missing_feishu_app_config", "object_id": event.object_id}
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    raw_item = dict(payload.get("item")) if isinstance(payload.get("item"), dict) else {"instance_code": event.object_id}
+    raw_item.setdefault("instance_code", event.object_id)
+    detail = raw_item.get("instance_detail") if isinstance(raw_item.get("instance_detail"), dict) else {}
+    if not detail:
+        detail = _fetch_approval_detail(app_config, event.object_id)
+        if detail:
+            raw_item["instance_detail"] = detail
+    attachment_results = _attachment_results_from_payload(payload)
     llm_decision = _approval_llm_decision(raw_item, attachment_results=attachment_results)
     if llm_decision:
         raw_item["_approval_llm_decision"] = llm_decision
     assessment = _approval_assessment(raw_item, attachment_results=attachment_results)
     analysis_event = append_cognitive_work_event(
         db,
-        company_id=company_uuid,
+        company_id=event.company_id,
         event_type="approval_analysis_completed",
         object_type="approval",
-        object_id=object_id,
+        object_id=event.object_id,
         source="approval_snapshot_builder",
         actor=actor or "system",
         payload={"assessment": assessment},
     )
-    source_event_ids.append(str(analysis_event.id))
+    source_event_ids = [str(event.id), str(analysis_event.id)]
     upsert_snapshot(
         db,
-        company_id=company_uuid,
+        company_id=event.company_id,
         object_type="approval",
-        object_id=object_id,
+        object_id=event.object_id,
         snapshot_type=APPROVAL_SNAPSHOT_TYPE,
         status="completed",
         summary=str(assessment.get("reason") or assessment.get("detailed_reason") or ""),
@@ -132,7 +147,31 @@ def build_approval_snapshot(
         source_event_ids=source_event_ids,
         payload={"assessment": assessment},
     )
-    return {"ok": True, "status": "completed", "object_id": object_id, "previous_snapshot_id": str(running_snapshot.id)}
+    return {"ok": True, "status": "completed", "object_id": event.object_id, "event_id": str(event.id)}
+
+
+def build_approval_snapshots_from_work_events(db: Session, *, limit: int = 10) -> dict[str, Any]:
+    events = list(
+        db.scalars(
+            select(WorkEvent)
+            .where(WorkEvent.object_type == "approval")
+            .where(WorkEvent.event_type.in_(APPROVAL_TRIGGER_EVENT_TYPES))
+            .order_by(WorkEvent.created_at.asc())
+            .limit(limit)
+        ).all()
+    )
+    completed = 0
+    skipped = 0
+    errors: list[str] = []
+    for event in events:
+        result = build_approval_snapshot_from_work_event(db, event, actor="system")
+        if result.get("status") == "completed":
+            completed += 1
+        elif result.get("ok"):
+            skipped += 1
+        else:
+            errors.append(str(result.get("error") or "approval_snapshot_build_failed")[:300])
+    return {"count": len(events), "completed": completed, "skipped": skipped, "errors": errors[:5]}
 
 
 def _active_feishu_app_config(db: Session, company_id: UUID) -> FeishuAppConfig | None:
@@ -168,6 +207,24 @@ def _read_approval_attachments(app_config: FeishuAppConfig, raw_item: dict[str, 
         )
     except Exception:
         return []
+
+
+def _attachment_results_from_payload(payload: dict[str, Any]) -> list[Any]:
+    attachments = payload.get("attachments") if isinstance(payload.get("attachments"), list) else []
+    results: list[Any] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        results.append(
+            SimpleNamespace(
+                name=str(item.get("name") or ""),
+                token=str(item.get("token") or ""),
+                text_preview=str(item.get("text_preview") or ""),
+                error=str(item.get("error") or ""),
+                fetched=bool(item.get("text_preview") or item.get("error")),
+            )
+        )
+    return results
 
 
 def _run_async(coro):

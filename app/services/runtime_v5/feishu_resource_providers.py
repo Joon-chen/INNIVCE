@@ -501,20 +501,19 @@ class FeishuApprovalProvider(FeishuResourceProvider):
             approval_resources.attach_approval_history_context(self.db, app_config, raw_items[:10])
             substeps.append({"step": "approval_history", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success"})
         step_started = perf_counter()
-        builder_enqueued_count = 0
         for raw_item in raw_items[:10]:
             if not isinstance(raw_item, dict):
                 continue
-            self._record_approval_created(request, raw_item)
             self._attach_approval_snapshot(request, raw_item)
             if not raw_item.get("_approval_snapshot"):
-                self._write_approval_pending_snapshot(request, raw_item)
-            if not self._approval_has_completed_snapshot(raw_item) and self._enqueue_approval_snapshot_build(request, raw_item):
-                builder_enqueued_count += 1
+                raw_item["_approval_snapshot"] = _pending_approval_snapshot_payload(
+                    company_id=self._approval_company_id(request),
+                    object_id=self._approval_object_id(raw_item),
+                )
             raw_item["_approval_llm_ms"] = 0
             raw_item["_approval_assessment"] = _approval_assessment(raw_item, attachment_results=[])
         substeps.append({"step": "approval_snapshot_read", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success", "count": len([item for item in raw_items[:10] if isinstance(item, dict) and item.get("_approval_snapshot")])})
-        substeps.append({"step": "approval_snapshot_builder_enqueue", "duration_ms": 0, "status": "success" if builder_enqueued_count else "empty", "count": builder_enqueued_count})
+        substeps.append({"step": "approval_snapshot_builder_enqueue", "duration_ms": 0, "status": "skipped_boundary", "count": 0})
         substeps.append({"step": "approval_ai_judgement", "duration_ms": 0, "status": "skipped_async", "count": 0})
         return substeps
 
@@ -655,28 +654,6 @@ class FeishuApprovalProvider(FeishuResourceProvider):
     def _approval_has_completed_snapshot(self, raw_item: dict[str, Any]) -> bool:
         snapshot = raw_item.get("_approval_snapshot") if isinstance(raw_item.get("_approval_snapshot"), dict) else {}
         return snapshot.get("status") == "completed"
-
-    def _enqueue_approval_snapshot_build(self, request: ProviderRequest, raw_item: dict[str, Any]) -> bool:
-        company_id = self._approval_company_id(request)
-        object_id = self._approval_object_id(raw_item)
-        if company_id is None or not object_id:
-            return False
-        snapshot = raw_item.get("_approval_snapshot") if isinstance(raw_item.get("_approval_snapshot"), dict) else {}
-        if snapshot.get("status") == "analysis_running":
-            return False
-        try:
-            from app.tasks.celery_app import celery_app
-
-            celery_app.send_task(
-                "approval.snapshot.build",
-                args=[str(company_id), _approval_snapshot_builder_item(raw_item), self._approval_actor(request)],
-                countdown=2,
-            )
-        except Exception as exc:
-            raw_item["_approval_snapshot_builder_error"] = str(exc)[:300]
-            return False
-        raw_item["_approval_snapshot_builder_enqueued"] = True
-        return True
 
     def _approval_attachments_complete(self, raw_item: dict[str, Any], *, attachment_results: list[Any]) -> bool:
         detail = raw_item.get("instance_detail") if isinstance(raw_item.get("instance_detail"), dict) else {}
@@ -3585,6 +3562,22 @@ def _snapshot_payload(snapshot: Snapshot) -> dict[str, Any]:
         "risk_level": snapshot.risk_level,
         "reasons": list(snapshot.reasons or []),
         "source_event_ids": list(snapshot.source_event_ids or []),
+    }
+
+
+def _pending_approval_snapshot_payload(*, company_id: Any, object_id: str) -> dict[str, Any]:
+    return {
+        "id": "",
+        "company_id": str(company_id or ""),
+        "object_type": "approval",
+        "object_id": object_id,
+        "snapshot_type": "approval_current_judgment",
+        "status": "pending_analysis",
+        "summary": "审批附件仍在分析中。",
+        "recommendation": "分析中",
+        "risk_level": "pending",
+        "reasons": ["附件或 AI 分析尚未完成"],
+        "source_event_ids": [],
     }
 
 

@@ -18,6 +18,11 @@ def test_approval_snapshot_builder_task_is_registered() -> None:
     assert "approval.snapshot.build" in celery_app.tasks
 
 
+def test_approval_snapshot_work_event_builder_task_is_registered_with_beat() -> None:
+    assert "approval.snapshot.build_from_events" in celery_app.tasks
+    assert celery_app.conf.beat_schedule["approval-snapshot-builder-events"]["task"] == "approval.snapshot.build_from_events"
+
+
 def test_v5_resource_auto_sync_is_disabled_without_enabled_policies(monkeypatch) -> None:
     class DummySession:
         def close(self) -> None:

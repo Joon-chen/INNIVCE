@@ -49,6 +49,10 @@ celery_app.conf.beat_schedule = {
         "task": "v5.resources.sync_auto",
         "schedule": settings.auto_v5_resource_sync_interval_seconds,
     },
+    "approval-snapshot-builder-events": {
+        "task": "approval.snapshot.build_from_events",
+        "schedule": 15,
+    },
 }
 celery_app.conf.timezone = "Asia/Shanghai"
 
@@ -327,6 +331,7 @@ _BOT_APPROVALS_WORKBENCH_TASK = ".".join(("bot", "approvals", "workbench_reply")
 _BOT_RUNTIME_CARD_REPLY_TASK = ".".join(("bot", "runtime", "card_reply"))
 _BOT_APPROVALS_BATCH_APPROVE_TASK = ".".join(("bot", "approvals", "batch_approve"))
 _APPROVAL_SNAPSHOT_BUILD_TASK = ".".join(("approval", "snapshot", "build"))
+_APPROVAL_SNAPSHOT_BUILD_FROM_EVENTS_TASK = ".".join(("approval", "snapshot", "build_from_events"))
 
 
 @celery_app.task(name=_APPROVAL_SNAPSHOT_BUILD_TASK)
@@ -336,6 +341,22 @@ def approval_snapshot_build_task(company_id: str, item: dict, actor: str = "syst
         from app.services.approval_snapshot_builder import build_approval_snapshot
 
         result = build_approval_snapshot(db, company_id=company_id, item=item, actor=actor)
+        db.commit()
+        return result
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": str(exc)[:500]}
+    finally:
+        db.close()
+
+
+@celery_app.task(name=_APPROVAL_SNAPSHOT_BUILD_FROM_EVENTS_TASK)
+def approval_snapshot_build_from_events_task(limit: int = 10) -> dict:
+    db = SessionLocal()
+    try:
+        from app.services.approval_snapshot_builder import build_approval_snapshots_from_work_events
+
+        result = build_approval_snapshots_from_work_events(db, limit=limit)
         db.commit()
         return result
     except Exception as exc:
