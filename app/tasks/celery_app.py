@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from celery import Celery
@@ -520,6 +521,7 @@ def bot_runtime_card_reply_task(
     db = SessionLocal()
     try:
         from app.services.feishu import bot_runtime
+        from app.services.feishu import authorization_card_entrypoint
         from app.services.feishu import replies as feishu_replies
         from app.services.feishu.identity import BotIdentity
         from app.services.runtime_v5.action_observer import record_action_trace, write_runtime_action_audit
@@ -596,14 +598,27 @@ def bot_runtime_card_reply_task(
             route_path=str(trace.get("route_path") or "runtime_v5"),
             timing=timing,
         )
-        asyncio.run(
-            feishu_replies.send_smart_reply(
-                app_config=app_config,
-                reply_target=reply_target,
-                reply=_append_runtime_timing_hint(runtime_answer.answer, timing),
-                route_path=str(trace.get("route_path") or "runtime_v5"),
-                chat_id=chat_id,
+        authorization_actions = _authorization_actions_from_runtime_result(trace)
+        authorization_card_sent = False
+        if authorization_actions:
+            authorization_card_sent = asyncio.run(
+                authorization_card_entrypoint.send_user_identity_authorization_card(
+                    app_config,
+                    identity,
+                    reply_target,
+                    answer=runtime_answer.answer,
+                    actions=authorization_actions,
+                )
             )
+        if not authorization_card_sent:
+            asyncio.run(
+                feishu_replies.send_smart_reply(
+                    app_config=app_config,
+                    reply_target=reply_target,
+                    reply=_append_runtime_timing_hint(runtime_answer.answer, timing),
+                    route_path=str(trace.get("route_path") or "runtime_v5"),
+                    chat_id=chat_id,
+                )
         )
         db.commit()
         return {"ok": True, "route_path": trace.get("route_path"), "answer_chars": len(runtime_answer.answer)}
@@ -650,6 +665,34 @@ def bot_runtime_card_reply_task(
         return {"ok": False, "error": str(exc)[:500]}
     finally:
         db.close()
+
+
+def _authorization_actions_from_runtime_result(trace_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(trace_payload, dict):
+        return []
+    composed = trace_payload.get("composed") if isinstance(trace_payload.get("composed"), dict) else {}
+    metadata = composed.get("metadata") if isinstance(composed.get("metadata"), dict) else {}
+    runtime_result = metadata.get("runtime_result") if isinstance(metadata.get("runtime_result"), dict) else {}
+    actions = runtime_result.get("actions") if isinstance(runtime_result.get("actions"), list) else []
+    authorization = runtime_result.get("metadata", {}).get("authorization") if isinstance(runtime_result.get("metadata"), dict) else {}
+    normalized: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict) or action.get("action") != "authorize_user_identity":
+            continue
+        normalized.append(
+            {
+                "resource_type": action.get("resource_type") or "user_identity_bundle",
+                "label": action.get("label") or "授权个人能力包",
+                "channel": action.get("channel") or "feishu_oauth",
+                "url": action.get("url") or (authorization.get("url") if isinstance(authorization, dict) else ""),
+                "authorization_flow": action.get("authorization_flow") or (authorization.get("authorization_flow") if isinstance(authorization, dict) else ""),
+                "covered_resources": authorization.get("covered_resources", []) if isinstance(authorization, dict) else [],
+                "owner_open_id": authorization.get("owner_open_id", "") if isinstance(authorization, dict) else "",
+                "authorization_status": action.get("authorization_status") or (authorization.get("authorization_status") if isinstance(authorization, dict) else ""),
+                "provider_boundary": authorization.get("provider_boundary", "") if isinstance(authorization, dict) else "",
+            }
+        )
+    return [action for action in normalized if str(action.get("url") or "").strip()]
 
 
 @celery_app.task(name=_BOT_APPROVALS_BATCH_APPROVE_TASK)

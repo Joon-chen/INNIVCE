@@ -163,3 +163,98 @@ def test_bot_runtime_card_reply_task_records_trace_without_local_scope_error(mon
     assert traces
     assert audits
     assert sent[0]["reply"] == "任务已创建。"
+
+
+def test_bot_runtime_card_reply_task_sends_authorization_card(monkeypatch) -> None:
+    class DummyDb:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+            self.app_config = SimpleNamespace(id=uuid4(), company_id=uuid4(), app_id="cli_1", name="大飞哥")
+
+        def get(self, model, item_id):
+            return self.app_config
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+        def close(self):
+            self.closed = True
+
+    db = DummyDb()
+    sent_cards = []
+    sent_replies = []
+
+    async def fake_send_authorization_card(*args, **kwargs):
+        sent_cards.append((args, kwargs))
+        return True
+
+    async def fake_send_smart_reply(**kwargs):
+        sent_replies.append(kwargs)
+        return {"code": 0}
+
+    monkeypatch.setattr(celery_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        "app.services.feishu.bot_runtime.employee_bot_answer_result",
+        lambda *args, **kwargs: SimpleNamespace(
+            answer="创建任务需要本人飞书授权。请先完成飞书用户授权后再执行。",
+            trace_payload={
+                "execution_status": "waiting_authorization",
+                "strategy": "task_create",
+                "question_type": "action",
+                "route_path": "task_create",
+                "composed": {
+                    "metadata": {
+                        "runtime_result": {
+                            "result_type": "waiting_authorization",
+                            "status": "waiting_authorization",
+                            "actions": [
+                                {
+                                    "action": "authorize_user_identity",
+                                    "label": "授权个人能力包",
+                                    "resource_type": "user_identity_bundle",
+                                    "channel": "feishu_oauth",
+                                    "authorization_flow": "feishu_in_app_oauth",
+                                    "url": "https://example.com/api/user-identity/oauth/feishu/start?open_id=ou_1",
+                                }
+                            ],
+                            "metadata": {
+                                "authorization": {
+                                    "authorization_status": "MISSING_AUTHORIZATION",
+                                    "provider_boundary": "user_token_required",
+                                }
+                            },
+                        }
+                    }
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.feishu.authorization_card_entrypoint.send_user_identity_authorization_card",
+        fake_send_authorization_card,
+    )
+    monkeypatch.setattr("app.services.feishu.replies.send_smart_reply", fake_send_smart_reply)
+    monkeypatch.setattr("app.services.runtime_v5.action_observer.record_action_trace", lambda *args: None)
+    monkeypatch.setattr("app.services.runtime_v5.action_observer.write_runtime_action_audit", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.services.runtime_v5.context.load_session_context", lambda chat_id: {})
+    monkeypatch.setattr("app.services.runtime_v5.context.clear_result_context", lambda *args, **kwargs: None)
+
+    result = celery_module.bot_runtime_card_reply_task(
+        str(db.app_config.id),
+        "创建一个任务：明天4点开会",
+        "创建一个任务：明天4点开会",
+        {"open_id": "ou_1", "role": "member", "access_scope": "personal"},
+        "oc_1",
+        {"receive_id_type": "chat_id", "receive_id": "oc_1"},
+    )
+
+    assert result["ok"] is True
+    assert db.commits == 1
+    assert sent_cards
+    assert sent_cards[0][1]["actions"][0]["label"] == "授权个人能力包"
+    assert sent_replies == []
