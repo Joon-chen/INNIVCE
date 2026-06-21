@@ -76,6 +76,10 @@ async function loadApprovals() {
     return;
   }
   const cacheShown = await loadCachedApprovals(appConfigId, openId);
+  if (state.detailOnly && cacheShown) {
+    setStatus("已显示最近审批详情。");
+    return;
+  }
   setStatus(cacheShown ? "已先显示最近结果，正在刷新..." : "正在读取待审批...");
   if (!cacheShown) {
     $("approvalList").innerHTML = "";
