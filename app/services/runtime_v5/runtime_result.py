@@ -4,6 +4,7 @@ from app.services.runtime_v5.capabilities import label_for_strategy
 from typing import Any
 
 from app.services.runtime_v5.models import CommandPlan, ComposedAnswer, ExecutionResult, IntentResult, PermissionDecision, PlannerResult, ResultContext, RuntimeResult, TargetUI
+from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload
 
 
 def build_runtime_result(
@@ -38,7 +39,12 @@ def build_runtime_result(
         title=title,
         summary=_summary_from_composed(composed),
         items=result_context.items if result_context is not None else (),
-        actions=_actions_for_result(result_type=result_type, result_context=result_context),
+        actions=_actions_for_result(
+            result_type=result_type,
+            result_context=result_context,
+            company_id=company_id,
+            scope_context=scope_context,
+        ),
         target_ui=_target_ui_for_result(result_type=result_type, fallback=command_plan.target_ui),
         metadata={
             "company_id": company_id,
@@ -152,11 +158,23 @@ def _target_ui_for_result(*, result_type: str, fallback: TargetUI) -> TargetUI:
     return fallback
 
 
-def _actions_for_result(*, result_type: str, result_context) -> tuple[dict[str, Any], ...]:
+def _actions_for_result(
+    *,
+    result_type: str,
+    result_context,
+    company_id: str = "",
+    scope_context: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], ...]:
     if result_context is None:
         return ()
     if result_type in {"approval_list", "approval_query"}:
         return tuple(_approval_detail_action(item, index=index) for index, item in enumerate(result_context.items))
+    if result_type == "task_list":
+        return tuple(
+            action
+            for index, item in enumerate(result_context.items)
+            if (action := _task_complete_action(item, index=index, company_id=company_id, scope_context=scope_context)) is not None
+        )
     if result_type == "approval_detail" and result_context.items:
         item = result_context.items[0]
         return (
@@ -208,6 +226,44 @@ def _approval_mutation_action(item: dict[str, Any], *, action: str, label: str) 
         "instance_code": str(raw.get("instance_code") or raw.get("process_code") or ""),
         "task_id": str(raw.get("task_id") or ""),
         "requires_confirmation": True,
+    }
+
+
+def _task_complete_action(
+    item: dict[str, Any],
+    *,
+    index: int,
+    company_id: str,
+    scope_context: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else item
+    task_guid = str(raw.get("task_guid") or raw.get("guid") or raw.get("id") or "").strip()
+    if not task_guid or not company_id:
+        return None
+    title = str(raw.get("title") or raw.get("summary") or raw.get("name") or "").strip()
+    action_id = f"task_complete_{index}_{task_guid.replace('/', '_')}"
+    runtime_action_input = build_runtime_action_input_payload(
+        action_id=action_id,
+        action_type="execute",
+        intent="task_complete",
+        strategy="task_complete",
+        company_id=company_id,
+        target={"task_guid": task_guid, "title": title},
+        confirmed=False,
+        confirmation_token=action_id,
+        source_ui="card",
+        message=f"完成任务：{title}" if title else "完成任务",
+        sources=("task",),
+        metadata={"scope_context": scope_context or {"scope": "SELF", "company_id": company_id, "filters": {}}},
+    )
+    return {
+        "action": "task_complete",
+        "label": "完成",
+        "target_ui": "card",
+        "index": index,
+        "task_guid": task_guid,
+        "requires_confirmation": True,
+        "runtime_action_input": runtime_action_input,
     }
 
 

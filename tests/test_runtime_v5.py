@@ -168,6 +168,84 @@ def test_runtime_v5_task_query_outputs_enterprise_scope_context() -> None:
     assert runtime_scope_context["company_id"] == scope_context["company_id"]
 
 
+def test_runtime_v5_task_query_to_complete_closes_runtime_interaction_loop() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {
+            "list_my_tasks": ("task.list_my_tasks", False),
+            "complete_task": ("task.complete_task", True),
+        }
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            if request.operation == "list_my_tasks":
+                return ProviderResult(
+                    source="task",
+                    status="success",
+                    result_type="task_list",
+                    count=1,
+                    items=({"title": "跟进客户", "task_guid": "task/1"},),
+                    answer="你有 1 条任务。",
+                )
+            calls.append((request.operation, request.params["task_guid"]))
+            return ProviderResult(
+                source="task",
+                status="success",
+                result_type="task_complete",
+                count=1,
+                items=({"title": "跟进客户", "task_guid": request.params["task_guid"]},),
+                answer="任务已完成。",
+            )
+
+    queried = run_runtime_v5(
+        context=_context("我的任务", chat_id="chat_task_loop"),
+        providers={"task": TaskProvider()},
+    )
+
+    runtime_result = queried.composed.metadata["runtime_result"]
+    action_input = runtime_result["actions"][0]["runtime_action_input"]
+    assert runtime_result["result_type"] == "task_list"
+    assert runtime_result["actions"][0]["action"] == "task_complete"
+    assert action_input["intent"] == "task_complete"
+    assert action_input["target"]["task_guid"] == "task/1"
+    assert action_input["context"]["company_id"] == runtime_result["metadata"]["company_id"]
+    interaction_payload = interaction_payload_from_runtime_result(runtime_result_from_payload(runtime_result))
+    assert interaction_payload.actions[0]["runtime_action_input"] == action_input
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context(
+            "card action",
+            chat_id="chat_task_loop",
+            session_context={"runtime_v5_action_input": action_input},
+        ),
+        providers={"task": TaskProvider()},
+    )
+
+    assert waiting_confirmation.execution is None
+    assert waiting_confirmation.composed.result_context is not None
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_pending_confirmation"
+    runtime_state = waiting_confirmation.composed.result_context.metadata["runtime_state"]
+    assert runtime_state["actions"][0]["status"] == "waiting_confirmation"
+
+    completed = run_runtime_v5(
+        context=_context(
+            "确认执行",
+            chat_id="chat_task_loop",
+            session_context={"runtime_v5_state": runtime_state},
+        ),
+        providers={"task": TaskProvider()},
+    )
+
+    assert calls == [("complete_task", "task/1")]
+    assert completed.composed.result_context is not None
+    assert completed.composed.result_context.result_type == "task_complete"
+    runtime_result = completed.composed.metadata["runtime_result"]
+    assert runtime_result["result_type"] == "task_complete"
+    assert runtime_result["status"] == "success"
+    assert interaction_payload_from_runtime_result(runtime_result_from_payload(runtime_result)).payload_type == "feedback"
+
+
 def test_runtime_v5_approval_detail_runtime_result_exposes_sidepanel_actions() -> None:
     class ApprovalProvider:
         source = "approval"

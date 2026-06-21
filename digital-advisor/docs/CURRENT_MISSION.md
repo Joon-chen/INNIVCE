@@ -15,7 +15,7 @@ Task Runtime 样板合同评审见 `docs/TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`
 当前进入：
 
 ```text
-Task Runtime Sample Contract Test Completed
+Task Runtime Sample Minimal Implementation Completed
 ```
 
 背景：
@@ -38,14 +38,18 @@ Digital Advisor 是企业数字参谋，不是个人助手。
 SELF / USER / TEAM / DEPARTMENT / COMPANY
 ```
 
-Task Runtime Sample 合同测试已完成。
+Task Runtime Sample 最小闭环已完成。
 
 当前已验证：
 
 ```text
 task_query
+→ RuntimeResult actions.runtime_action_input
+→ WAITING_CONFIRMATION
+→ CONFIRMED
+→ EXECUTING
 task_complete
-WAITING_CONFIRMATION -> CONFIRMED -> EXECUTING -> DONE / FAILED
+→ InteractionPayload feedback
 ```
 
 ## 当前禁止范围
@@ -54,7 +58,7 @@ WAITING_CONFIRMATION -> CONFIRMED -> EXECUTING -> DONE / FAILED
 
 - Event Bus / Workflow / Memory / Evidence / Snapshot / Insight Engine。
 - 第二套 Runtime。
-- Task 业务代码 / Tool / Provider / Runtime Action / UI。
+- Task Portal / Task Insight / Task Snapshot / Task Risk / Task Graph。
 - 数据库迁移。
 - Domain 调整。
 - UI 重构。
@@ -66,7 +70,6 @@ WAITING_CONFIRMATION -> CONFIRMED -> EXECUTING -> DONE / FAILED
 - Calendar / Meeting / Customer 样板。
 - Task Snapshot / Insight 实现。
 - Task Create WAITING_INPUT 实现。
-- Task Runtime Sample 实现。
 - Task UI / Portal / SidePanel 迁移。
 
 ## 当前验收标准
@@ -76,12 +79,15 @@ WAITING_CONFIRMATION -> CONFIRMED -> EXECUTING -> DONE / FAILED
 - 普通员工 COMPANY scoped query 被 Policy 拒绝。
 - `task_query` Contract Test 已通过。
 - `task_complete` Contract Test 已通过。
+- `task_query` 可生成 `task_complete` 的 `RuntimeActionInput`。
+- `task_complete` 可通过 Runtime State 执行并返回 `RuntimeResult`。
+- `InteractionPayload` 只消费 `RuntimeResult` 并输出 feedback。
 - `complete_task` 已收敛为 Runtime result_type `task_complete`。
 - 不修改数据库。
 - 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 进入 Task Runtime Sample Minimal Implementation Review。
-2. 确认是否把 Task 完成动作接到真实入口。
-3. 继续禁止 UI / Snapshot / Insight 扩展。
+1. 进入 Task Runtime Sample Acceptance Review。
+2. 检查真实 Feishu Task Provider 数据字段是否足够支撑完成动作。
+3. 继续禁止 Task Portal / Insight / Snapshot 扩展。
