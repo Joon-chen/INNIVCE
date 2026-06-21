@@ -177,19 +177,22 @@ def _snapshot_has_evidence(snapshot) -> bool:
 
 
 def build_approval_snapshots_from_work_events(db: Session, *, limit: int = 10) -> dict[str, Any]:
+    candidate_limit = max(limit * 10, 50)
     events = list(
         db.scalars(
             select(WorkEvent)
             .where(WorkEvent.object_type == "approval")
             .where(WorkEvent.event_type.in_(APPROVAL_TRIGGER_EVENT_TYPES))
             .order_by(WorkEvent.created_at.asc())
-            .limit(limit)
+            .limit(candidate_limit)
         ).all()
     )
     completed = 0
     skipped = 0
     errors: list[str] = []
     for event in events:
+        if completed >= limit:
+            break
         result = build_approval_snapshot_from_work_event(db, event, actor="system")
         if result.get("status") == "completed":
             completed += 1
