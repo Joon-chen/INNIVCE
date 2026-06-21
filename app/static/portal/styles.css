@@ -282,6 +282,58 @@ input, textarea {
   margin-top: 4px;
   line-height: 1.42;
 }
+.evidence-drilldown {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.evidence-drilldown details {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #d5eadf;
+  background: #fff;
+}
+.evidence-drilldown summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--text);
+}
+.evidence-table {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.evidence-row-card {
+  padding: 10px;
+  border-radius: 8px;
+  background: #f7f8fa;
+}
+.evidence-row-card > strong {
+  display: block;
+  margin-bottom: 8px;
+}
+.evidence-row-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.evidence-row-grid div {
+  min-width: 0;
+}
+.evidence-row-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.evidence-row-grid b {
+  display: block;
+  margin-top: 3px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.evidence-attachment-card {
+  background: #f7f8fa;
+}
 .summary-head {
   display: flex;
   justify-content: space-between;

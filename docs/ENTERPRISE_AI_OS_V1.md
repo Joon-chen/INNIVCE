@@ -185,6 +185,16 @@ Live Data + Evidence Summary + Snapshot Judgment
 - 缺什么
 - 下一步怎么处理
 
+AI OS 的交互目标是让员工和管理者优先在：
+
+```text
+Bot + Detail View + Management Portal
+```
+
+中完成大部分工作。
+
+除非权限、合规、数据开放能力或飞书 API 限制导致系统无法闭环，否则不应默认把用户引导回飞书原生页面。原生页面是兜底，不是主路径。
+
 ## 8. First Vertical Sample
 
 Approval 是第一条样板，因为它同时覆盖：

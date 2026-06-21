@@ -597,6 +597,7 @@ function renderApprovalEvidence(item) {
   const quality = evidenceQualityLabel(evidence.quality);
   const nextStep = String(evidence.suggested_next_step || "").trim();
   const managerSummary = String(evidence.manager_summary || "").trim();
+  const drilldown = renderEvidenceDrilldown(evidence);
   return `
     <section class="business-summary evidence-summary">
       <div class="summary-head">
@@ -621,6 +622,7 @@ function renderApprovalEvidence(item) {
           `).join("")}
         </div>
       ` : ""}
+      ${drilldown}
       <div class="evidence-decision-grid">
         <div>
           <span>缺什么证据</span>
@@ -660,10 +662,81 @@ function approvalEvidenceFacts(evidence) {
     ["事由", evidenceValue(facts.reason)],
   ].filter(([, value]) => value);
   const extra = Object.entries(facts)
-    .filter(([key]) => !["approval_amount", "expense_rows", "expense_row_count", "attachment_count", "readable_attachment_count", "attachment_amount", "verified_invoice_amount", "applicant", "approval_name", "reason"].includes(key))
+    .filter(([key]) => !["approval_amount", "expense_rows", "expense_row_count", "attachment_count", "attachments", "readable_attachment_count", "attachment_amount", "verified_invoice_amount", "applicant", "approval_name", "reason"].includes(key))
     .slice(0, 4)
     .map(([key, value]) => [evidenceFactLabel(key), evidenceValue(value)]);
   return rows.concat(extra).filter(([, value]) => value).slice(0, 8);
+}
+
+function renderEvidenceDrilldown(evidence) {
+  const facts = evidence.facts && typeof evidence.facts === "object" ? evidence.facts : {};
+  const rows = Array.isArray(facts.expense_rows) ? facts.expense_rows : [];
+  const attachments = Array.isArray(facts.attachments) ? facts.attachments : [];
+  if (!rows.length && !attachments.length) return "";
+  return `
+    <div class="evidence-drilldown">
+      ${rows.length ? `
+        <details>
+          <summary>查看费用明细（${rows.length} 行）</summary>
+          <div class="evidence-table">
+            ${rows.map((row, index) => renderExpenseRow(row, index)).join("")}
+          </div>
+        </details>
+      ` : ""}
+      ${attachments.length ? `
+        <details>
+          <summary>查看附件情况（${attachments.length} 个）</summary>
+          <div class="evidence-list">
+            ${attachments.map((attachment, index) => renderAttachmentFact(attachment, index)).join("")}
+          </div>
+        </details>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderExpenseRow(row, index) {
+  const entries = Object.entries(row && typeof row === "object" ? row : {})
+    .map(([key, value]) => [evidenceFactLabel(key), evidenceValue(value)])
+    .filter(([, value]) => value);
+  return `
+    <article class="evidence-row-card">
+      <strong>费用明细 ${index + 1}</strong>
+      <div class="evidence-row-grid">
+        ${entries.length ? entries.map(([label, value]) => `
+          <div>
+            <span>${escapeHtml(label)}</span>
+            <b>${escapeHtml(value)}</b>
+          </div>
+        `).join("") : `<p>未能还原该行关键字段。</p>`}
+      </div>
+    </article>
+  `;
+}
+
+function renderAttachmentFact(attachment, index) {
+  const name = String(attachment?.name || `附件 ${index + 1}`).trim();
+  const amount = formatEvidenceMoney(attachment?.amount);
+  const status = attachment?.error ? "读取异常" : (attachment?.has_text ? "已读取摘要" : "未读到摘要");
+  return `
+    <article class="evidence-card evidence-attachment-card">
+      <div class="evidence-head">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml(status)}</span>
+      </div>
+      <div class="evidence-grid">
+        <div>
+          <span>可识别金额</span>
+          <strong>${escapeHtml(amount || "未识别")}</strong>
+        </div>
+        <div>
+          <span>读取状态</span>
+          <strong>${escapeHtml(status)}</strong>
+        </div>
+      </div>
+      ${attachment?.error ? `<p>${escapeHtml(`读取异常：${attachment.error}`)}</p>` : ""}
+    </article>
+  `;
 }
 
 function evidenceTypeLabel(value) {

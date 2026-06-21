@@ -173,7 +173,11 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
 
 def _snapshot_has_evidence(snapshot) -> bool:
     payload = snapshot.payload if isinstance(getattr(snapshot, "payload", None), dict) else {}
-    return isinstance(payload.get("evidence"), dict) and bool(payload.get("evidence"))
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict) or not evidence:
+        return False
+    facts = evidence.get("facts") if isinstance(evidence.get("facts"), dict) else {}
+    return "expense_row_count" in facts and isinstance(facts.get("attachments"), list)
 
 
 def build_approval_snapshots_from_work_events(db: Session, *, limit: int = 10) -> dict[str, Any]:

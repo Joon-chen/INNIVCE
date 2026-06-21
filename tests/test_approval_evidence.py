@@ -35,8 +35,10 @@ def test_evidence_payload_round_trip_freezes_contract() -> None:
     assert payload["quality"] == EVIDENCE_QUALITY_COMPLETE
     assert payload["facts"]["approval_amount"] == 8902.33
     assert payload["facts"]["expense_row_count"] == 1
+    assert payload["facts"]["expense_rows"][0]["费用项目"] == "打车"
     assert payload["facts"]["readable_attachment_count"] == 1
     assert payload["facts"]["attachment_amount"] == 8902.33
+    assert payload["facts"]["attachments"][0]["name"] == "滴滴电子发票.pdf"
     assert restored.source_event_ids == ("event-1",)
 
 
@@ -91,6 +93,7 @@ def test_approval_expense_evidence_facts_are_display_ready() -> None:
 
     assert payload["facts"]["expense_row_count"] == 2
     assert payload["facts"]["attachment_count"] == 2
+    assert len(payload["facts"]["attachments"]) == 2
     assert payload["facts"]["readable_attachment_count"] == 1
     assert payload["facts"]["attachment_amount"] == 120
     assert "[object Object]" not in str(payload)
@@ -198,3 +201,49 @@ def test_snapshot_builder_rebuilds_completed_snapshot_without_evidence(monkeypat
 
     assert result["status"] == "completed"
     assert "evidence" in written["payload"]
+
+
+def test_snapshot_builder_rebuilds_evidence_without_drilldown_fields(monkeypatch) -> None:
+    event_id = uuid4()
+    company_id = uuid4()
+    event = SimpleNamespace(
+        id=event_id,
+        company_id=company_id,
+        object_type="approval",
+        event_type="attachment_processed",
+        object_id="approval-1",
+        created_at="2026-06-21T10:00:00Z",
+        payload={
+            "item": {
+                "instance_code": "approval-1",
+                "approval_name": "费用报销",
+                "instance_detail": {"form": '[{"name":"费用汇总","value":290.94}]'},
+            },
+            "attachments": [{"name": "发票.pdf", "text_preview": "价税合计 290.94"}],
+        },
+    )
+    stale_snapshot = SimpleNamespace(
+        payload={"evidence": {"facts": {"approval_amount": 290.94}}},
+        source_event_ids=[str(event_id)],
+        updated_at="2026-06-21T11:00:00Z",
+    )
+    written = {}
+
+    monkeypatch.setattr(approval_snapshot_builder, "get_completed_snapshot", lambda *args, **kwargs: stale_snapshot)
+    monkeypatch.setattr(approval_snapshot_builder, "_active_feishu_app_config", lambda db, company_id: SimpleNamespace())
+    monkeypatch.setattr(approval_snapshot_builder, "_fetch_approval_detail", lambda app_config, instance_code: {})
+    monkeypatch.setattr(approval_snapshot_builder, "_approval_llm_decision", lambda raw_item, attachment_results: None)
+    monkeypatch.setattr(approval_snapshot_builder, "append_cognitive_work_event", lambda db, **kwargs: SimpleNamespace(id=uuid4(), **kwargs))
+
+    def fake_upsert(db, **kwargs):
+        written.update(kwargs)
+        return SimpleNamespace(id=uuid4(), **kwargs)
+
+    monkeypatch.setattr(approval_snapshot_builder, "upsert_snapshot", fake_upsert)
+
+    result = build_approval_snapshot_from_work_event(SimpleNamespace(), event)
+
+    facts = written["payload"]["evidence"]["facts"]
+    assert result["status"] == "completed"
+    assert "expense_row_count" in facts
+    assert isinstance(facts["attachments"], list)

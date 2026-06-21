@@ -42,6 +42,7 @@ Raw System Data
 - Approval Expense Evidence。
 - Snapshot Builder 消费 Evidence，而不是 raw widget form。
 - Portal / Card 展示 Evidence Summary，不展示技术解析噪音。
+- Detail / Portal 支持展开 Evidence 明细，尽量在 AI OS 内完成核对和处理，不默认跳回飞书原生页面。
 
 ## 当前禁止范围
 
@@ -68,6 +69,7 @@ Raw System Data
 - Snapshot 原因来自 Evidence Summary。
 - Interaction 展示 Live Data + Evidence Summary + Snapshot Judgment。
 - 管理者能直接知道：能不能处理、缺什么、下一步怎么做。
+- 管理者能在详情页核对费用明细和附件基本情况，用于判断证据冲突。
 
 ## 下一步计划
 
@@ -76,3 +78,4 @@ Raw System Data
 3. 实现 Approval Expense Evidence Builder V0。
 4. 让 Approval Snapshot Builder 消费 Evidence。
 5. 让 Portal Detail 展示 Evidence Summary。
+6. 让 Portal Detail 展开费用明细和附件基本情况。

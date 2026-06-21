@@ -69,6 +69,7 @@ def build_approval_expense_evidence(
             "expense_row_count": len(expense_rows),
             "expense_rows": expense_rows,
             "attachment_count": len(attachment_facts),
+            "attachments": attachment_facts,
             "readable_attachment_count": len([item for item in attachment_facts if item.get("has_text")]),
             "attachment_amount": verified_amount,
             "verified_invoice_amount": verified_amount,
