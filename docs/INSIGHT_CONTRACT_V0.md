@@ -255,3 +255,5 @@ V0 验收标准：
 - Insight 有类型和严重程度。
 - Insight 不规划动作。
 - Runtime 仍是唯一 Action 执行入口。
+
+Insight 展示边界见 `docs/INSIGHT_RENDERER_BOUNDARY.md`。

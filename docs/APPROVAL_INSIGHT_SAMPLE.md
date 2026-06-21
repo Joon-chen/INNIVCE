@@ -221,6 +221,8 @@ Insight：
 
 ## 8. Renderer Boundary
 
+通用 Insight 展示边界见 `docs/INSIGHT_RENDERER_BOUNDARY.md`。
+
 Approval Insight 在 Interaction 中只展示：
 
 - title

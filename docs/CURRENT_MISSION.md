@@ -9,6 +9,7 @@ Snapshot 生成节奏见 `docs/SNAPSHOT_TRIGGER_MATRIX.md`。
 OA 智能闭环设计见 `docs/OA_INTELLIGENCE_LOOP_DESIGN.md`。
 Insight 合同 V0 见 `docs/INSIGHT_CONTRACT_V0.md`。
 审批 Insight 样板见 `docs/APPROVAL_INSIGHT_SAMPLE.md`。
+Insight 展示边界见 `docs/INSIGHT_RENDERER_BOUNDARY.md`。
 历史阶段归档见 `docs/history/`。
 
 ## 当前阶段
@@ -16,7 +17,7 @@ Insight 合同 V0 见 `docs/INSIGHT_CONTRACT_V0.md`。
 当前进入：
 
 ```text
-Approval Insight Sample Phase
+Insight Renderer Boundary Phase
 ```
 
 背景：
@@ -47,11 +48,11 @@ OA Raw Data
 
 本阶段目标：
 
-- 定义 Approval Insight 输入来源。
-- 定义 Approval Insight Type 映射。
-- 定义 Approval Severity 映射。
-- 定义 Approval Evidence References 样板。
-- 定义 Approval Memory References 样板。
+- 定义 Insight 在 Bot 的展示边界。
+- 定义 Insight 在 Detail View 的展示边界。
+- 定义 Insight 在 Management Portal 的展示边界。
+- 定义 Insight View Model。
+- 明确 Insight Renderer 只展示 Recommendation。
 - 明确 Insight 不生成 Action Candidate。
 - 明确 Action 继续归 Runtime。
 
@@ -90,10 +91,11 @@ OA Raw Data
 - Insight 等于 Recommendation，不负责执行、不规划动作、不调用 Tool。
 - Insight 能引用 Evidence 和 MemoryCandidate / Memory。
 - Approval Insight 不包含 approve / reject / transfer / add_sign 动作结构。
+- Insight Renderer 不生成 Action，动作按钮只能来自 RuntimeResult / InteractionPayload actions。
 
 ## 下一步计划
 
-1. 冻结 Approval Insight Sample。
-2. 定义 Insight Renderer Boundary。
-3. 定义 Insight Store 是否需要进入 V0。
+1. 冻结 Insight Renderer Boundary。
+2. 定义 Insight Store 是否需要进入 V0。
+3. 定义 Approval Insight Rendering Sample。
 4. 再决定是否进入 Insight Engine V0。
