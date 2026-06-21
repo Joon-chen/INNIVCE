@@ -394,6 +394,9 @@ class WorkEvent(Base, TimestampMixin):
     data_classification: Mapped[str] = mapped_column(String(80), default="company")
     business_domain: Mapped[str] = mapped_column(String(120), default="general")
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(80), default="unknown")
+    object_id: Mapped[str] = mapped_column(String(500), default="")
+    actor: Mapped[str] = mapped_column(String(300), default="system")
     external_id: Mapped[str | None] = mapped_column(String(500))
     thread_id: Mapped[str | None] = mapped_column(String(500))
     title: Mapped[str | None] = mapped_column(String(500))
@@ -423,9 +426,63 @@ class WorkEvent(Base, TimestampMixin):
         ),
         UniqueConstraint("source", "external_id", name="uq_work_event_source_external"),
         Index("ix_work_events_company_occurred", "company_id", "occurred_at"),
+        Index("ix_work_events_company_object", "company_id", "object_type", "object_id"),
         Index("ix_work_events_resource_occurred", "resource_id", "occurred_at"),
         Index("ix_work_events_thread", "thread_id"),
         Index("ix_work_events_company_classification", "company_id", "data_classification"),
+    )
+
+
+class Snapshot(Base, TimestampMixin):
+    __tablename__ = "snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    snapshot_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), default="pending_analysis")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    recommendation: Mapped[str] = mapped_column(String(120), default="")
+    risk_level: Mapped[str] = mapped_column(String(40), default="unknown")
+    reasons: Mapped[list] = mapped_column(JSONB, default=list)
+    source_event_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    company: Mapped["Company"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "company_id",
+            "object_type",
+            "object_id",
+            "snapshot_type",
+            name="uq_snapshots_company_object_type",
+        ),
+        Index("ix_snapshots_company_status", "company_id", "snapshot_type", "status"),
+        Index("ix_snapshots_company_object", "company_id", "object_type", "object_id"),
+    )
+
+
+class MemoryCandidate(Base, TimestampMixin):
+    __tablename__ = "memory_candidates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    memory_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    evidence_event_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    candidate_text: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(40), default="candidate")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    company: Mapped["Company"] = relationship()
+
+    __table_args__ = (
+        Index("ix_memory_candidates_company_status", "company_id", "memory_type", "status"),
+        Index("ix_memory_candidates_company_object", "company_id", "object_type", "object_id"),
     )
 
 
