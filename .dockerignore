@@ -1,0 +1,13 @@
+.git
+.local
+.mypy_cache
+.npm-cache
+.pytest_cache
+.ruff_cache
+.venv
+.venv312
+tmp
+__pycache__
+app_secret*.txt
+*.secret
+*.pyc

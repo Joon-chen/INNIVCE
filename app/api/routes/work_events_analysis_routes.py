@@ -1,0 +1,11 @@
+from fastapi import APIRouter
+
+from app.api.routes.work_events_daily_report_routes import router as work_events_daily_report_router
+from app.api.routes.work_events_vector_pending_routes import router as work_events_vector_pending_router
+from app.api.routes.work_events_vector_search_routes import router as work_events_vector_search_router
+
+router = APIRouter()
+
+router.include_router(work_events_daily_report_router)
+router.include_router(work_events_vector_search_router)
+router.include_router(work_events_vector_pending_router)

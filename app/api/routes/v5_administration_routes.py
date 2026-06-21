@@ -1,0 +1,10 @@
+from fastapi import APIRouter
+
+from app.api.routes.v5_administration_access_routes import router as administration_access_router
+from app.api.routes.v5_administration_foundation_routes import router as administration_foundation_router
+from app.api.routes.v5_administration_list_routes import router as administration_list_router
+
+router = APIRouter()
+router.include_router(administration_access_router)
+router.include_router(administration_foundation_router)
+router.include_router(administration_list_router)
