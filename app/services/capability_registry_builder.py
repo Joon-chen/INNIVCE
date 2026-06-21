@@ -511,8 +511,11 @@ class CapabilityRegistryBuilder:
             "skills": skill_registry_payload["summary"]["skill_count"],
             "providers": len(provider_ids),
             "findings": governance_payload["summary"]["finding_count"],
+            "missing_capability": report["MissingCapability"],
+            "missing_skill": report["MissingSkill"],
             "orphan_skills": report["OrphanSkill"],
             "missing_provider": report["MissingProvider"],
+            "orphan_provider": report["OrphanProvider"],
         }
 
     def migration_assessment(self) -> dict[str, Any]:

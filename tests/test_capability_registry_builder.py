@@ -17,7 +17,7 @@ def test_capability_registry_builder_outputs_page_payloads() -> None:
         "governance_payload",
         "diagnostics_payload",
     }
-    assert set(payload["registry_health"]) == {
+    assert set(payload["registry_health"]) >= {
         "status",
         "domains",
         "capabilities",

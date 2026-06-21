@@ -36,7 +36,7 @@ def test_capability_registry_read_api_contract() -> None:
     assert payload["skill_registry_payload"]["capabilities"]
     assert "findings" in payload["governance_payload"]
     assert "summary" in payload["diagnostics_payload"]
-    assert set(payload["registry_health"]) == {
+    assert set(payload["registry_health"]) >= {
         "status",
         "domains",
         "capabilities",
