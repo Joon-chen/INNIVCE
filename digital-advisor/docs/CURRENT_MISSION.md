@@ -11,18 +11,19 @@ Capability Registry Read API 评审见 `docs/CAPABILITY_REGISTRY_READ_API_REVIEW
 Capability Registry 影子校验见 `docs/CAPABILITY_REGISTRY_SHADOW_VERIFICATION.md`。
 Skill Registry 治理计划见 `docs/SKILL_REGISTRY_CLEANUP_PLAN.md`。
 Registry UI 冻结评审见 `docs/REGISTRY_UI_FREEZE_REVIEW.md`。
+Registry fallback 观察期见 `docs/REGISTRY_FALLBACK_OBSERVATION.md`。
 
 ## 当前阶段
 
 当前进入：
 
 ```text
-Registry UI Freeze Review Phase
+Registry Fallback Observation Phase
 ```
 
 背景：
 
-Capability Registry Builder、Read API、Lifecycle Guard、Minimal UI Migration 已完成。
+Registry UI V1 已冻结。
 
 四个页面已接入 Registry Payload：
 
@@ -33,14 +34,14 @@ Capability Registry Builder、Read API、Lifecycle Guard、Minimal UI Migration 
 
 ## 当前目标
 
-冻结 Registry UI V1。
+观察 fallback 是否仍被需要。
 
 目标是确认：
 
-- Registry API 可以成为四个页面的主数据源。
-- 页面仍保留旧数据源 fallback。
-- 不继续新增 Registry 设计。
-- 不继续新增 Registry 页面。
+- Registry Payload 持续稳定覆盖四个页面。
+- Registry Health 持续 healthy。
+- `capability-registry-diff` 没有暴露阻塞缺口。
+- fallback 保留但不再作为主数据源。
 - 不提前移除 fallback。
 
 ## 当前禁止范围
@@ -57,20 +58,20 @@ Capability Registry Builder、Read API、Lifecycle Guard、Minimal UI Migration 
 - Shadow Panel。
 - 业务逻辑改造。
 - 移除旧数据源 fallback。
+- Registry 概念扩展。
 
 ## 当前验收标准
 
-- 输出 Registry UI Freeze Review。
-- 确认四个页面 Payload 映射完整。
-- 确认 Registry Health 云端为 healthy。
-- 确认 Diagnostics Summary 为 healthy。
-- 确认 fallback 保留。
+- 输出 Registry Fallback Observation。
+- 明确观察指标。
+- 明确观察期禁止范围。
+- 明确进入 fallback 移除评审的条件。
 - 不修改运行代码。
 - 不修改数据库。
 - 不修改业务逻辑。
 
 ## 下一步计划
 
-1. 冻结 Registry UI V1。
-2. 进入 Registry Fallback Observation Phase。
-3. 观察稳定后评估是否进入 Fallback Deprecation Review。
+1. 观察四个页面真实使用情况。
+2. 收集 `capability-registry-diff`。
+3. 稳定后进入 Registry Fallback Deprecation Review。
