@@ -34,6 +34,9 @@ def test_evidence_payload_round_trip_freezes_contract() -> None:
     assert payload["evidence_type"] == "approval_expense"
     assert payload["quality"] == EVIDENCE_QUALITY_COMPLETE
     assert payload["facts"]["approval_amount"] == 8902.33
+    assert payload["facts"]["expense_row_count"] == 1
+    assert payload["facts"]["readable_attachment_count"] == 1
+    assert payload["facts"]["attachment_amount"] == 8902.33
     assert restored.source_event_ids == ("event-1",)
 
 
@@ -61,6 +64,36 @@ def test_approval_expense_evidence_translates_widget_noise_for_manager() -> None
     assert "widget" not in evidence.manager_summary
     assert "费用明细未成功还原" in evidence.manager_summary
     assert "补充清晰费用明细" in evidence.suggested_next_step
+
+
+def test_approval_expense_evidence_facts_are_display_ready() -> None:
+    evidence = build_approval_expense_evidence(
+        {
+            "instance_code": "approval-1",
+            "approval_name": "差旅费报销",
+            "instance_detail": {
+                "form": (
+                    '[{"name":"费用明细","value":[['
+                    '{"name":"费用项目","value":"交通"},'
+                    '{"name":"金额","value":120}'
+                    '],[{"name":"费用项目","value":"住宿"},{"name":"金额","value":300}]]},'
+                    '{"name":"费用汇总","value":420}]'
+                )
+            },
+        },
+        attachment_results=[
+            SimpleNamespace(name="发票1.pdf", text_preview="价税合计 120", error=""),
+            SimpleNamespace(name="发票2.pdf", text_preview="", error="读取失败"),
+        ],
+    )
+
+    payload = evidence_payload(evidence)
+
+    assert payload["facts"]["expense_row_count"] == 2
+    assert payload["facts"]["attachment_count"] == 2
+    assert payload["facts"]["readable_attachment_count"] == 1
+    assert payload["facts"]["attachment_amount"] == 120
+    assert "[object Object]" not in str(payload)
 
 
 def test_snapshot_assessment_consumes_evidence_summary_not_widget_noise() -> None:

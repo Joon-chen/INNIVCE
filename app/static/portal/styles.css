@@ -242,9 +242,27 @@ input, textarea {
   line-height: 1.55;
   color: var(--text);
 }
+.evidence-action {
+  padding: 12px;
+  border-radius: 8px;
+  background: #e8f6ef;
+  border: 1px solid #c9e8d9;
+  margin-bottom: 12px;
+}
+.evidence-action span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.evidence-action strong {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.45;
+  color: #116b45;
+}
 .evidence-decision-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-top: 12px;
 }

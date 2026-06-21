@@ -66,8 +66,11 @@ def build_approval_expense_evidence(
         object_id=object_id,
         facts={
             "approval_amount": amount,
+            "expense_row_count": len(expense_rows),
             "expense_rows": expense_rows,
             "attachment_count": len(attachment_facts),
+            "readable_attachment_count": len([item for item in attachment_facts if item.get("has_text")]),
+            "attachment_amount": verified_amount,
             "verified_invoice_amount": verified_amount,
             "applicant": approval_formatters.approval_applicant_name(raw_item) or "",
             "approval_name": approval_formatters.readable_approval_name(raw_item),

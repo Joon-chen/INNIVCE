@@ -214,7 +214,8 @@ function renderDetail() {
     return;
   }
   $("approvalDetail").className = "";
-  const advice = conclusionOf(item);
+  const evidence = approvalEvidenceOf(item);
+  const advice = conclusionForDetail(item, evidence);
   $("approvalDetail").innerHTML = `
     <div class="detail-body approval-compact">
       <div class="approval-head">
@@ -447,6 +448,22 @@ function conclusionOf(item) {
   };
 }
 
+function conclusionForDetail(item, evidence) {
+  const base = conclusionOf(item);
+  if (!evidence) return base;
+  const nextStep = String(evidence.suggested_next_step || "").trim();
+  return {
+    suggestion: base.suggestion,
+    reason: nextStep || conciseReason(base.reason),
+  };
+}
+
+function conciseReason(value) {
+  const text = String(value || "").trim();
+  if (!text) return "请查看 AI 判断依据后处理。";
+  return text.split(/[。；]/).map((item) => item.trim()).filter(Boolean)[0] || text;
+}
+
 function refinedAdviceOf(item) {
   const amountCheck = detailAmountCheck(item);
   const base = {
@@ -587,7 +604,11 @@ function renderApprovalEvidence(item) {
           <h3>AI 判断依据</h3>
           <p>${escapeHtml(quality)}</p>
         </div>
-        <strong>${escapeHtml(evidence.evidence_type || "Evidence")}</strong>
+        <strong>${escapeHtml(evidenceTypeLabel(evidence.evidence_type))}</strong>
+      </div>
+      <div class="evidence-action">
+        <span>建议动作</span>
+        <strong>${escapeHtml(nextStep || "按公司审批规则处理")}</strong>
       </div>
       ${managerSummary ? `<p class="evidence-manager-summary">${escapeHtml(managerSummary)}</p>` : ""}
       ${facts.length ? `
@@ -609,10 +630,6 @@ function renderApprovalEvidence(item) {
           <span>证据冲突</span>
           <strong>${escapeHtml(conflicts.length ? conflicts.join("、") : "未发现明显冲突")}</strong>
         </div>
-        <div>
-          <span>建议动作</span>
-          <strong>${escapeHtml(nextStep || "按公司审批规则处理")}</strong>
-        </div>
       </div>
     </section>
   `;
@@ -632,18 +649,27 @@ function approvalEvidenceOf(item) {
 
 function approvalEvidenceFacts(evidence) {
   const facts = evidence.facts && typeof evidence.facts === "object" ? evidence.facts : {};
+  const expenseRows = Array.isArray(facts.expense_rows) ? facts.expense_rows : [];
   const rows = [
     ["申请金额", formatEvidenceMoney(facts.approval_amount)],
-    ["费用明细", numberLabel(facts.expense_row_count, "行")],
+    ["费用明细", numberLabel(facts.expense_row_count ?? expenseRows.length, "行")],
     ["附件数量", numberLabel(facts.attachment_count, "个")],
     ["已读附件", numberLabel(facts.readable_attachment_count, "个")],
-    ["附件金额", formatEvidenceMoney(facts.attachment_amount)],
+    ["附件金额", formatEvidenceMoney(facts.attachment_amount ?? facts.verified_invoice_amount)],
+    ["申请人", evidenceValue(facts.applicant)],
+    ["事由", evidenceValue(facts.reason)],
   ].filter(([, value]) => value);
   const extra = Object.entries(facts)
-    .filter(([key]) => !["approval_amount", "expense_row_count", "attachment_count", "readable_attachment_count", "attachment_amount"].includes(key))
+    .filter(([key]) => !["approval_amount", "expense_rows", "expense_row_count", "attachment_count", "readable_attachment_count", "attachment_amount", "verified_invoice_amount", "applicant", "approval_name", "reason"].includes(key))
     .slice(0, 4)
     .map(([key, value]) => [evidenceFactLabel(key), evidenceValue(value)]);
   return rows.concat(extra).filter(([, value]) => value).slice(0, 8);
+}
+
+function evidenceTypeLabel(value) {
+  const type = String(value || "");
+  if (type === "approval_expense") return "费用报销证据";
+  return type ? type.replace(/_/g, " ") : "证据";
 }
 
 function evidenceList(value) {
@@ -670,14 +696,31 @@ function numberLabel(value, unit) {
 }
 
 function evidenceFactLabel(key) {
-  return String(key || "")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const labels = {
+    approval_amount: "申请金额",
+    expense_row_count: "费用明细",
+    attachment_count: "附件数量",
+    readable_attachment_count: "已读附件",
+    attachment_amount: "附件金额",
+    verified_invoice_amount: "附件金额",
+    applicant: "申请人",
+    approval_name: "审批类型",
+    reason: "事由",
+  };
+  return labels[key] || String(key || "").replace(/_/g, " ");
 }
 
 function evidenceValue(value) {
-  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean).join("、");
-  if (value && typeof value === "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    const parts = value.map((item) => evidenceValue(item)).filter(Boolean);
+    return parts.length ? parts.join("、") : "";
+  }
+  if (value && typeof value === "object") {
+    const parts = Object.entries(value)
+      .map(([key, item]) => `${evidenceFactLabel(key)}：${evidenceValue(item)}`)
+      .filter((item) => !item.endsWith("："));
+    return parts.join("；");
+  }
   return String(value ?? "").trim();
 }
 
