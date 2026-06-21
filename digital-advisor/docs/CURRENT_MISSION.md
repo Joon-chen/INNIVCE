@@ -7,28 +7,29 @@
 ## 当前阶段
 
 ```text
-User Token Readiness Completed
+WAITING_AUTHORIZATION Interaction Phase Completed
 ```
 
 ## 当前目标
 
 Task Runtime Sample 已完成 `task_query` / `task_complete` 的最小闭环合同。
 
-本阶段解决真实飞书写入暴露出的身份问题：
+本阶段解决真实飞书写入缺少用户授权时的交互表达问题：
 
 ```text
-公司资源 → BOT / TENANT_TOKEN
-个人资源 → USER / USER_TOKEN
+ProviderResult.waiting_authorization
+→ RuntimeResult.authorization
+→ InteractionPayload.authorization
 ```
 
 已完成：
 
-- 新增 Feishu User Token resolver，复用现有 `feishu_user` OAuth Account。
-- `FeishuClient` 增加 user access token PATCH 能力。
-- `FeishuTaskService.complete_task` 支持 `user_access_token`。
-- `task_complete` 作为第一条 USER_TOKEN 写入样板。
-- 缺少用户授权时，Runtime Provider 返回 `waiting_authorization`，不执行旧 Tool 写入。
-- 已授权时，Task Provider 通过 USER_TOKEN 调飞书 Task 完成接口。
+- `waiting_authorization` 保留为 Runtime Result Type，不再被折回普通 `task_complete`。
+- RuntimeResult 标准输出 `metadata.authorization`。
+- RuntimeResult 标准输出 `authorize_user_identity` action。
+- InteractionPayload 标准输出 `payload_type = authorization`。
+- 授权入口指向 `/api/user-identity/oauth/feishu/start`。
+- Card / Portal 只需渲染 InteractionPayload，不需要解释 Provider 失败逻辑。
 
 ## 当前禁止范围
 
@@ -44,15 +45,18 @@ Task Runtime Sample 已完成 `task_query` / `task_complete` 的最小闭环合�
 - Event Bus / Workflow / Memory / Evidence / Snapshot / Insight Engine。
 - UI 重构或 SidePanel 迁移。
 - 数据库迁移。
+- OAuth UI 新页面。
+- 授权完成后的自动重试。
+- Runtime State 新状态枚举。
 
 ## 当前验收标准
 
-- `ProviderRequest.execution_identity_contract` 可表达 `USER + USER_TOKEN`。
-- `complete_task` 缺用户授权时返回 `ProviderResult.status = denied`。
-- 缺授权结果 `result_type = waiting_authorization`。
-- 缺授权路径不调用飞书写接口。
-- 已授权路径调用 Task User Token API。
-- `complete_task` 成功后仍输出 `Runtime result_type = task_complete`。
+- `ProviderResult.result_type = waiting_authorization` 可进入 RuntimeResult。
+- `RuntimeResult.status = waiting_authorization`。
+- `RuntimeResult.actions[0].action = authorize_user_identity`。
+- `InteractionPayload.payload_type = authorization`。
+- 授权 action 包含 `url / resource_type / channel / authorization_status`。
+- 交互层不生成授权 URL，不处理授权业务逻辑。
 
 ## 当前验证
 
@@ -62,7 +66,8 @@ Task Runtime Sample 已完成 `task_query` / `task_complete` 的最小闭环合�
 tests/test_execution_identity_user_token.py
 tests/test_runtime_v5.py
 tests/test_capability_registry_builder.py
-tests/test_v5_architecture.py::test_feishu_write_services_are_only_called_by_api_runtime
+tests/test_v5_architecture.py
+tests/test_gateway_feishu.py
 ruff check
 ```
 
@@ -75,12 +80,12 @@ ruff check
 建议进入：
 
 ```text
-WAITING_AUTHORIZATION Interaction Phase
+Task Complete Authorization Retry Acceptance Phase
 ```
 
 目标：
 
-- RuntimeResult 标准表达 `waiting_authorization`。
-- InteractionPayload 渲染“需要飞书用户授权”。
-- Card / Portal 只展示授权入口，不处理授权业务逻辑。
-- 完成授权后，用户可重试同一 `RuntimeActionInput`。
+- 在真实飞书中触发一次 `task_complete` 缺授权。
+- 验证 Bot/Card 是否展示授权入口。
+- 用户完成飞书授权后，重新执行同一个任务完成动作。
+- 验证 Runtime 自动使用 USER_TOKEN，而不是 CLI_PROFILE。

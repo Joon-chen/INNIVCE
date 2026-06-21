@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from app.services.runtime_v5.capabilities import label_for_strategy
 from typing import Any
+from urllib.parse import urlencode
 
+from app.core.config import settings
+from app.services.runtime_v5.capabilities import label_for_strategy
 from app.services.runtime_v5.models import CommandPlan, ComposedAnswer, ExecutionResult, IntentResult, PermissionDecision, PlannerResult, ResultContext, RuntimeResult, TargetUI
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload
 
@@ -32,10 +34,15 @@ def build_runtime_result(
         data_scope=str(command_plan.intent_result.data_scope or ""),
         result_metadata=result_metadata,
     )
+    authorization = _authorization_metadata(
+        result_type=result_type,
+        result_metadata=result_metadata,
+        company_id=company_id,
+    )
     title = label_for_strategy(command_plan.planner_result.strategy) or command_plan.intent
     return RuntimeResult(
         result_type=result_type,
-        status=str(execution_status),
+        status="waiting_authorization" if authorization else str(execution_status),
         title=title,
         summary=_summary_from_composed(composed),
         items=result_context.items if result_context is not None else (),
@@ -44,6 +51,7 @@ def build_runtime_result(
             result_context=result_context,
             company_id=company_id,
             scope_context=scope_context,
+            authorization=authorization,
         ),
         target_ui=_target_ui_for_result(result_type=result_type, fallback=command_plan.target_ui),
         metadata={
@@ -58,6 +66,7 @@ def build_runtime_result(
             "requires_confirmation": permission.requires_confirmation,
             "execution_identity": permission.execution_identity,
             "result_context": result_metadata,
+            "authorization": authorization,
         },
     )
 
@@ -149,7 +158,7 @@ def runtime_result_payload(result: RuntimeResult) -> dict[str, Any]:
 
 
 def _target_ui_for_result(*, result_type: str, fallback: TargetUI) -> TargetUI:
-    if result_type in {"runtime_action", "runtime_pending_confirmation", "runtime_waiting_input"}:
+    if result_type in {"runtime_action", "runtime_pending_confirmation", "runtime_waiting_input", "waiting_authorization"}:
         return "card"
     if result_type == "approval_detail":
         return "sidepanel"
@@ -164,9 +173,12 @@ def _actions_for_result(
     result_context,
     company_id: str = "",
     scope_context: dict[str, Any] | None = None,
+    authorization: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if result_context is None:
         return ()
+    if result_type == "waiting_authorization" and authorization:
+        return (_authorization_action(authorization),)
     if result_type in {"approval_list", "approval_query"}:
         return tuple(_approval_detail_action(item, index=index) for index, item in enumerate(result_context.items))
     if result_type == "task_list":
@@ -201,6 +213,68 @@ def _actions_for_result(
             },
         )
     return ()
+
+
+def _authorization_metadata(
+    *,
+    result_type: str,
+    result_metadata: dict[str, Any],
+    company_id: str,
+) -> dict[str, Any] | None:
+    if result_type != "waiting_authorization":
+        return None
+    provider_results = result_metadata.get("provider_results") if isinstance(result_metadata.get("provider_results"), list) else []
+    provider = next((item for item in provider_results if isinstance(item, dict) and item.get("waiting_authorization")), {})
+    if not provider and result_metadata.get("waiting_authorization"):
+        provider = result_metadata
+    contract = provider.get("execution_identity_contract") if isinstance(provider.get("execution_identity_contract"), dict) else {}
+    owner = contract.get("credential_owner") if isinstance(contract.get("credential_owner"), dict) else {}
+    owner_open_id = str(owner.get("open_id") or "").strip()
+    owner_company_id = str(owner.get("company_id") or company_id or "").strip()
+    if not owner_company_id or not owner_open_id:
+        return {
+            "required": True,
+            "available": False,
+            "reason": "missing_authorization_owner",
+            "credential_mode": str(provider.get("credential_mode") or "USER_TOKEN"),
+            "authorization_status": str(provider.get("authorization_status") or "MISSING_AUTHORIZATION"),
+        }
+    query = urlencode({"company_id": owner_company_id, "open_id": owner_open_id})
+    url = f"{settings.api_base_url.rstrip('/')}/api/user-identity/oauth/feishu/start?{query}"
+    return {
+        "required": True,
+        "available": True,
+        "resource_type": "user_identity_bundle",
+        "label": "授权个人能力包",
+        "channel": "feishu_oauth",
+        "authorization_flow": "feishu_in_app_oauth",
+        "url": url,
+        "start_endpoint": "/api/user-identity/oauth/feishu/start",
+        "callback_endpoint": "/api/feishu/oauth/callback",
+        "owner_open_id": owner_open_id,
+        "company_id": owner_company_id,
+        "credential_mode": str(provider.get("credential_mode") or contract.get("credential_mode") or "USER_TOKEN"),
+        "authorization_status": str(provider.get("authorization_status") or contract.get("authorization_status") or "MISSING_AUTHORIZATION"),
+        "authorization_error": str(provider.get("authorization_error") or ""),
+        "provider_boundary": str(provider.get("provider_boundary") or ""),
+        "covered_resources": ["personal_feishu"],
+        "can_escalate_original_permissions": False,
+    }
+
+
+def _authorization_action(authorization: dict[str, Any]) -> dict[str, Any]:
+    action = {
+        "action": "authorize_user_identity",
+        "label": str(authorization.get("label") or "去授权"),
+        "target_ui": "card",
+        "requires_confirmation": False,
+        "resource_type": str(authorization.get("resource_type") or "user_identity_bundle"),
+        "channel": str(authorization.get("channel") or "feishu_oauth"),
+        "authorization_status": str(authorization.get("authorization_status") or ""),
+        "authorization_flow": str(authorization.get("authorization_flow") or ""),
+        "url": str(authorization.get("url") or ""),
+    }
+    return {key: value for key, value in action.items() if value not in {"", None}}
 
 
 def _approval_detail_action(item: dict[str, Any], *, index: int) -> dict[str, Any]:

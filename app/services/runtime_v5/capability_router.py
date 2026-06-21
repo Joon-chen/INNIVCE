@@ -632,6 +632,12 @@ def _provider_result_summary(result: ProviderResult) -> dict:
         "resolved_user_id": result_metadata.get("resolved_user_id", ""),
         "resolved_chat_id": result_metadata.get("resolved_chat_id", ""),
         "resolved_target_name": result_metadata.get("resolved_target_name", ""),
+        "credential_mode": result_metadata.get("credential_mode", ""),
+        "authorization_status": result_metadata.get("authorization_status", ""),
+        "authorization_error": result_metadata.get("authorization_error", ""),
+        "waiting_authorization": bool(result_metadata.get("waiting_authorization")),
+        "provider_boundary": result_metadata.get("provider_boundary", ""),
+        "execution_identity_contract": result_metadata.get("execution_identity_contract", {}),
     }
 
 

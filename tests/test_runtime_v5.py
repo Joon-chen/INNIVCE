@@ -1276,6 +1276,81 @@ def test_runtime_v5_task_complete_failed_provider_returns_failed_task_complete()
     assert runtime_result["status"] == "error"
 
 
+def test_runtime_v5_waiting_authorization_builds_authorization_interaction_payload() -> None:
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"complete_task": ("task.complete_task", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            return ProviderResult(
+                source="task",
+                status="denied",
+                result_type="waiting_authorization",
+                error="missing_feishu_user_account",
+                answer="完成任务需要本人飞书授权。",
+                metadata={
+                    "operation": "complete_task",
+                    "credential_mode": "USER_TOKEN",
+                    "authorization_status": "MISSING_AUTHORIZATION",
+                    "authorization_error": "missing_feishu_user_account",
+                    "waiting_authorization": True,
+                    "provider_boundary": "user_token_required",
+                    "execution_identity_contract": request.execution_identity_contract.payload(),
+                },
+            )
+
+    result = run_runtime_v5(
+        context=_context(
+            "card action",
+            chat_id="chat_task_complete_auth",
+            session_context={
+                "runtime_v5_action_input": {
+                    "action_id": "task_complete_auth_1",
+                    "action_type": "execute",
+                    "intent": "task_complete",
+                    "strategy": "task_complete",
+                    "target": {"task_guid": "task/1"},
+                    "confirmation": {"confirmed": True, "token": "task_complete_auth_1"},
+                    "context": {
+                        "company_id": "company_1",
+                        "chat_id": "chat_task_complete_auth",
+                        "user_id": "ou_test",
+                        "open_id": "ou_test",
+                        "source_ui": "card",
+                    },
+                    "message": "完成任务",
+                    "sources": ["task"],
+                }
+            },
+        ),
+        providers={"task": TaskProvider()},
+    )
+
+    runtime_result = result.composed.metadata["runtime_result"]
+    assert runtime_result["result_type"] == "waiting_authorization"
+    assert runtime_result["status"] == "waiting_authorization"
+    assert runtime_result["metadata"]["authorization"]["authorization_status"] == "MISSING_AUTHORIZATION"
+    assert runtime_result["actions"] == [
+        {
+            "action": "authorize_user_identity",
+            "label": "授权个人能力包",
+            "target_ui": "card",
+            "requires_confirmation": False,
+            "resource_type": "user_identity_bundle",
+            "channel": "feishu_oauth",
+            "authorization_status": "MISSING_AUTHORIZATION",
+            "authorization_flow": "feishu_in_app_oauth",
+            "url": runtime_result["metadata"]["authorization"]["url"],
+        }
+    ]
+    assert "/api/user-identity/oauth/feishu/start?" in runtime_result["actions"][0]["url"]
+    assert "open_id=ou_test" in runtime_result["actions"][0]["url"]
+    payload = interaction_payload_from_runtime_result(runtime_result_from_payload(runtime_result))
+    assert payload.payload_type == "authorization"
+    assert payload.actions == tuple(runtime_result["actions"])
+    assert payload.metadata["authorization"]["provider_boundary"] == "user_token_required"
+
+
 def test_runtime_v5_reject_missing_params_waits_for_input_then_confirmation() -> None:
     calls: list[tuple[str, str, str]] = []
     approval_detail = ResultContext(

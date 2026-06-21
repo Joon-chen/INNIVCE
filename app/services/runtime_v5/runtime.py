@@ -1153,8 +1153,20 @@ def _runtime_action_receipt_context(
     answer: str,
 ) -> ResultContext:
     provider_items = []
+    authorization_metadata: dict[str, Any] = {}
+    receipt_result_type = _runtime_action_result_type(plan.strategy)
     for result in execution.provider_results:
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        if result.result_type == "waiting_authorization" or metadata.get("waiting_authorization"):
+            receipt_result_type = "waiting_authorization"
+            authorization_metadata = {
+                "credential_mode": metadata.get("credential_mode", ""),
+                "authorization_status": metadata.get("authorization_status", ""),
+                "authorization_error": metadata.get("authorization_error", ""),
+                "waiting_authorization": bool(metadata.get("waiting_authorization")),
+                "provider_boundary": metadata.get("provider_boundary", ""),
+                "execution_identity_contract": metadata.get("execution_identity_contract", {}),
+            }
         operation = str(metadata.get("operation") or result.result_type or plan.strategy or intent.intent).strip()
         summary = str(result.answer or result.error or answer or label_for_strategy(plan.strategy) or operation).strip()
         status_group = _runtime_action_status_group(result.status)
@@ -1188,7 +1200,7 @@ def _runtime_action_receipt_context(
         )
     action_status_group = _runtime_action_status_group(execution.status)
     return ResultContext(
-        result_type=_runtime_action_result_type(plan.strategy),
+        result_type=receipt_result_type,
         query_id=f"{plan.strategy}:runtime_action:{uuid4().hex[:12]}",
         count=len(provider_items),
         items=tuple(provider_items),
@@ -1215,6 +1227,7 @@ def _runtime_action_receipt_context(
             "item_identity_fields": ["source", "operation"],
             "item_count": len(provider_items),
             "display_count": len(provider_items),
+            **authorization_metadata,
         },
         answer=answer or f"{label_for_strategy(plan.strategy)}已处理。",
     )

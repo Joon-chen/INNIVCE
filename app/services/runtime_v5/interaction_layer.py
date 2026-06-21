@@ -44,6 +44,8 @@ def interaction_payload_payload(payload: InteractionPayload) -> dict[str, Any]:
 
 
 def _payload_type_for_result(result: RuntimeResult) -> str:
+    if result.result_type == "waiting_authorization" or result.status == "waiting_authorization":
+        return "authorization"
     if result.result_type in {"runtime_action", "approval_approve", "approval_reject", "task_complete"}:
         return "feedback"
     if result.result_type in {"base_export", "file_delivery", "document_delivery"}:
