@@ -15,25 +15,24 @@ Runtime V1 冻结复盘见 `docs/RUNTIME_V1_FREEZE_REVIEW.md`。
 当前阶段进入：
 
 ```text
-Enterprise Cognitive Foundation V1
+Approval Cognitive Integration Phase
 ```
 
-目标不是做审批专属 AI 建议缓存，而是建立企业认知系统的最小闭环：
+Enterprise Cognitive Foundation V1 的三层底座已建立。本阶段把 Approval 查询接入认知闭环：
 
 ```text
-WorkEvent -> Snapshot -> MemoryCandidate
+Approval -> WorkEvent -> Snapshot -> Bot Read Snapshot
 ```
 
 ## 当前目标
 
 以 Approval 作为第一条认知样板链路：
 
-- WorkEvent：事实层，append-only。
-- Snapshot：当前认知层，保存 AI 对审批的当前判断。
-- MemoryCandidate：长期记忆候选层，只写候选，不做 Memory Engine。
-- Bot 查询审批时优先读取 Approval Snapshot。
+- Approval Query 读取 Snapshot。
 - Snapshot 不存在或 `status != completed` 时，只能展示“分析中”。
-- Snapshot completed 后，才能展示“可通过 / 需关注 / 高风险”和原因。
+- Snapshot completed 后，展示 `recommendation / risk_level / reasons`。
+- `approval_analysis_completed` 必须写入 Snapshot。
+- Bot / Card / Portal / SidePanel 不直接使用实时 AI 判断作为展示依据。
 
 ## 当前禁止范围
 
@@ -59,12 +58,12 @@ WorkEvent -> Snapshot -> MemoryCandidate
 - WorkEvent 写入语义必须是 append-only。
 - Approval Snapshot 是 Bot 展示 AI 判断的唯一来源。
 - 附件未完成或 AI 分析未完成时，Bot 显示“分析中”。
+- `approval_analysis_completed` 会写入 completed Snapshot。
 - 所有三层数据必须携带 `company_id`。
 - 不建立审批专属快照表。
 
 ## 下一步计划
 
-- 设计数据库迁移：标准 Snapshot / MemoryCandidate，以及 WorkEvent append-only 认知写入路径。
-- 建立 ECF V1 service 边界：write event、read snapshot、upsert snapshot、write memory candidate。
-- 用 Approval 样板接入：`approval_created -> attachment_processed -> approval_analysis_completed -> snapshot completed`。
-- 调整 Approval 查询读取规则：只读 Snapshot 展示 AI 判断，未完成则显示“分析中”。
+- 部署 Approval Snapshot 读取/写入链路。
+- 用真实飞书审批查询验证：首次无 completed Snapshot 时展示“分析中”；分析完成后展示 Snapshot 建议。
+- 观察是否需要独立异步 Attachment Processor；暂不引入 WorkEvent Engine。

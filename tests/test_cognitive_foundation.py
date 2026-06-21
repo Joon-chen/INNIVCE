@@ -10,6 +10,11 @@ from app.services.cognitive_foundation import (
     upsert_snapshot,
     write_memory_candidate,
 )
+from app.services.runtime_v5.feishu_resource_providers import (
+    FeishuApprovalProvider,
+    _approval_assessment,
+    _approval_item,
+)
 
 
 class _WriteDb:
@@ -172,3 +177,90 @@ def test_write_memory_candidate_rejects_invalid_confidence() -> None:
             candidate_text="某员工多次缺附件",
             confidence=1.2,
         )
+
+
+def test_approval_pending_snapshot_displays_analysis_in_progress() -> None:
+    item = _approval_item(
+        {
+            "instance_code": "approval-1",
+            "approval_name": "报销审批",
+            "_approval_snapshot": {
+                "status": "pending_analysis",
+                "recommendation": "分析中",
+                "risk_level": "pending",
+                "reasons": ["附件或 AI 分析尚未完成"],
+            },
+        }
+    )
+
+    assert item["assessment"]["suggestion"] == "分析中"
+    assert item["assessment"]["risk_level"] == "pending"
+    assert "尚未完成" in item["assessment"]["reason"]
+
+
+def test_approval_completed_snapshot_displays_recommendation_and_reasons() -> None:
+    assessment = _approval_assessment(
+        {
+            "_approval_snapshot": {
+                "status": "completed",
+                "recommendation": "可通过",
+                "risk_level": "pass",
+                "summary": "附件完整",
+                "reasons": ["发票金额与表单一致", "供应商名称匹配"],
+            }
+        },
+        attachment_results=[],
+    )
+
+    assert assessment["suggestion"] == "可通过"
+    assert assessment["risk_level"] == "pass"
+    assert assessment["source"] == "snapshot"
+    assert "发票金额与表单一致" in assessment["reason"]
+
+
+def test_approval_analysis_completed_writes_snapshot() -> None:
+    company_id = uuid4()
+    db = _WriteDb()
+    provider = FeishuApprovalProvider(db=db)
+    request = _approval_request(company_id)
+    raw_item = {
+        "instance_code": "approval-1",
+        "approval_name": "报销审批",
+        "_approval_event_ids": ["event-created", "event-attachment"],
+    }
+
+    provider._write_approval_analysis_snapshot(
+        request,
+        raw_item,
+        assessment={
+            "suggestion": "需关注",
+            "reason": "供应商名称需核对",
+            "detailed_reason": "供应商名称和发票抬头不完全一致",
+        },
+    )
+
+    event = db.added[0]
+    snapshot = db.added[1]
+    assert event.event_type == "approval_analysis_completed"
+    assert event.object_type == "approval"
+    assert event.object_id == "approval-1"
+    assert snapshot.status == "completed"
+    assert snapshot.snapshot_type == "approval_current_judgment"
+    assert snapshot.recommendation == "需关注"
+    assert snapshot.risk_level == "review"
+    assert raw_item["_approval_snapshot"]["status"] == "completed"
+
+
+def _approval_request(company_id):
+    class _Identity:
+        open_id = "ou_user"
+
+    class _Scope:
+        active_company_id = company_id
+
+    class _Context:
+        identity = _Identity()
+        runtime_scope = _Scope()
+        user_id = "user_1"
+
+    return type("Request", (), {"context": _Context()})()

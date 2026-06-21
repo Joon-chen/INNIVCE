@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Company, FeishuAppConfig, MemoryFact, WorkEvent
+from app.models.entities import Company, FeishuAppConfig, MemoryFact, Snapshot, WorkEvent
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -25,6 +25,12 @@ from app.services.feishu.approval import (
 )
 from app.services.feishu.approval_advice import approval_attachment_basis, rule_approval_decision_recommendation
 from app.services.feishu.approval_attachments import FeishuApprovalAttachmentService
+from app.services.cognitive_foundation import (
+    append_cognitive_work_event,
+    get_completed_snapshot,
+    get_snapshot,
+    upsert_snapshot,
+)
 from app.services.feishu.drive import FeishuDriveService
 from app.services.feishu.meeting import FeishuMeetingService
 from app.services.feishu.okr import FeishuOkrService
@@ -518,20 +524,168 @@ class FeishuApprovalProvider(FeishuResourceProvider):
         for raw_item in raw_items[:10]:
             if not isinstance(raw_item, dict):
                 continue
+            self._record_approval_created(request, raw_item)
             attachment_results = self._read_approval_attachments(request, raw_item)
             if attachment_results:
                 attachment_read_count += len(attachment_results)
                 raw_item["_attachment_results"] = attachment_results
-            llm_started = perf_counter()
-            llm_decision = _approval_llm_decision(raw_item, attachment_results=attachment_results)
-            raw_item["_approval_llm_ms"] = int((perf_counter() - llm_started) * 1000)
-            if llm_decision:
-                raw_item["_approval_llm_decision"] = llm_decision
+            if self._approval_attachments_complete(raw_item, attachment_results=attachment_results):
+                self._record_approval_attachment_processed(request, raw_item, attachment_results=attachment_results)
+                llm_started = perf_counter()
+                llm_decision = _approval_llm_decision(raw_item, attachment_results=attachment_results)
+                raw_item["_approval_llm_ms"] = int((perf_counter() - llm_started) * 1000)
+                if llm_decision:
+                    raw_item["_approval_llm_decision"] = llm_decision
+                assessment = _approval_assessment(raw_item, attachment_results=attachment_results)
+                self._write_approval_analysis_snapshot(request, raw_item, assessment=assessment)
+            else:
+                raw_item["_approval_llm_ms"] = 0
+                self._write_approval_pending_snapshot(request, raw_item)
+            self._attach_approval_snapshot(request, raw_item)
             raw_item["_approval_assessment"] = _approval_assessment(raw_item, attachment_results=attachment_results)
         substeps.append({"step": "approval_attachments", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success" if attachment_read_count else "empty", "count": attachment_read_count})
         llm_total_ms = sum(int(item.get("_approval_llm_ms") or 0) for item in raw_items[:10] if isinstance(item, dict))
         substeps.append({"step": "approval_ai_judgement", "duration_ms": llm_total_ms, "status": "success" if llm_total_ms else "empty", "count": len([item for item in raw_items[:10] if isinstance(item, dict) and item.get("_approval_llm_decision")])})
         return substeps
+
+    def _approval_object_id(self, raw_item: dict[str, Any]) -> str:
+        return (
+            approval_formatters.approval_instance_code(raw_item)
+            or str(raw_item.get("task_id") or raw_item.get("id") or "").strip()
+        )
+
+    def _approval_actor(self, request: ProviderRequest) -> str:
+        return str(request.context.identity.open_id or request.context.user_id or "system").strip() or "system"
+
+    def _approval_company_id(self, request: ProviderRequest):
+        return request.context.runtime_scope.active_company_id
+
+    def _record_approval_created(self, request: ProviderRequest, raw_item: dict[str, Any]) -> None:
+        company_id = self._approval_company_id(request)
+        object_id = self._approval_object_id(raw_item)
+        if company_id is None or not object_id:
+            return
+        event = append_cognitive_work_event(
+            self.db,
+            company_id=company_id,
+            event_type="approval_created",
+            object_type="approval",
+            object_id=object_id,
+            source="bot_query_discovered",
+            actor=self._approval_actor(request),
+            payload={"item": _approval_snapshot_safe_item(raw_item)},
+        )
+        raw_item.setdefault("_approval_event_ids", []).append(str(event.id))
+
+    def _record_approval_attachment_processed(
+        self,
+        request: ProviderRequest,
+        raw_item: dict[str, Any],
+        *,
+        attachment_results: list[Any],
+    ) -> None:
+        company_id = self._approval_company_id(request)
+        object_id = self._approval_object_id(raw_item)
+        if company_id is None or not object_id:
+            return
+        event = append_cognitive_work_event(
+            self.db,
+            company_id=company_id,
+            event_type="attachment_processed",
+            object_type="approval",
+            object_id=object_id,
+            source="attachment_processor",
+            actor="system",
+            payload={"attachments": [_attachment_result_payload(result) for result in attachment_results]},
+        )
+        raw_item.setdefault("_approval_event_ids", []).append(str(event.id))
+
+    def _write_approval_pending_snapshot(self, request: ProviderRequest, raw_item: dict[str, Any]) -> None:
+        company_id = self._approval_company_id(request)
+        object_id = self._approval_object_id(raw_item)
+        if company_id is None or not object_id:
+            return
+        snapshot = upsert_snapshot(
+            self.db,
+            company_id=company_id,
+            object_type="approval",
+            object_id=object_id,
+            snapshot_type="approval_current_judgment",
+            status="pending_analysis",
+            summary="审批附件仍在分析中。",
+            recommendation="分析中",
+            risk_level="pending",
+            reasons=["附件或 AI 分析尚未完成"],
+            source_event_ids=list(raw_item.get("_approval_event_ids") or []),
+            payload={"item": _approval_snapshot_safe_item(raw_item)},
+        )
+        raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
+
+    def _write_approval_analysis_snapshot(
+        self,
+        request: ProviderRequest,
+        raw_item: dict[str, Any],
+        *,
+        assessment: dict[str, Any],
+    ) -> None:
+        company_id = self._approval_company_id(request)
+        object_id = self._approval_object_id(raw_item)
+        if company_id is None or not object_id:
+            return
+        analysis_event = append_cognitive_work_event(
+            self.db,
+            company_id=company_id,
+            event_type="approval_analysis_completed",
+            object_type="approval",
+            object_id=object_id,
+            source="ai_analysis",
+            actor="system",
+            payload={"assessment": assessment, "item": _approval_snapshot_safe_item(raw_item)},
+        )
+        source_event_ids = list(raw_item.get("_approval_event_ids") or [])
+        source_event_ids.append(str(analysis_event.id))
+        raw_item["_approval_event_ids"] = source_event_ids
+        snapshot = upsert_snapshot(
+            self.db,
+            company_id=company_id,
+            object_type="approval",
+            object_id=object_id,
+            snapshot_type="approval_current_judgment",
+            status="completed",
+            summary=str(assessment.get("reason") or assessment.get("detailed_reason") or ""),
+            recommendation=str(assessment.get("suggestion") or ""),
+            risk_level=_approval_snapshot_risk_level(assessment),
+            reasons=_approval_snapshot_reasons(assessment),
+            source_event_ids=source_event_ids,
+            payload={"assessment": assessment, "item": _approval_snapshot_safe_item(raw_item)},
+        )
+        raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
+
+    def _attach_approval_snapshot(self, request: ProviderRequest, raw_item: dict[str, Any]) -> None:
+        company_id = self._approval_company_id(request)
+        object_id = self._approval_object_id(raw_item)
+        if company_id is None or not object_id:
+            return
+        snapshot = get_completed_snapshot(
+            self.db,
+            company_id=company_id,
+            object_type="approval",
+            object_id=object_id,
+            snapshot_type="approval_current_judgment",
+        ) or get_snapshot(
+            self.db,
+            company_id=company_id,
+            object_type="approval",
+            object_id=object_id,
+            snapshot_type="approval_current_judgment",
+        )
+        if snapshot is not None:
+            raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
+
+    def _approval_attachments_complete(self, raw_item: dict[str, Any], *, attachment_results: list[Any]) -> bool:
+        detail = raw_item.get("instance_detail") if isinstance(raw_item.get("instance_detail"), dict) else {}
+        refs = approval_attachment_refs(detail.get("form"))
+        return not refs or bool(attachment_results)
 
     def _resolve_approval_target_user_ids(
         self,
@@ -3343,6 +3497,25 @@ def _approval_detail_answer(item: dict[str, Any]) -> str:
 
 
 def _approval_assessment(raw: dict[str, Any], *, attachment_results: list[Any]) -> dict[str, Any]:
+    snapshot = raw.get("_approval_snapshot") if isinstance(raw.get("_approval_snapshot"), dict) else {}
+    if snapshot:
+        if snapshot.get("status") == "completed":
+            reasons = snapshot.get("reasons") if isinstance(snapshot.get("reasons"), list) else []
+            reason = "；".join(str(item) for item in reasons if str(item).strip())
+            return {
+                "suggestion": str(snapshot.get("recommendation") or "需关注"),
+                "reason": reason or str(snapshot.get("summary") or "已完成审批分析"),
+                "detailed_reason": reason or str(snapshot.get("summary") or ""),
+                "risk_level": str(snapshot.get("risk_level") or "review"),
+                "source": "snapshot",
+            }
+        return {
+            "suggestion": "分析中",
+            "reason": "附件或 AI 分析尚未完成",
+            "detailed_reason": "附件或 AI 分析尚未完成，请稍后查看。",
+            "risk_level": "pending",
+            "source": "snapshot",
+        }
     llm_decision = raw.get("_approval_llm_decision") if isinstance(raw.get("_approval_llm_decision"), dict) else {}
     if llm_decision:
         return {
@@ -3400,6 +3573,63 @@ def _approval_assessment(raw: dict[str, Any], *, attachment_results: list[Any]) 
         "positive_points": positive_points,
         "amount": amount,
         "source": "rule",
+    }
+
+
+def _snapshot_payload(snapshot: Snapshot) -> dict[str, Any]:
+    return {
+        "id": str(snapshot.id),
+        "company_id": str(snapshot.company_id),
+        "object_type": snapshot.object_type,
+        "object_id": snapshot.object_id,
+        "snapshot_type": snapshot.snapshot_type,
+        "status": snapshot.status,
+        "summary": snapshot.summary,
+        "recommendation": snapshot.recommendation,
+        "risk_level": snapshot.risk_level,
+        "reasons": list(snapshot.reasons or []),
+        "source_event_ids": list(snapshot.source_event_ids or []),
+    }
+
+
+def _approval_snapshot_risk_level(assessment: dict[str, Any]) -> str:
+    suggestion = str(assessment.get("suggestion") or "")
+    if suggestion in {"可通过", "可初步通过"}:
+        return "pass"
+    if suggestion in {"拒绝", "补充后再审"}:
+        return "high"
+    return "review"
+
+
+def _approval_snapshot_reasons(assessment: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    for key in ("detailed_reason", "reason"):
+        value = str(assessment.get(key) or "").strip()
+        if value:
+            reasons.append(value)
+    for key in ("risk_points", "positive_points"):
+        value = assessment.get(key)
+        if isinstance(value, list):
+            reasons.extend(str(item) for item in value if str(item).strip())
+    return reasons[:8]
+
+
+def _approval_snapshot_safe_item(raw_item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "instance_code": approval_formatters.approval_instance_code(raw_item),
+        "approval_name": approval_formatters.readable_approval_name(raw_item),
+        "serial_number": raw_item.get("serial_number"),
+        "task_id": raw_item.get("task_id"),
+        "status": raw_item.get("status") or raw_item.get("task_status"),
+    }
+
+
+def _attachment_result_payload(result: Any) -> dict[str, Any]:
+    return {
+        "name": str(getattr(result, "name", "") or ""),
+        "token": str(getattr(result, "token", "") or ""),
+        "text_preview": str(getattr(result, "text_preview", "") or "")[:500],
+        "error": str(getattr(result, "error", "") or "")[:300],
     }
 
 
