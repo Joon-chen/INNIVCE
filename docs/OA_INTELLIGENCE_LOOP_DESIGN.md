@@ -25,10 +25,12 @@ OA Raw Data
 - `Evidence`：证据层，把原始数据转成可核对、可解释的业务依据。
 - `Snapshot`：当前认知层，保存对象当前判断。
 - `MemoryCandidate`：长期记忆候选层，记录可能值得沉淀的组织模式。
-- `Insight`：洞察层，回答“这件事意味着什么，为什么重要”。
+- `Insight`：洞察层，输出 Recommendation，回答“这件事意味着什么，为什么重要，建议怎样推进”。
 - `Action`：动作层，由 Insight 驱动，进入 Runtime 执行或等待人确认。
 
 Action 不应直接由 raw data 或 snapshot 驱动。Action 必须有 Insight 作为可解释前置。
+
+Insight 不负责执行，不规划动作，不生成 Action Candidate。Action 继续归 Runtime。
 
 ## 2. Product Principle
 
@@ -87,6 +89,10 @@ Action 回答：
 通过哪个 Tool/Provider 执行？
 ```
 
+Insight = Recommendation。
+
+Action = Runtime 执行。
+
 因此链路必须保持：
 
 ```text
@@ -140,21 +146,21 @@ Task Raw Data
 Insight 示例：
 
 - 任务延期不是单点问题，而是依赖人连续三次未响应。
-- 建议发起协同提醒或调整负责人。
+- 建议负责人先确认依赖阻塞，再决定是否发起协同提醒或调整负责人。
 
 ### Meeting
 
 Insight 示例：
 
 - 会议有决议但无负责人。
-- 建议生成待办并确认 owner。
+- 建议先确认 owner，再由 Runtime 创建待办。
 
 ### Mail
 
 Insight 示例：
 
 - 客户邮件涉及交付风险，且历史上同类问题超过 2 次。
-- 建议升级给项目负责人，并生成回复草稿。
+- 建议升级给项目负责人，并准备回复方向；是否生成草稿由 Runtime 执行。
 
 ### Finance
 
@@ -186,6 +192,8 @@ Action 可以是：
 - escalate_risk
 
 但 Action 不负责解释为什么。为什么属于 Insight。
+
+Insight Contract V0 见 `docs/INSIGHT_CONTRACT_V0.md`。
 
 ## 7. Current Scope
 

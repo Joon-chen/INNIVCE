@@ -72,6 +72,10 @@ V1 已建立：
 - Evidence：证据层
 - Insight：洞察层，负责把认知转成可解释的行动理由
 
+Insight = Recommendation。
+
+Insight 不执行、不规划动作、不生成 Action Candidate。Action 继续归 Runtime。
+
 ## 4. Evidence Layer
 
 Evidence 是 AI OS 的关键缺层。
@@ -216,6 +220,8 @@ WorkEvent -> Evidence -> Snapshot -> MemoryCandidate -> Insight -> Runtime Actio
 审批中出现的 `widget...` 问题，本质不是审批问题，而是 Evidence Layer 缺失问题。
 
 完整 OA Intelligence Loop 见 `docs/OA_INTELLIGENCE_LOOP_DESIGN.md`。
+
+Insight Contract V0 见 `docs/INSIGHT_CONTRACT_V0.md`。
 
 ## 9. Current Phase
 
