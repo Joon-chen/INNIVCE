@@ -191,6 +191,8 @@ Insight 可以引用长期记忆候选或正式 Memory。
 
 ## 7. Approval Example
 
+审批完整样板见 `docs/APPROVAL_INSIGHT_SAMPLE.md`。
+
 ```json
 {
   "id": "insight-approval-202606150009",
