@@ -319,3 +319,5 @@ WorkEvent
 -> Snapshot
 -> Insight
 ```
+
+Task 归属 `Workspace` 业务域，不建立 `Task Module`。

@@ -34,13 +34,14 @@ What should the organization remember?
 
 所有业务线都服从这五个问题：
 
-- Approval：这张单能不能批，缺什么，风险在哪里。
-- Mail：这封邮件要不要回，谁负责，是否影响客户或项目。
-- Meeting：会议形成了什么决议，谁要跟进，哪些事项卡住。
-- Task：哪些任务延期，原因是什么，谁需要协同。
+- Process：这张单能不能批，缺什么，风险在哪里。
+- Communication：这封邮件要不要回，谁负责，是否影响客户或项目。
+- Workspace：任务、会议、日程和项目是否按计划推进，谁需要协同。
 - Customer：客户当前状态如何，风险和机会是什么。
 - Finance：费用、付款、回款、预算是否异常。
 - People：组织、人员、权限、协作关系是否清楚。
+
+V5 业务域与能力分类见 `docs/V5_CAPABILITY_TAXONOMY.md`。
 
 ## 3. AI OS Layering
 
@@ -202,7 +203,7 @@ Bot + Detail View + Management Portal
 
 ## 8. First Vertical Sample
 
-Approval 是第一条样板，因为它同时覆盖：
+Approval 是 Process 域下的第一条样板，因为它同时覆盖：
 
 - 实时业务事实
 - 附件/OCR
