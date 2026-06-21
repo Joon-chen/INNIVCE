@@ -9,6 +9,7 @@ Registry fallback 退役评审见 `docs/REGISTRY_FALLBACK_DEPRECATION_REVIEW.md`
 Task 认知样板设计见 `docs/TASK_COGNITIVE_SAMPLE_DESIGN.md`。
 Task Runtime 样板合同评审见 `docs/TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`。
 Task Runtime 样板验收评审见 `docs/TASK_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md`。
+Task Runtime 飞书手工验收见 `docs/TASK_RUNTIME_SAMPLE_FEISHU_MANUAL_ACCEPTANCE.md`。
 企业级 Scope 模型评审见 `docs/ENTERPRISE_SCOPE_MODEL_REVIEW.md`。
 
 ## 当前阶段
@@ -16,7 +17,7 @@ Task Runtime 样板验收评审见 `docs/TASK_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.m
 当前进入：
 
 ```text
-Task Runtime Sample Acceptance Review Completed
+Task Runtime Sample Feishu Manual Acceptance Blocked
 ```
 
 背景：
@@ -61,6 +62,13 @@ guid / summary / status / url
 
 当前 Provider/RuntimeResult 可以把真实 `guid` 转成 `RuntimeActionInput.target.task_guid`。
 
+真实飞书写操作验收已尝试：
+
+- 本地 Runtime 到 `WAITING_CONFIRMATION` 成立。
+- 本地 Provider 执行受本地 PostgreSQL 未运行阻塞。
+- 云端容器 `lark-cli --as user` 未配置，无法执行 user identity 写操作。
+- 测试任务已用本地 CLI 清理完成，不作为 Runtime 验收通过依据。
+
 ## 当前禁止范围
 
 本阶段不要做：
@@ -93,12 +101,13 @@ guid / summary / status / url
 - `InteractionPayload` 只消费 `RuntimeResult` 并输出 feedback。
 - `complete_task` 已收敛为 Runtime result_type `task_complete`。
 - 真实 Feishu Task 只读样本字段已验证。
-- 真实 Feishu `complete_task` 写操作尚未验收。
+- 真实 Feishu `complete_task` 写操作因云端 user identity 未配置而阻塞。
 - 不修改数据库。
 - 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 进入 Task Runtime Sample Feishu Manual Acceptance。
-2. 准备一条明确可完成的测试任务，验证真实完成动作。
+1. 进入 Cloud User Identity Runtime Readiness Phase。
+2. 明确云端 Runtime Provider 使用的 `lark-cli` home/profile。
+3. 完成云端 `--as user` 授权后，再验证真实 Task complete Runtime 写链路。
 3. 继续禁止 Task Portal / Insight / Snapshot 扩展。
