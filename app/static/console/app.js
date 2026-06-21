@@ -18,6 +18,10 @@ const state = {
   discoverIncludeLocal: true,
   databaseUnavailable: false,
   replyModes: null,
+  capabilityRegistry: null,
+  capabilityRegistryCompanyId: "",
+  capabilityRegistryDiffs: [],
+  legacyToolConfigsByName: {},
 };
 
 const viewMeta = {
@@ -235,6 +239,7 @@ async function loadOverview() {
   fillDiscoveryDefaults();
   const operatingState = await loadOperatingCenter();
   await loadAgentReplyModes({ silent: true });
+  await loadCapabilityRegistry({ silent: true });
   if (operatingState?.databaseUnavailable) {
     renderOwnerCommandCenter({ modules: [] }, operatingState);
     renderV5ArchitectureBoard(operatingState);
@@ -2049,9 +2054,35 @@ async function loadToolConfigurations() {
     return;
   }
   const data = await safeLoad(`/api/v5/tools?company_id=${encodeURIComponent(state.selectedCompanyId)}`);
-  const items = data?.items || [];
+  const legacyItems = data?.items || [];
+  state.legacyToolConfigsByName = Object.fromEntries(legacyItems.map((item) => [item.tool_name, item]));
+  const registry = await loadCapabilityRegistry({ silent: true });
+  const registryRows = skillRegistryRows(registry?.skill_registry_payload);
+  const items = registryRows.length ? registryRows : legacyItems;
+  if (registryRows.length) {
+    const summary = registry.skill_registry_payload?.summary || {};
+    logCapabilityRegistryDiff(
+      "skill_registry_payload",
+      {
+        tools: legacyItems.length,
+        business_tools: new Set(legacyItems.map((item) => item.business_tool).filter(Boolean)).size,
+      },
+      {
+        skills: summary.skill_count || registryRows.length,
+        capabilities: registry.skill_registry_payload?.capabilities?.length || 0,
+        missing_provider: summary.missing_provider_count || 0,
+      },
+      {
+        skill_registry_coverage: registryCoverage(summary.skill_count || registryRows.length, registryRows.length),
+        provider_binding_coverage: registryCoverage(
+          summary.skill_count || registryRows.length,
+          registryRows.filter((item) => item.provider !== "unbound").length,
+        ),
+      },
+    );
+  }
   renderChips("toolConfigStats", {
-    ...(data?.counts || {}),
+    ...(registryRows.length ? (registry?.skill_registry_payload?.summary || {}) : (data?.counts || {})),
     business_tools: new Set(items.map((item) => item.business_tool).filter(Boolean)).size,
     write_tools: items.filter((item) => item.supports_write).length,
     disabled: items.filter((item) => item.enabled === false).length,
@@ -3500,6 +3531,90 @@ async function safeLoad(path) {
   }
 }
 
+function capabilityRegistryCompanyId() {
+  return state.selectedCompanyId || state.defaultCompanyId || "";
+}
+
+async function loadCapabilityRegistry(options = {}) {
+  const companyId = capabilityRegistryCompanyId();
+  if (!companyId) return null;
+  if (state.capabilityRegistry && state.capabilityRegistryCompanyId === companyId) {
+    return state.capabilityRegistry;
+  }
+  const payload = await safeLoad(`/api/v5/capability-registry?company_id=${encodeURIComponent(companyId)}`);
+  if (!payload) {
+    if (!options.silent) console.warn("Capability registry unavailable; falling back to legacy console data.");
+    return null;
+  }
+  state.capabilityRegistry = payload;
+  state.capabilityRegistryCompanyId = companyId;
+  return payload;
+}
+
+function capabilityCatalogCards(catalogPayload) {
+  return (catalogPayload?.domains || []).map((domain) => {
+    const capabilities = domain.capabilities || [];
+    const available = capabilities.filter((item) => item.status === "available").length;
+    const planned = capabilities.filter((item) => item.status !== "available").length;
+    return [
+      domain.domain_id,
+      domain.label || domain.domain_id,
+      domain.description || "",
+      `${available}/${capabilities.length} 可用 · ${planned} 规划中`,
+    ];
+  });
+}
+
+function skillRegistryRows(skillRegistryPayload) {
+  const rows = [];
+  for (const capability of skillRegistryPayload?.capabilities || []) {
+    for (const skill of capability.skills || []) {
+      const bindings = skill.provider_bindings || [];
+      const providerNames = bindings.map((item) => item.provider_name || item.provider_id).filter(Boolean);
+      rows.push({
+        tool_name: skill.skill_id,
+        business_tool: capability.label || skill.capability_id,
+        provider: providerNames[0] || "unbound",
+        compatible_providers: providerNames,
+        enabled: skill.status === "enabled",
+        supports_write: Boolean(skill.requires_confirmation || skill.risk_level === "high"),
+        required_permissions: bindings.flatMap((item) => item.permission_required || []),
+        audit_action: skill.skill_id,
+        business_tool_capabilities: [skill.label || skill.operation || skill.skill_id],
+        provider_boundaries: {},
+        config_json: {
+          registry_source: "skill_registry_payload",
+          domain_id: skill.domain_id,
+          capability_id: skill.capability_id,
+          skill_type: skill.skill_type,
+          risk_level: skill.risk_level,
+          runtime_supported: skill.runtime_supported,
+          receipt_supported: skill.receipt_supported,
+          provider_binding_count: skill.provider_binding_count,
+        },
+        registry_source: "skill_registry_payload",
+      });
+    }
+  }
+  return rows;
+}
+
+function registryCoverage(total, covered) {
+  return total > 0 ? Number(((covered / total) * 100).toFixed(1)) : 0;
+}
+
+function logCapabilityRegistryDiff(scope, legacyPayload, registryPayload, coverage) {
+  const diff = {
+    scope,
+    legacy: legacyPayload,
+    registry: registryPayload,
+    coverage,
+    generated_at: state.capabilityRegistry?.generated_at || null,
+  };
+  state.capabilityRegistryDiffs.push(diff);
+  console.info("[capability-registry-diff]", diff);
+}
+
 async function safeAction(target, fn) {
   if (state.databaseUnavailable) {
     showResult(target, "数据库未连接，操作已暂停。");
@@ -3611,6 +3726,26 @@ function renderV5ArchitectureBoard(operatingState) {
     if (item.enabled !== false) enabledByFamily[family].enabled += 1;
     if (item.supports_write) enabledByFamily[family].write += 1;
   }
+  const catalogPayload = state.capabilityRegistry?.catalog_payload;
+  const catalogCards = capabilityCatalogCards(catalogPayload);
+  if (catalogCards.length) {
+    const summary = catalogPayload.summary || {};
+    logCapabilityRegistryDiff(
+      "catalog_payload",
+      {
+        tool_families: businessToolFamilies.length,
+        tools: tools.length,
+      },
+      {
+        domains: summary.domain_count || catalogCards.length,
+        capabilities: summary.capability_count || 0,
+        visible_capabilities: summary.visible_capability_count || 0,
+      },
+      {
+        catalog_coverage: registryCoverage(summary.capability_count || 0, summary.visible_capability_count || 0),
+      },
+    );
+  }
 
   const dataLayers = [
     ["Operational Data", "审批、项目、客户、日历、群消息", `${total.resources || 0} 个资源 · ${syncCounts.failed || syncCounts.error || 0} 个同步异常`],
@@ -3626,11 +3761,14 @@ function renderV5ArchitectureBoard(operatingState) {
     </div>
   `).join(""));
 
-  setHtml("toolFamilyBoard", businessToolFamilies.map(([family, label, scope]) => {
+  const toolFamilyRows = catalogCards.length ? catalogCards : businessToolFamilies.map(([family, label, scope]) => {
     const stats = enabledByFamily[family];
     const status = stats
       ? `${stats.enabled}/${stats.total} 启用 · ${stats.write} 写能力`
       : "待绑定能力";
+    return [family, label, scope, status];
+  });
+  setHtml("toolFamilyBoard", toolFamilyRows.map(([family, label, scope, status]) => {
     return `
       <div class="tool-family">
         <span>${escapeHtml(family)}</span>
