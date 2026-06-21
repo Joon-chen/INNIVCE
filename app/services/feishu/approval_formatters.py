@@ -243,7 +243,7 @@ def approval_applicant_name(item: dict[str, Any]) -> str | None:
 def approval_instance_code(item: dict[str, Any]) -> str | None:
     value = first_task_value(
         item,
-        ["serial_number", "instance_code", "process_code", "approval_instance_id", "process_external_id", "task_external_id"],
+        ["instance_code", "process_code", "approval_instance_id", "process_external_id", "task_external_id", "serial_number"],
     )
     if value:
         return str(value)

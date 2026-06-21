@@ -519,10 +519,8 @@ class FeishuApprovalProvider(FeishuResourceProvider):
         return substeps
 
     def _approval_object_id(self, raw_item: dict[str, Any]) -> str:
-        return (
-            approval_formatters.approval_instance_code(raw_item)
-            or str(raw_item.get("task_id") or raw_item.get("id") or "").strip()
-        )
+        candidates = _approval_object_id_candidates(raw_item)
+        return candidates[0] if candidates else ""
 
     def _approval_actor(self, request: ProviderRequest) -> str:
         return str(request.context.identity.open_id or request.context.user_id or "system").strip() or "system"
@@ -633,24 +631,26 @@ class FeishuApprovalProvider(FeishuResourceProvider):
 
     def _attach_approval_snapshot(self, request: ProviderRequest, raw_item: dict[str, Any]) -> None:
         company_id = self._approval_company_id(request)
-        object_id = self._approval_object_id(raw_item)
-        if company_id is None or not object_id:
+        object_ids = _approval_object_id_candidates(raw_item)
+        if company_id is None or not object_ids:
             return
-        snapshot = get_completed_snapshot(
-            self.db,
-            company_id=company_id,
-            object_type="approval",
-            object_id=object_id,
-            snapshot_type="approval_current_judgment",
-        ) or get_snapshot(
-            self.db,
-            company_id=company_id,
-            object_type="approval",
-            object_id=object_id,
-            snapshot_type="approval_current_judgment",
-        )
-        if snapshot is not None:
-            raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
+        for object_id in object_ids:
+            snapshot = get_completed_snapshot(
+                self.db,
+                company_id=company_id,
+                object_type="approval",
+                object_id=object_id,
+                snapshot_type="approval_current_judgment",
+            ) or get_snapshot(
+                self.db,
+                company_id=company_id,
+                object_type="approval",
+                object_id=object_id,
+                snapshot_type="approval_current_judgment",
+            )
+            if snapshot is not None:
+                raw_item["_approval_snapshot"] = _snapshot_payload(snapshot)
+                return
 
     def _approval_has_completed_snapshot(self, raw_item: dict[str, Any]) -> bool:
         snapshot = raw_item.get("_approval_snapshot") if isinstance(raw_item.get("_approval_snapshot"), dict) else {}
@@ -670,6 +670,7 @@ class FeishuApprovalProvider(FeishuResourceProvider):
             celery_app.send_task(
                 "approval.snapshot.build",
                 args=[str(company_id), _approval_snapshot_builder_item(raw_item), self._approval_actor(request)],
+                countdown=2,
             )
         except Exception as exc:
             raw_item["_approval_snapshot_builder_error"] = str(exc)[:300]
@@ -3617,6 +3618,20 @@ def _approval_snapshot_safe_item(raw_item: dict[str, Any]) -> dict[str, Any]:
         "task_id": raw_item.get("task_id"),
         "status": raw_item.get("status") or raw_item.get("task_status"),
     }
+
+
+def _approval_object_id_candidates(raw_item: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("instance_code", "process_code", "approval_instance_id", "process_external_id", "task_external_id", "serial_number", "task_id", "id"):
+        value = str(raw_item.get(key) or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+    instance = raw_item.get("instance") if isinstance(raw_item.get("instance"), dict) else {}
+    for key in ("code", "instance_code", "process_code", "approval_instance_id"):
+        value = str(instance.get(key) or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
 
 
 def _approval_snapshot_builder_item(raw_item: dict[str, Any]) -> dict[str, Any]:

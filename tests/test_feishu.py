@@ -94,6 +94,7 @@ from app.services.feishu.approval_card_entrypoint import (
 )
 from app.services.feishu import approval_enrichment
 from app.services.feishu.approval_advice import approval_attachment_basis, rule_approval_decision_recommendation
+from app.services.feishu.approval_advice import approval_text_decision_advice as _approval_text_decision_advice
 from app.services.feishu.approval_resources import (
     attach_synced_approval_attachments as _attach_synced_approval_attachments,
 )
@@ -106,6 +107,7 @@ from app.services.feishu.command_parser import (
     should_reply_to_message as _should_reply_to_message,
 )
 from app.services.feishu.approval_formatters import (
+    approval_instance_code as _approval_instance_code,
     format_approval_detail_lines as _format_approval_detail_lines,
     format_pending_approval_tasks as _format_pending_approval_tasks,
     readable_approval_name,
@@ -2719,6 +2721,36 @@ def test_fetch_user_pending_tasks_can_skip_instance_detail_enrichment() -> None:
     assert result["available"] is True
     assert result["items"][0]["approval_name"] == "报销审批"
     assert client.paths == ["/open-apis/approval/v4/tasks/query"]
+
+
+def test_approval_instance_code_prefers_instance_code_over_serial_number() -> None:
+    assert (
+        _approval_instance_code(
+            {
+                "serial_number": "202606210001",
+                "instance_code": "5FCA1EB7-2EB0-414D-8630-F61540524341",
+            }
+        )
+        == "5FCA1EB7-2EB0-414D-8630-F61540524341"
+    )
+
+
+def test_approval_text_decision_advice_prefers_runtime_assessment() -> None:
+    advice = _approval_text_decision_advice(
+        {
+            "_approval_assessment": {
+                "suggestion": "可通过",
+                "reason": "已命中 completed Snapshot",
+            }
+        },
+        "付款审批",
+        {},
+        amount=None,
+        attachments=[],
+        attachment_results=[],
+    )
+
+    assert advice == "可通过。理由：已命中 completed Snapshot"
 
 
 def test_format_pending_approval_tasks_is_personal_pending_list() -> None:

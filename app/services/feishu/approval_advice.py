@@ -90,8 +90,14 @@ def approval_text_decision_advice(
     attachments: list[dict[str, str]],
     attachment_results: list[ApprovalAttachmentReadResult],
 ) -> str:
+    item_data = item or {}
+    assessment = item_data.get("_approval_assessment") if isinstance(item_data.get("_approval_assessment"), dict) else {}
+    if assessment:
+        conclusion = str(assessment.get("suggestion") or "需关注").strip() or "需关注"
+        reason = str(assessment.get("reason") or assessment.get("detailed_reason") or "已读取审批认知快照").strip()
+        return f"{conclusion}。理由：{reason}"
     conclusion, reason = approval_decision_for_item(
-        item or {},
+        item_data,
         approval_name,
         fields,
         amount=amount,
