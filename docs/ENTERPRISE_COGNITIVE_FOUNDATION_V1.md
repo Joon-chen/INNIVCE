@@ -101,6 +101,8 @@ Snapshot.status == completed -> 展示 recommendation / risk_level / reasons
 ```
 
 禁止 fallback 到实时 AI 判断。否则 Snapshot 层失去权威性。
+Bot Query 不允许同步读取附件或执行 AI 分析；只能合并 Feishu live data 与已有 Snapshot。
+Snapshot Builder 是本阶段唯一允许生成 completed Approval Snapshot 的组件。
 
 ## 4. MemoryCandidate Model
 

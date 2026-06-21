@@ -500,60 +500,27 @@ class FeishuApprovalProvider(FeishuResourceProvider):
         substeps: list[dict[str, Any]] = []
         app_config = _active_feishu_app_config(self.db, request.context.runtime_scope.active_company_id)
         step_started = perf_counter()
-        detail_loaded = 0
-        for raw_item in raw_items[:10]:
-            if not isinstance(raw_item, dict):
-                continue
-            self._attach_approval_snapshot(request, raw_item)
-            if self._approval_has_completed_snapshot(raw_item):
-                continue
-            detail = self._fetch_approval_instance_detail(request, raw_item)
-            if detail:
-                detail_loaded += 1
-                raw_item["instance_detail"] = detail
-                raw_item.pop("detail_error", None)
-                raw_item.setdefault("instance_code", detail.get("instance_code") or detail.get("process_code"))
-                raw_item.setdefault("serial_number", detail.get("serial_number"))
-                detail_name = str(detail.get("approval_name") or detail.get("definition_name") or "").strip()
-                if detail_name:
-                    raw_item.setdefault("approval_name", detail_name)
-        substeps.append({"step": "approval_detail_batch", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success" if detail_loaded else "empty", "count": detail_loaded})
+        substeps.append({"step": "approval_live_data", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success", "count": len([item for item in raw_items[:10] if isinstance(item, dict)])})
         if app_config is not None:
             step_started = perf_counter()
             approval_resources.attach_approval_history_context(self.db, app_config, raw_items[:10])
             substeps.append({"step": "approval_history", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success"})
         step_started = perf_counter()
-        attachment_read_count = 0
+        builder_enqueued_count = 0
         for raw_item in raw_items[:10]:
             if not isinstance(raw_item, dict):
                 continue
             self._record_approval_created(request, raw_item)
             self._attach_approval_snapshot(request, raw_item)
-            if self._approval_has_completed_snapshot(raw_item):
-                raw_item["_approval_llm_ms"] = 0
-                raw_item["_approval_assessment"] = _approval_assessment(raw_item, attachment_results=[])
-                continue
-            attachment_results = self._read_approval_attachments(request, raw_item)
-            if attachment_results:
-                attachment_read_count += len(attachment_results)
-                raw_item["_attachment_results"] = attachment_results
-            if self._approval_attachments_complete(raw_item, attachment_results=attachment_results):
-                self._record_approval_attachment_processed(request, raw_item, attachment_results=attachment_results)
-                llm_started = perf_counter()
-                llm_decision = _approval_llm_decision(raw_item, attachment_results=attachment_results)
-                raw_item["_approval_llm_ms"] = int((perf_counter() - llm_started) * 1000)
-                if llm_decision:
-                    raw_item["_approval_llm_decision"] = llm_decision
-                assessment = _approval_assessment(raw_item, attachment_results=attachment_results)
-                self._write_approval_analysis_snapshot(request, raw_item, assessment=assessment)
-            else:
-                raw_item["_approval_llm_ms"] = 0
+            if not raw_item.get("_approval_snapshot"):
                 self._write_approval_pending_snapshot(request, raw_item)
-            self._attach_approval_snapshot(request, raw_item)
-            raw_item["_approval_assessment"] = _approval_assessment(raw_item, attachment_results=attachment_results)
-        substeps.append({"step": "approval_attachments", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success" if attachment_read_count else "empty", "count": attachment_read_count})
-        llm_total_ms = sum(int(item.get("_approval_llm_ms") or 0) for item in raw_items[:10] if isinstance(item, dict))
-        substeps.append({"step": "approval_ai_judgement", "duration_ms": llm_total_ms, "status": "success" if llm_total_ms else "empty", "count": len([item for item in raw_items[:10] if isinstance(item, dict) and item.get("_approval_llm_decision")])})
+            if not self._approval_has_completed_snapshot(raw_item) and self._enqueue_approval_snapshot_build(request, raw_item):
+                builder_enqueued_count += 1
+            raw_item["_approval_llm_ms"] = 0
+            raw_item["_approval_assessment"] = _approval_assessment(raw_item, attachment_results=[])
+        substeps.append({"step": "approval_snapshot_read", "duration_ms": int((perf_counter() - step_started) * 1000), "status": "success", "count": len([item for item in raw_items[:10] if isinstance(item, dict) and item.get("_approval_snapshot")])})
+        substeps.append({"step": "approval_snapshot_builder_enqueue", "duration_ms": 0, "status": "success" if builder_enqueued_count else "empty", "count": builder_enqueued_count})
+        substeps.append({"step": "approval_ai_judgement", "duration_ms": 0, "status": "skipped_async", "count": 0})
         return substeps
 
     def _approval_object_id(self, raw_item: dict[str, Any]) -> str:
@@ -693,6 +660,27 @@ class FeishuApprovalProvider(FeishuResourceProvider):
     def _approval_has_completed_snapshot(self, raw_item: dict[str, Any]) -> bool:
         snapshot = raw_item.get("_approval_snapshot") if isinstance(raw_item.get("_approval_snapshot"), dict) else {}
         return snapshot.get("status") == "completed"
+
+    def _enqueue_approval_snapshot_build(self, request: ProviderRequest, raw_item: dict[str, Any]) -> bool:
+        company_id = self._approval_company_id(request)
+        object_id = self._approval_object_id(raw_item)
+        if company_id is None or not object_id:
+            return False
+        snapshot = raw_item.get("_approval_snapshot") if isinstance(raw_item.get("_approval_snapshot"), dict) else {}
+        if snapshot.get("status") == "analysis_running":
+            return False
+        try:
+            from app.tasks.celery_app import celery_app
+
+            celery_app.send_task(
+                "approval.snapshot.build",
+                args=[str(company_id), _approval_snapshot_builder_item(raw_item), self._approval_actor(request)],
+            )
+        except Exception as exc:
+            raw_item["_approval_snapshot_builder_error"] = str(exc)[:300]
+            return False
+        raw_item["_approval_snapshot_builder_enqueued"] = True
+        return True
 
     def _approval_attachments_complete(self, raw_item: dict[str, Any], *, attachment_results: list[Any]) -> bool:
         detail = raw_item.get("instance_detail") if isinstance(raw_item.get("instance_detail"), dict) else {}
@@ -3634,6 +3622,15 @@ def _approval_snapshot_safe_item(raw_item: dict[str, Any]) -> dict[str, Any]:
         "task_id": raw_item.get("task_id"),
         "status": raw_item.get("status") or raw_item.get("task_status"),
     }
+
+
+def _approval_snapshot_builder_item(raw_item: dict[str, Any]) -> dict[str, Any]:
+    item = _approval_snapshot_safe_item(raw_item)
+    for key in ("process_code", "task_id", "approval_code", "definition_code", "instance_detail"):
+        value = raw_item.get(key)
+        if value:
+            item[key] = value
+    return item
 
 
 def _attachment_result_payload(result: Any) -> dict[str, Any]:

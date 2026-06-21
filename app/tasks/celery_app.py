@@ -326,6 +326,23 @@ _BOT_APPROVALS_RECENT_REPLY_TASK = ".".join(("bot", "approvals", "recent_reply")
 _BOT_APPROVALS_WORKBENCH_TASK = ".".join(("bot", "approvals", "workbench_reply"))
 _BOT_RUNTIME_CARD_REPLY_TASK = ".".join(("bot", "runtime", "card_reply"))
 _BOT_APPROVALS_BATCH_APPROVE_TASK = ".".join(("bot", "approvals", "batch_approve"))
+_APPROVAL_SNAPSHOT_BUILD_TASK = ".".join(("approval", "snapshot", "build"))
+
+
+@celery_app.task(name=_APPROVAL_SNAPSHOT_BUILD_TASK)
+def approval_snapshot_build_task(company_id: str, item: dict, actor: str = "system") -> dict:
+    db = SessionLocal()
+    try:
+        from app.services.approval_snapshot_builder import build_approval_snapshot
+
+        result = build_approval_snapshot(db, company_id=company_id, item=item, actor=actor)
+        db.commit()
+        return result
+    except Exception as exc:
+        db.rollback()
+        return {"ok": False, "error": str(exc)[:500]}
+    finally:
+        db.close()
 
 
 @celery_app.task(name=_BOT_APPROVALS_RECENT_REPLY_TASK)

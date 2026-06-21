@@ -14,6 +14,10 @@ def test_bot_recent_approvals_reply_task_is_registered() -> None:
     assert "bot.approvals.recent_reply" in celery_app.tasks
 
 
+def test_approval_snapshot_builder_task_is_registered() -> None:
+    assert "approval.snapshot.build" in celery_app.tasks
+
+
 def test_v5_resource_auto_sync_is_disabled_without_enabled_policies(monkeypatch) -> None:
     class DummySession:
         def close(self) -> None:

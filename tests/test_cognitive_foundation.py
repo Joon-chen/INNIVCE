@@ -251,6 +251,36 @@ def test_approval_query_completed_snapshot_skips_realtime_analysis(monkeypatch) 
     assert raw_item["_approval_llm_ms"] == 0
 
 
+def test_approval_query_missing_snapshot_enqueues_builder_without_realtime_analysis(monkeypatch) -> None:
+    company_id = uuid4()
+    db = _WriteDb()
+    provider = FeishuApprovalProvider(db=db)
+    request = _approval_request(company_id)
+    raw_item = {"instance_code": "approval-1", "approval_name": "报销审批"}
+    enqueued = []
+    monkeypatch.setattr(feishu_resource_providers, "_active_feishu_app_config", lambda *args, **kwargs: None)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("bot query must not run realtime approval analysis")
+
+    def fake_enqueue(request_arg, raw_item_arg):
+        enqueued.append((request_arg, raw_item_arg))
+        return True
+
+    provider._fetch_approval_instance_detail = fail_if_called
+    provider._read_approval_attachments = fail_if_called
+    provider._write_approval_analysis_snapshot = fail_if_called
+    provider._enqueue_approval_snapshot_build = fake_enqueue
+
+    provider._enrich_approval_list_items(request, [raw_item])
+
+    snapshot = db.added[1]
+    assert snapshot.status == "pending_analysis"
+    assert raw_item["_approval_assessment"]["suggestion"] == "分析中"
+    assert raw_item["_approval_llm_ms"] == 0
+    assert enqueued == [(request, raw_item)]
+
+
 def test_approval_analysis_completed_writes_snapshot() -> None:
     company_id = uuid4()
     db = _WriteDb()
