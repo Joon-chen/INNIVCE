@@ -7,19 +7,22 @@
 ## 当前阶段
 
 ```text
-WAITING_AUTHORIZATION Interaction Phase Completed
+Task Complete Authorization Retry Acceptance Phase In Progress
 ```
 
 ## 当前目标
 
 Task Runtime Sample 已完成 `task_query` / `task_complete` 的最小闭环合同。
 
-本阶段解决真实飞书写入缺少用户授权时的交互表达问题：
+本阶段验证真实飞书写入缺少用户授权时，Bot 能否展示授权入口，并在授权后重试同一动作。
+
+当前已完成 Runtime V5 授权卡接入：
 
 ```text
 ProviderResult.waiting_authorization
 → RuntimeResult.authorization
 → InteractionPayload.authorization
+→ Feishu Authorization Card
 ```
 
 已完成：
@@ -30,6 +33,8 @@ ProviderResult.waiting_authorization
 - InteractionPayload 标准输出 `payload_type = authorization`。
 - 授权入口指向 `/api/user-identity/oauth/feishu/start`。
 - Card / Portal 只需渲染 InteractionPayload，不需要解释 Provider 失败逻辑。
+- Feishu Gateway 可从 Runtime V5 Trace 中读取 `authorize_user_identity` action。
+- Runtime V5 授权等待会发送现有 User Identity Authorization Card，而不是普通文本。
 
 ## 当前禁止范围
 
@@ -48,6 +53,8 @@ ProviderResult.waiting_authorization
 - OAuth UI 新页面。
 - 授权完成后的自动重试。
 - Runtime State 新状态枚举。
+- 自动创建测试任务。
+- 自动点击用户 OAuth 授权。
 
 ## 当前验收标准
 
@@ -57,6 +64,8 @@ ProviderResult.waiting_authorization
 - `InteractionPayload.payload_type = authorization`。
 - 授权 action 包含 `url / resource_type / channel / authorization_status`。
 - 交互层不生成授权 URL，不处理授权业务逻辑。
+- Feishu Gateway 能从 Runtime V5 RuntimeResult 发送授权卡。
+- 授权卡发送结果写入 Gateway audit payload。
 
 ## 当前验证
 
@@ -77,10 +86,10 @@ ruff check
 
 ## 下一步计划
 
-建议进入：
+下一步继续：
 
 ```text
-Task Complete Authorization Retry Acceptance Phase
+Real Feishu Manual Acceptance
 ```
 
 目标：

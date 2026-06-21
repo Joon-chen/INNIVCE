@@ -645,6 +645,121 @@ def test_handle_feishu_command_sends_authorization_card_for_user_identity_action
     assert "user_identity_authorization_actions" not in db.added[-1].payload
 
 
+def test_handle_feishu_command_sends_authorization_card_from_runtime_v5_result(monkeypatch) -> None:
+    class FakeDb:
+        def __init__(self):
+            self.added = []
+            self.commits = 0
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            self.commits += 1
+
+        def scalar(self, query):
+            return None
+
+    db = FakeDb()
+    company_id = uuid4()
+    app_config = SimpleNamespace(id=uuid4(), company_id=company_id, app_id="cli_1", name="大飞哥")
+    identity = BotIdentity(open_id="ou_1", role="member", access_scope="personal")
+    auth_url = f"http://127.0.0.1:8000/api/user-identity/oauth/feishu/start?company_id={company_id}&open_id=ou_1"
+    send_calls = {"text": [], "card": []}
+
+    monkeypatch.setattr("app.services.feishu.commands.settings.feishu_bot_ai_mode_enabled", True)
+    monkeypatch.setattr("app.services.feishu.commands.feishu_identity.get_sender_identity", lambda *args, **kwargs: identity)
+    monkeypatch.setattr("app.services.feishu.commands.command_handlers.load_approval_context", lambda *args, **kwargs: [])
+    monkeypatch.setattr("app.services.feishu.commands.command_handlers.record_command_context", lambda db_arg, *args: db_arg.commit())
+    monkeypatch.setattr(
+        "app.services.feishu.command_handlers.bot_runtime.employee_bot_answer_result",
+        lambda *args, **kwargs: SimpleNamespace(
+            answer="完成任务需要本人飞书授权。",
+            trace_payload={
+                "runtime_version": "v5",
+                "route_path": "task_complete",
+                "route_label": "完成任务",
+                "composed": {
+                    "metadata": {
+                        "runtime_result": {
+                            "result_type": "waiting_authorization",
+                            "status": "waiting_authorization",
+                            "actions": [
+                                {
+                                    "action": "authorize_user_identity",
+                                    "label": "授权个人能力包",
+                                    "resource_type": "user_identity_bundle",
+                                    "channel": "feishu_oauth",
+                                    "authorization_status": "MISSING_AUTHORIZATION",
+                                    "authorization_flow": "feishu_in_app_oauth",
+                                    "url": auth_url,
+                                }
+                            ],
+                            "metadata": {
+                                "authorization": {
+                                    "url": auth_url,
+                                    "owner_open_id": "ou_1",
+                                    "covered_resources": ["personal_feishu"],
+                                    "provider_boundary": "user_token_required",
+                                }
+                            },
+                        }
+                    }
+                },
+            },
+        ),
+    )
+
+    async def fake_send_text_reply(*args, **kwargs):
+        send_calls["text"].append(kwargs)
+        return {"code": 0}
+
+    async def fake_send_authorization_card(*args, **kwargs):
+        send_calls["card"].append(kwargs)
+        return True
+
+    async def fake_quick_sync(*args, **kwargs):
+        return {}
+
+    monkeypatch.setattr("app.services.feishu.commands.feishu_replies.send_text_reply", fake_send_text_reply)
+    monkeypatch.setattr("app.services.feishu.command_handlers.sync_commands.quick_sync_for_question", fake_quick_sync)
+    monkeypatch.setattr(
+        "app.services.feishu.commands.authorization_card_entrypoint.send_user_identity_authorization_card",
+        fake_send_authorization_card,
+    )
+
+    result = asyncio.run(
+        handle_feishu_command_result(
+            db,
+            app_config,
+            {
+                "header": {"event_id": "evt_1", "event_type": "im.message.receive_v1", "app_id": "cli_1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou_1"}, "sender_type": "user"},
+                    "message": {
+                        "message_id": "om_1",
+                        "chat_id": "oc_1",
+                        "chat_type": "p2p",
+                        "message_type": "text",
+                        "content": '{"text":"完成这个任务"}',
+                    },
+                },
+            },
+        )
+    )
+
+    assert result.handled is True
+    assert result.authorization_card_sent is True
+    assert result.authorization_owner_open_id == "ou_1"
+    assert result.authorization_action_count == 1
+    assert result.user_identity_authorization_actions[0]["provider_boundary"] == "user_token_required"
+    assert send_calls["text"] == []
+    assert len(send_calls["card"]) == 1
+    assert send_calls["card"][0]["actions"][0]["url"] == auth_url
+    assert db.added[-1].payload["user_identity_card_sent"] is True
+    assert db.added[-1].payload["user_identity_required"] is True
+
+
 def test_handle_feishu_command_routes_employee_calendar_create_to_runtime_auth_card(monkeypatch) -> None:
     class EmptyScalars:
         def all(self):

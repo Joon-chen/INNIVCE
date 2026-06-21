@@ -253,9 +253,7 @@ async def handle_feishu_command_result(
         )
     reply = dispatch_result.reply
     send_approval_card = dispatch_result.send_approval_card
-    user_identity_authorization_actions = authorization_card_entrypoint.authorization_actions_from_trace(
-        dispatch_result.agent_runtime_trace
-    )
+    user_identity_authorization_actions = _authorization_actions_from_runtime_or_trace(dispatch_result.agent_runtime_trace)
     if _should_send_thinking_notice(dispatch_result.agent_runtime_trace):
         await feishu_replies.send_text_reply(
             app_config=app_config,
@@ -569,6 +567,41 @@ def _authorization_result_fields(actions: list[dict[str, Any]], *, identity: Any
         "authorization_owner_open_id": owner_open_id,
         "authorization_action_count": len(actions),
     }
+
+
+def _authorization_actions_from_runtime_or_trace(trace_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    runtime_actions = _authorization_actions_from_runtime_result(trace_payload)
+    if runtime_actions:
+        return runtime_actions
+    return authorization_card_entrypoint.authorization_actions_from_trace(trace_payload)
+
+
+def _authorization_actions_from_runtime_result(trace_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(trace_payload, dict):
+        return []
+    composed = trace_payload.get("composed") if isinstance(trace_payload.get("composed"), dict) else {}
+    metadata = composed.get("metadata") if isinstance(composed.get("metadata"), dict) else {}
+    runtime_result = metadata.get("runtime_result") if isinstance(metadata.get("runtime_result"), dict) else {}
+    actions = runtime_result.get("actions") if isinstance(runtime_result.get("actions"), list) else []
+    authorization = runtime_result.get("metadata", {}).get("authorization") if isinstance(runtime_result.get("metadata"), dict) else {}
+    normalized: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict) or action.get("action") != "authorize_user_identity":
+            continue
+        normalized.append(
+            {
+                "resource_type": action.get("resource_type") or "user_identity_bundle",
+                "label": action.get("label") or "授权个人能力包",
+                "channel": action.get("channel") or "feishu_oauth",
+                "url": action.get("url") or (authorization.get("url") if isinstance(authorization, dict) else ""),
+                "authorization_flow": action.get("authorization_flow") or (authorization.get("authorization_flow") if isinstance(authorization, dict) else ""),
+                "covered_resources": authorization.get("covered_resources", []) if isinstance(authorization, dict) else [],
+                "owner_open_id": authorization.get("owner_open_id", "") if isinstance(authorization, dict) else "",
+                "authorization_status": action.get("authorization_status") or (authorization.get("authorization_status") if isinstance(authorization, dict) else ""),
+                "provider_boundary": authorization.get("provider_boundary", "") if isinstance(authorization, dict) else "",
+            }
+        )
+    return [action for action in normalized if str(action.get("url") or "").strip()]
 
 
 def _user_identity_action_summaries(actions: Any) -> list[dict[str, Any]]:
