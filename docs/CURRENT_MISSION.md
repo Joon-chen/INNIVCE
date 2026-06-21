@@ -5,6 +5,7 @@
 系统最高级规则见 `docs/V5_RUNTIME_CONSTITUTION.md`。
 V5 能力分类见 `docs/V5_CAPABILITY_TAXONOMY.md`。
 Capability Registry 模型见 `docs/CAPABILITY_REGISTRY_MODEL.md`。
+页面职责评审见 `docs/PAGE_RESPONSIBILITY_AUDIT.md`。
 企业 AI OS 顶层定义见 `docs/ENTERPRISE_AI_OS_V1.md`。
 企业认知底座 V1 见 `docs/ENTERPRISE_COGNITIVE_FOUNDATION_V1.md`。
 历史阶段归档见 `docs/history/`。
@@ -14,7 +15,7 @@ Capability Registry 模型见 `docs/CAPABILITY_REGISTRY_MODEL.md`。
 当前进入：
 
 ```text
-Capability Registry Design Phase
+Page Responsibility Audit Phase
 ```
 
 背景：
@@ -31,29 +32,29 @@ Business
 Intelligence
 ```
 
-在进入 Task Cognitive Sample 前，需要冻结 Capability Registry，避免能力目录、能力清册、治理中心、系统诊断继续混用飞书产品、原子能力和运行状态分类。
+Capability Registry 已冻结。
+
+在进入页面重构前，需要先评审当前页面内容与目标职责的差异，避免只改页面标题而没有真正收口职责。
 
 ## 当前目标
 
-冻结统一模型：
+评审四个页面职责：
 
 ```text
-Business Domain
--> Capability
--> Skill
--> Provider
+能力目录 = Domain -> Capability
+能力清册 = Capability -> Skill
+治理中心 = Capability -> Skill -> Provider
+系统诊断 = Runtime Health
 ```
 
 关键决策：
 
-- Calendar 归入 Workspace。
-- Approval 归入 Process。
-- Capability 是能力目录展示对象。
-- Skill 是能力清册展示对象。
-- Governance Center 以 Capability / Skill / Provider 为治理对象。
-- System Diagnostics 保持 Runtime 视角，不参与能力分类。
+- 能力目录面向业务用户。
+- 能力清册面向管理员和开发者。
+- 治理中心只展示可处理治理问题。
+- 系统诊断只展示运行健康。
 
-本阶段只做模型冻结，不实现页面、数据库和 API。
+本阶段只做评审，不实现页面、数据库和 API。
 
 ## 当前禁止范围
 
@@ -79,19 +80,21 @@ Business Domain
 - 数据库迁移。
 - API 改造。
 - Domain 调整。
+- Capability Registry Payload 实现。
 
 ## 当前验收标准
 
 - V5 业务域冻结为 People / Communication / Workspace / Process / Knowledge / Business / Intelligence。
-- Capability Registry 冻结 Domain -> Capability -> Skill -> Provider。
-- 能力目录以 Capability 为展示对象。
-- 能力清册以 Skill 为展示对象。
-- 治理中心以 Capability / Skill / Provider 为治理对象。
-- 系统诊断保持 Runtime 视角，不按业务域分类。
-- Task 未来归属 Workspace Capability，而不是 Task Module。
+- 输出页面职责矩阵。
+- 输出需要迁移的数据项。
+- 输出需要删除或下沉的数据项。
+- 输出 Capability Registry 页面消费设计。
+- 输出最终页面结构。
+- 不修改 Runtime 代码。
+- 不修改页面代码。
 
 ## 下一步计划
 
-1. 冻结 `docs/CAPABILITY_REGISTRY_MODEL.md`。
-2. 进入 Task Cognitive Sample Selection。
-3. 分析 Task 是否复用 WorkEvent -> Evidence -> Snapshot -> Insight。
+1. 冻结 `docs/PAGE_RESPONSIBILITY_AUDIT.md`。
+2. 进入 Capability Registry Payload Design。
+3. 再做最小 UI 迁移。
