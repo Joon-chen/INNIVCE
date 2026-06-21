@@ -1,7 +1,9 @@
 from types import SimpleNamespace
+from uuid import uuid4
 
 from app.services.approval_evidence import build_approval_expense_evidence
-from app.services.approval_snapshot_builder import _assessment_from_evidence
+from app.services import approval_snapshot_builder
+from app.services.approval_snapshot_builder import _assessment_from_evidence, build_approval_snapshot_from_work_event
 from app.services.evidence import EVIDENCE_QUALITY_COMPLETE, EVIDENCE_QUALITY_PARTIAL, evidence_from_payload, evidence_payload
 from app.services.runtime_v5.feishu_resource_providers import _snapshot_payload
 
@@ -117,3 +119,49 @@ def test_snapshot_payload_exposes_evidence_for_interaction_rendering() -> None:
 
     assert payload["payload"]["evidence"]["quality"] == "partial"
     assert payload["payload"]["evidence"]["missing"] == ["费用明细行"]
+
+
+def test_snapshot_builder_rebuilds_completed_snapshot_without_evidence(monkeypatch) -> None:
+    event_id = uuid4()
+    company_id = uuid4()
+    event = SimpleNamespace(
+        id=event_id,
+        company_id=company_id,
+        object_type="approval",
+        event_type="attachment_processed",
+        object_id="approval-1",
+        created_at="2026-06-21T10:00:00Z",
+        payload={
+            "item": {
+                "instance_code": "approval-1",
+                "approval_name": "费用报销",
+                "instance_detail": {"form": '[{"name":"费用汇总","value":290.94}]'},
+            }
+        },
+    )
+    stale_snapshot = SimpleNamespace(
+        payload={"assessment": {"suggestion": "补充后再审"}},
+        source_event_ids=[str(event_id)],
+        updated_at="2026-06-21T11:00:00Z",
+    )
+    written = {}
+
+    monkeypatch.setattr(approval_snapshot_builder, "get_completed_snapshot", lambda *args, **kwargs: stale_snapshot)
+    monkeypatch.setattr(approval_snapshot_builder, "_active_feishu_app_config", lambda db, company_id: SimpleNamespace())
+    monkeypatch.setattr(approval_snapshot_builder, "_fetch_approval_detail", lambda app_config, instance_code: {})
+    monkeypatch.setattr(approval_snapshot_builder, "_approval_llm_decision", lambda raw_item, attachment_results: None)
+
+    def fake_append(db, **kwargs):
+        return SimpleNamespace(id=uuid4(), **kwargs)
+
+    def fake_upsert(db, **kwargs):
+        written.update(kwargs)
+        return SimpleNamespace(id=uuid4(), **kwargs)
+
+    monkeypatch.setattr(approval_snapshot_builder, "append_cognitive_work_event", fake_append)
+    monkeypatch.setattr(approval_snapshot_builder, "upsert_snapshot", fake_upsert)
+
+    result = build_approval_snapshot_from_work_event(SimpleNamespace(), event)
+
+    assert result["status"] == "completed"
+    assert "evidence" in written["payload"]

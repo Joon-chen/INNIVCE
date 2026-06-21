@@ -106,10 +106,10 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
         object_id=event.object_id,
         snapshot_type=APPROVAL_SNAPSHOT_TYPE,
     )
-    if snapshot is not None and str(event.id) in set(snapshot.source_event_ids or []):
+    if snapshot is not None and _snapshot_has_evidence(snapshot) and str(event.id) in set(snapshot.source_event_ids or []):
         return {"ok": True, "status": "skipped_completed", "object_id": event.object_id, "event_id": str(event.id)}
     if snapshot is not None and getattr(snapshot, "updated_at", None) and getattr(event, "created_at", None):
-        if snapshot.updated_at >= event.created_at:
+        if _snapshot_has_evidence(snapshot) and snapshot.updated_at >= event.created_at:
             return {"ok": True, "status": "skipped_current_snapshot", "object_id": event.object_id, "event_id": str(event.id)}
     app_config = _active_feishu_app_config(db, event.company_id)
     if app_config is None:
@@ -169,6 +169,11 @@ def build_approval_snapshot_from_work_event(db: Session, event: WorkEvent, *, ac
         payload={"assessment": assessment, "evidence": evidence_payload(evidence)},
     )
     return {"ok": True, "status": "completed", "object_id": event.object_id, "event_id": str(event.id)}
+
+
+def _snapshot_has_evidence(snapshot) -> bool:
+    payload = snapshot.payload if isinstance(getattr(snapshot, "payload", None), dict) else {}
+    return isinstance(payload.get("evidence"), dict) and bool(payload.get("evidence"))
 
 
 def build_approval_snapshots_from_work_events(db: Session, *, limit: int = 10) -> dict[str, Any]:
