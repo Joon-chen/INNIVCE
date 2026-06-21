@@ -3177,21 +3177,35 @@ def _approval_item(item: dict[str, Any]) -> dict[str, Any]:
     amount = approval_amount(fields)
     applicant = _approval_applicant_for_display(item, fields)
     assessment = item.get("_approval_assessment") if isinstance(item.get("_approval_assessment"), dict) else _approval_assessment(item, attachment_results=[])
+    instance_code = approval_formatters.approval_instance_code(item)
+    serial_number = _approval_serial_number_for_display(item)
+    approval_code = str(item.get("approval_code") or item.get("definition_code") or detail.get("approval_code") or detail.get("definition_code") or "").strip()
+    task_id = str(item.get("task_id") or item.get("id") or "").strip()
     title = (
         item.get("title")
         or item.get("approval_name")
+        or detail.get("approval_name")
+        or detail.get("definition_name")
         or item.get("name")
         or item.get("summary")
-        or item.get("instance_code")
-        or item.get("task_id")
+        or instance_code
+        or task_id
         or ""
     )
     return {
         "title": title,
         "applicant": applicant,
+        "applicant_name": applicant,
         "status": item.get("status") or item.get("task_status") or "",
-        "amount": amount if amount is not None else item.get("amount") or item.get("total_amount") or "",
-        "id": item.get("task_id") or item.get("instance_code") or item.get("id") or "",
+        "amount": amount if amount is not None else item.get("amount") or item.get("total_amount") or item.get("form_amount") or "",
+        "form_amount": amount if amount is not None else item.get("form_amount") or "",
+        "id": task_id or instance_code or item.get("id") or "",
+        "approval_code": approval_code,
+        "definition_code": approval_code,
+        "instance_code": instance_code,
+        "process_code": instance_code,
+        "serial_number": serial_number,
+        "task_id": task_id,
         "assessment": assessment,
         "raw": item,
     }
@@ -3652,6 +3666,17 @@ def _approval_snapshot_safe_item(raw_item: dict[str, Any]) -> dict[str, Any]:
         "task_id": raw_item.get("task_id"),
         "status": raw_item.get("status") or raw_item.get("task_status"),
     }
+
+
+def _approval_serial_number_for_display(raw_item: dict[str, Any]) -> str:
+    detail = raw_item.get("instance_detail") if isinstance(raw_item.get("instance_detail"), dict) else {}
+    instance = raw_item.get("instance") if isinstance(raw_item.get("instance"), dict) else {}
+    for source in (raw_item, detail, instance):
+        for key in ("serial_number", "serial_no", "approval_serial_number", "code"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
 
 
 def _approval_object_id_candidates(raw_item: dict[str, Any]) -> list[str]:

@@ -201,6 +201,39 @@ def test_approval_pending_snapshot_displays_analysis_in_progress() -> None:
     assert "尚未完成" in item["assessment"]["reason"]
 
 
+def test_approval_item_preserves_portal_detail_identity_fields() -> None:
+    item = _approval_item(
+        {
+            "task_id": "task-1",
+            "instance_code": "instance-1",
+            "approval_code": "approval-1",
+            "approval_name": "费用报销",
+            "applicant_name": "任佳乐",
+            "instance_detail": {
+                "serial_number": "202606150009",
+                "form": '[{"name":"费用汇总","value":8902.33},{"name":"报销事由","value":"出差打车"}]',
+            },
+            "_approval_snapshot": {
+                "status": "completed",
+                "recommendation": "需关注",
+                "risk_level": "review",
+                "reasons": ["费用明细需核对"],
+            },
+        }
+    )
+
+    assert item["title"] == "费用报销"
+    assert item["applicant_name"] == "任佳乐"
+    assert item["amount"] == 8902.33
+    assert item["form_amount"] == 8902.33
+    assert item["serial_number"] == "202606150009"
+    assert item["instance_code"] == "instance-1"
+    assert item["process_code"] == "instance-1"
+    assert item["approval_code"] == "approval-1"
+    assert item["task_id"] == "task-1"
+    assert item["raw"]["instance_detail"]["serial_number"] == "202606150009"
+
+
 def test_approval_completed_snapshot_displays_recommendation_and_reasons() -> None:
     assessment = _approval_assessment(
         {

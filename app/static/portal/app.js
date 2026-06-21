@@ -330,21 +330,34 @@ function rawOf(item) {
 
 function detailOf(item) {
   const raw = rawOf(item);
+  if (item.instance_detail && typeof item.instance_detail === "object") return item.instance_detail;
   return raw.instance_detail && typeof raw.instance_detail === "object" ? raw.instance_detail : {};
 }
 
 function applicantOf(item) {
-  return item.applicant_name || item.user_name || item.applicant || item.user_id || rawOf(item).applicant_name || "";
+  const raw = rawOf(item);
+  const detail = detailOf(item);
+  const applicant = detail.applicant && typeof detail.applicant === "object" ? detail.applicant : {};
+  return item.applicant_name || item.user_name || item.applicant || item.user_id
+    || raw.applicant_name || raw.user_name || raw.applicant || raw.user_id
+    || detail.applicant_name || detail.user_name || applicant.name || applicant.open_id || "";
 }
 
 function amountOf(item) {
-  const value = item.amount || item.total_amount || item.form_amount || fieldValue(item, ["费用汇总", "金额", "报销金额", "借款金额"]) || "";
+  const raw = rawOf(item);
+  const value = item.amount || item.total_amount || item.form_amount
+    || raw.amount || raw.total_amount || raw.form_amount
+    || fieldValue(item, ["费用汇总", "金额", "报销金额", "借款金额", "申请金额", "付款金额"]) || "";
   return value ? `${value}元` : "";
 }
 
 function serialOf(item) {
+  const raw = rawOf(item);
   const detail = detailOf(item);
-  return item.serial_number || rawOf(item).serial_number || detail.serial_number || item.instance_code || item.process_code || "";
+  const instance = raw.instance && typeof raw.instance === "object" ? raw.instance : {};
+  return item.serial_number || raw.serial_number || detail.serial_number
+    || item.instance_code || item.process_code || raw.instance_code || raw.process_code
+    || detail.instance_code || detail.process_code || instance.code || instance.instance_code || item.id || raw.id || "";
 }
 
 function suggestionOf(item) {
