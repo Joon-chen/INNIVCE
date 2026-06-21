@@ -12,13 +12,14 @@ Task Runtime 样板验收评审见 `docs/TASK_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.m
 Task Runtime 飞书手工验收见 `docs/TASK_RUNTIME_SAMPLE_FEISHU_MANUAL_ACCEPTANCE.md`。
 企业级 Scope 模型评审见 `docs/ENTERPRISE_SCOPE_MODEL_REVIEW.md`。
 执行身份审计见 `docs/EXECUTION_IDENTITY_AUDIT.md`。
+执行身份合同设计见 `docs/EXECUTION_IDENTITY_CONTRACT_DESIGN.md`。
 
 ## 当前阶段
 
 当前进入：
 
 ```text
-Execution Identity Audit Completed
+Execution Identity Contract Design Completed
 ```
 
 背景：
@@ -79,6 +80,15 @@ guid / summary / status / url
 - Task write 当前实际落到 `lark-cli --as user`，云端缺少 CLI user profile。
 - Task write 目标路径应切换为 Runtime 自动取当前用户 Feishu User OAuth Token。
 
+执行身份合同设计已完成：
+
+- `actor_identity` 回答“代表谁执行”。
+- `credential_mode` 回答“用什么凭证执行”。
+- 云端 Runtime 的目标主路径不得依赖 `CLI_PROFILE`。
+- `CLI_PROFILE` 只允许作为本地开发/临时兼容 fallback。
+- Task `complete_task` 目标路径冻结为 `USER_TOKEN` 优先。
+- Approval write 目标路径冻结为 `USER_TOKEN`。
+
 ## 当前禁止范围
 
 本阶段不要做：
@@ -102,6 +112,9 @@ guid / summary / status / url
 - 全量 Provider 迁移。
 - Admin identity 实现。
 - CLI profile 删除。
+- Task Provider USER_TOKEN 实现。
+- Approval Provider 全量 USER_TOKEN 迁移。
+- OAuth UI 改造。
 
 ## 当前验收标准
 
@@ -119,13 +132,17 @@ guid / summary / status / url
 - Execution Identity Audit 已完成。
 - 已明确 Task 写入阻塞来自 CLI_PROFILE，而不是 RuntimeActionInput Contract。
 - 已明确下一步应冻结 Execution Identity Contract，而不是直接补丁式配置云端 CLI。
+- Execution Identity Contract Design 已完成。
+- 已冻结 `actor_identity` / `credential_mode` 双层模型。
+- 已冻结 Task / Approval 的目标身份路径。
 - 不修改数据库。
 - 不做 Task UI / Snapshot / Insight / 业务迁移。
 
 ## 下一步计划
 
-1. 进入 Execution Identity Contract Design。
-2. 冻结 `actor_identity` 与 `credential_mode` 的边界。
-3. 冻结 Capability Identity Matrix。
-4. 明确 Task `complete_task` 目标路径：`USER_TOKEN` 优先，`CLI_PROFILE` 仅开发 fallback。
-5. 明确 Approval write 目标路径：统一 `USER_TOKEN`。
+1. 进入 Execution Identity Contract Guard Phase。
+2. 新增最小合同类型定义。
+3. Capability Registry 增加 identity contract 字段。
+4. Contract Test 锁住 Task / Approval identity matrix。
+5. Runtime 执行前生成 identity contract。
+6. Task complete 缺少 USER_TOKEN 时返回 WAITING_AUTHORIZATION。
