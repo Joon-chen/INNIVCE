@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.services.runtime_v5.capabilities import capabilities_for_strategy, execution_identity_for_strategy, strategy_requires_confirmation
+from app.services.runtime_v5.execution_identity import allows_user_fallback_for_query, is_bot_first_query_strategy
 from app.services.runtime_v5.models import IntentResult, PermissionDecision, PlannerResult, RuntimeContext
 
 
@@ -56,7 +57,13 @@ def check_runtime_permission(
     requested_identity = str(intent.entities.get("execution_identity") or "").strip()
     source_capabilities = capabilities_for_strategy(plan.strategy, plan.sources)
     default_identity = execution_identity_for_strategy(plan.strategy, intent.question_type, plan.sources)
-    execution_identity = requested_identity if requested_identity in {"bot", "user"} else default_identity
+    bot_first_query = intent.question_type == "query" or is_bot_first_query_strategy(plan.strategy)
+    if bot_first_query:
+        execution_identity = "bot"
+        execution_identity_source = "bot_first_query_policy"
+    else:
+        execution_identity = requested_identity if requested_identity in {"bot", "user"} else default_identity
+        execution_identity_source = "user_requested" if requested_identity in {"bot", "user"} else "runtime_default"
     requires_confirmation = (
         strategy_requires_confirmation(plan.strategy, plan.sources)
         or intent.intent in _HIGH_RISK_ACTIONS
@@ -78,7 +85,9 @@ def check_runtime_permission(
         "requested_identity": requested_identity,
         "default_identity": default_identity,
         "execution_identity": execution_identity,
-        "execution_identity_source": "user_requested" if requested_identity in {"bot", "user"} else "runtime_default",
+        "execution_identity_source": execution_identity_source,
+        "query_identity_policy": "bot_first" if bot_first_query else "",
+        "user_fallback_allowed": allows_user_fallback_for_query(plan.strategy) if bot_first_query else False,
         "requires_confirmation": requires_confirmation,
         "high_risk_action": high_risk_action,
         "action_question": intent.question_type == "action",

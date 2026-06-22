@@ -9,6 +9,48 @@ from app.services.runtime_v5.models import (
 )
 
 
+_BOT_FIRST_QUERY_STRATEGIES = {
+    "approval_query",
+    "approval_detail",
+    "approval_initiated",
+    "people_lookup",
+    "department_members",
+    "organization_snapshot",
+    "task_query",
+    "task_search",
+    "calendar_query",
+    "mail_query",
+    "mail_search",
+    "mail_get_message",
+    "attendance_query",
+    "chat_search",
+    "message_query",
+    "docs_read",
+    "wiki_search",
+    "drive_list",
+    "base_query",
+    "sheets_read",
+    "vc_meeting_search",
+    "minutes_read",
+    "note_read",
+    "markdown_read",
+    "openapi_explore",
+    "okr_query",
+    "slides_read",
+    "whiteboard_read",
+    "vc_agent_read",
+}
+
+_USER_FALLBACK_QUERY_STRATEGIES = {
+    "attendance_query",
+    "calendar_query",
+    "mail_get_message",
+    "mail_query",
+    "mail_search",
+    "task_query",
+    "task_search",
+}
+
 _USER_TOKEN_STRATEGIES = {
     "approval_approve",
     "approval_reject",
@@ -40,32 +82,11 @@ _USER_TOKEN_STRATEGIES = {
     "task_section_create",
     "task_section_update",
     "task_section_delete",
-    "mail_query",
-    "mail_search",
-    "mail_get_message",
     "mail_draft_create",
     "calendar_create",
-    "attendance_query",
 }
 
-_TENANT_TOKEN_STRATEGIES = {
-    "approval_query",
-    "approval_detail",
-    "approval_initiated",
-    "people_lookup",
-    "department_members",
-    "organization_snapshot",
-    "task_query",
-    "task_search",
-    "calendar_query",
-    "chat_search",
-    "message_query",
-    "docs_read",
-    "wiki_search",
-    "drive_list",
-    "base_query",
-    "okr_query",
-}
+_TENANT_TOKEN_STRATEGIES = _BOT_FIRST_QUERY_STRATEGIES
 
 _INTERNAL_STRATEGIES = {
     "company_intro",
@@ -75,7 +96,7 @@ _INTERNAL_STRATEGIES = {
     "general_query",
 }
 
-_DEV_CLI_FALLBACK_STRATEGIES = _USER_TOKEN_STRATEGIES | _TENANT_TOKEN_STRATEGIES
+_DEV_CLI_FALLBACK_STRATEGIES = _USER_TOKEN_STRATEGIES
 
 
 def build_execution_identity_contract(
@@ -90,6 +111,7 @@ def build_execution_identity_contract(
     credential_mode = credential_mode_for_strategy(strategy=strategy, execution_identity=execution_identity)
     requires_authorization = credential_mode in {"USER_TOKEN", "ADMIN_SESSION"}
     allows_cli_fallback = strategy in _DEV_CLI_FALLBACK_STRATEGIES
+    actor_identity = "BOT" if is_bot_first_query_strategy(strategy) else actor_identity_for_execution_identity(execution_identity)
     company_id = str(context.runtime_scope.active_company_id or "")
     owner = CredentialOwner(
         company_id=company_id,
@@ -97,7 +119,7 @@ def build_execution_identity_contract(
         user_id=context.identity.user_id,
     )
     return ExecutionIdentityContract(
-        actor_identity=actor_identity_for_execution_identity(execution_identity),
+        actor_identity=actor_identity,
         credential_mode=credential_mode,
         credential_owner=owner,
         resource_scope=resource_scope,
@@ -116,11 +138,21 @@ def actor_identity_for_execution_identity(execution_identity: ExecutionIdentity)
 def credential_mode_for_strategy(*, strategy: str, execution_identity: ExecutionIdentity) -> CredentialMode:
     if strategy in _INTERNAL_STRATEGIES:
         return "INTERNAL"
+    if is_bot_first_query_strategy(strategy):
+        return "TENANT_TOKEN"
     if strategy in _USER_TOKEN_STRATEGIES:
         return "USER_TOKEN"
     if strategy in _TENANT_TOKEN_STRATEGIES:
         return "TENANT_TOKEN"
     return "USER_TOKEN" if execution_identity == "user" else "TENANT_TOKEN"
+
+
+def is_bot_first_query_strategy(strategy: str) -> bool:
+    return strategy in _BOT_FIRST_QUERY_STRATEGIES
+
+
+def allows_user_fallback_for_query(strategy: str) -> bool:
+    return strategy in _USER_FALLBACK_QUERY_STRATEGIES
 
 
 def execution_identity_contract_payload(contract: ExecutionIdentityContract) -> dict[str, object]:
@@ -138,14 +170,17 @@ def identity_contract_for_registry(
         execution_identity="user" if execution_identity == "user" else "bot",
     )
     requires_authorization = credential_mode in {"USER_TOKEN", "ADMIN_SESSION"}
+    actor_identity = "BOT" if is_bot_first_query_strategy(strategy) else ("USER" if execution_identity == "user" else "BOT")
     return {
-        "actor_identity": "USER" if execution_identity == "user" else "BOT",
+        "actor_identity": actor_identity,
         "credential_mode": credential_mode,
         "resource_scope": _resource_scope(data_scope),
         "requires_authorization": requires_authorization,
         "allows_cli_fallback": strategy in _DEV_CLI_FALLBACK_STRATEGIES,
         "authorization_status": "UNKNOWN" if requires_authorization else "AUTHORIZED",
         "fallback_used": False,
+        "query_identity_policy": "bot_first" if is_bot_first_query_strategy(strategy) else "",
+        "user_fallback_allowed": allows_user_fallback_for_query(strategy),
     }
 
 

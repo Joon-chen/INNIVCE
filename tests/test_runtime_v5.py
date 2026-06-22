@@ -208,6 +208,76 @@ def test_runtime_v5_provider_request_carries_execution_identity_contract() -> No
     ]
 
 
+def test_runtime_query_identity_policy_is_bot_first_for_query_strategies() -> None:
+    query_strategies = (
+        ("task_query", ("task",), True),
+        ("calendar_query", ("calendar",), True),
+        ("mail_query", ("mail",), True),
+        ("attendance_query", ("attendance",), True),
+        ("slides_read", ("slides",), False),
+        ("whiteboard_read", ("whiteboard",), False),
+    )
+    context = _context("查询")
+
+    for strategy, sources, user_fallback_allowed in query_strategies:
+        intent = IntentResult(
+            question_type="query",
+            intent=strategy,
+            data_scope="self",
+            confidence=0.9,
+            canonical_question=strategy,
+        )
+        plan = PlannerResult(strategy=strategy, sources=sources)
+
+        permission = check_runtime_permission(context=context, intent=intent, plan=plan)
+
+        assert permission.execution_identity == "bot"
+        assert permission.metadata["query_identity_policy"] == "bot_first"
+        assert permission.metadata["execution_identity_source"] == "bot_first_query_policy"
+        assert permission.metadata["user_fallback_allowed"] is user_fallback_allowed
+
+
+def test_runtime_query_identity_contract_ignores_user_requested_identity() -> None:
+    seen_contracts = []
+    seen_identities = []
+
+    class MailProvider:
+        source = "mail"
+        _OPERATIONS = {"list_recent": ("mail.list_recent", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            seen_identities.append(request.execution_identity)
+            seen_contracts.append(request.execution_identity_contract.payload())
+            return ProviderResult(source="mail", status="success", result_type="mail_list", answer="ok")
+
+    context = _context("查邮件")
+    intent = IntentResult(
+        question_type="query",
+        intent="mail_query",
+        data_scope="self",
+        confidence=0.9,
+        canonical_question="查邮件",
+        entities={"execution_identity": "user"},
+    )
+    plan = PlannerResult(strategy="mail_query", sources=("mail",))
+    permission = check_runtime_permission(context=context, intent=intent, plan=plan)
+
+    result = CapabilityRouter({"mail": MailProvider()}).execute(
+        context=context,
+        intent=intent,
+        plan=plan,
+        permission=permission,
+    )
+
+    assert result.status == "success"
+    assert permission.execution_identity == "bot"
+    assert seen_identities == ["bot"]
+    assert seen_contracts[0]["actor_identity"] == "BOT"
+    assert seen_contracts[0]["credential_mode"] == "TENANT_TOKEN"
+    assert seen_contracts[0]["requires_authorization"] is False
+    assert seen_contracts[0]["allows_cli_fallback"] is False
+
+
 def test_runtime_v5_task_query_outputs_enterprise_scope_context() -> None:
     class TaskProvider:
         source = "task"
