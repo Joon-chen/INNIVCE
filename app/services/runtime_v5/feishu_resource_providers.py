@@ -1075,7 +1075,7 @@ class FeishuTaskProvider(FeishuResourceProvider):
             return _unsupported_operation_result("task", request.operation, sorted(self._OPERATIONS))
         tool_name, is_write = tool_spec
         if request.operation in {"list_my_tasks", "search_tasks"}:
-            params = _task_tool_params(request)
+            params = _task_query_tool_params(request)
             if request.operation == "search_tasks":
                 keyword = str(request.params.get("keyword") or "").strip()
                 if keyword:
@@ -1460,7 +1460,7 @@ class FeishuCalendarProvider(FeishuResourceProvider):
             result = self._execute_tool(
                 request,
                 tool_name=tool_name,
-                params={**_calendar_tool_params(request), "response_format": "raw_json"},
+                params={**_calendar_query_tool_params(request), "response_format": "raw_json"},
             )
             status = _provider_status(result)
             payload = _tool_payload(result)
@@ -4292,10 +4292,53 @@ def _task_tool_params(request: ProviderRequest) -> dict[str, Any]:
     return params
 
 
+def _task_query_tool_params(request: ProviderRequest) -> dict[str, Any]:
+    params = _task_tool_params(request)
+    params.update(_enterprise_query_scope_params(request))
+    return params
+
+
 def _calendar_tool_params(request: ProviderRequest) -> dict[str, Any]:
     blocked = {"previous_results"}
     params = {key: value for key, value in request.params.items() if key not in blocked}
     params.setdefault("calendar_id", "primary")
+    return params
+
+
+def _calendar_query_tool_params(request: ProviderRequest) -> dict[str, Any]:
+    params = _calendar_tool_params(request)
+    params.update(_enterprise_query_scope_params(request))
+    return params
+
+
+def _enterprise_query_scope_params(request: ProviderRequest) -> dict[str, Any]:
+    identity = request.context.identity
+    runtime_scope = request.context.runtime_scope
+    company_id = str(runtime_scope.active_company_id or "")
+    scope = request.intent.data_scope or "self"
+    scope_filter: dict[str, Any] = {
+        "scope": scope,
+        "company_id": company_id,
+        "actor_open_id": identity.open_id,
+        "actor_user_id": identity.user_id,
+        "actor_role": identity.role,
+    }
+    if identity.department_id or runtime_scope.active_department_id:
+        scope_filter["department_id"] = identity.department_id or runtime_scope.active_department_id
+    if runtime_scope.active_project_id:
+        scope_filter["project_id"] = runtime_scope.active_project_id
+    if request.intent.entities:
+        scope_filter["entities"] = dict(request.intent.entities)
+
+    params: dict[str, Any] = {"scope_filter": scope_filter}
+    if scope == "self":
+        if identity.open_id:
+            params.setdefault("owner_open_id", identity.open_id)
+            params.setdefault("assignee_open_id", identity.open_id)
+            params.setdefault("actor_open_id", identity.open_id)
+        if identity.user_id:
+            params.setdefault("owner_user_id", identity.user_id)
+            params.setdefault("actor_user_id", identity.user_id)
     return params
 
 

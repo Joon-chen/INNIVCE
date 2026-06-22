@@ -38,24 +38,37 @@ class _FakeDb:
         return _ScalarResult(self.accounts)
 
 
-def _request(*, company_id, open_id="ou_user", params=None, operation="complete_task") -> ProviderRequest:
-    if operation == "create_event":
+def _request(*, company_id, open_id="ou_user", params=None, operation="complete_task", data_scope="self") -> ProviderRequest:
+    if operation in {"create_event", "list_events"}:
         source = "calendar"
-        intent_name = "calendar_create"
-        message = "创建一个会议：明天下午5点开会"
-        default_params = {"summary": "明天下午5点开会", "start": "2026-06-23T17:00:00+08:00", "end": "2026-06-23T18:00:00+08:00"}
+        intent_name = "calendar_create" if operation == "create_event" else "calendar_query"
+        if operation == "create_event":
+            message = "创建一个会议：明天下午5点开会"
+            default_params = {"summary": "明天下午5点开会", "start": "2026-06-23T17:00:00+08:00", "end": "2026-06-23T18:00:00+08:00"}
+        else:
+            message = "查看我的日程"
+            default_params = {}
     else:
         source = "task"
-        intent_name = "task_create" if operation == "create_task" else "task_complete"
-        message = "创建任务" if operation == "create_task" else "完成任务"
-        default_params = {"summary": "明天4点开会"} if operation == "create_task" else {"task_guid": "task-guid-1"}
+        if operation == "create_task":
+            intent_name = "task_create"
+            message = "创建任务"
+            default_params = {"summary": "明天4点开会"}
+        elif operation == "list_my_tasks":
+            intent_name = "task_query"
+            message = "查看我的任务"
+            default_params = {}
+        else:
+            intent_name = "task_complete"
+            message = "完成任务"
+            default_params = {"task_guid": "task-guid-1"}
     return ProviderRequest(
         source=source,
         operation=operation,
         intent=IntentResult(
-            question_type="action",
+            question_type="query" if operation in {"list_events", "list_my_tasks"} else "action",
             intent=intent_name,
-            data_scope="self",
+            data_scope=data_scope,
             confidence=0.9,
             canonical_question=message,
         ),
@@ -350,6 +363,7 @@ def test_calendar_create_authorized_user_token_executes_calendar_provider(monkey
 def test_task_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
 
     async def fail_resolve_user_token(*_args, **_kwargs):
         raise AssertionError("query must not resolve user token")
@@ -358,6 +372,7 @@ def test_task_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
 
     class ToolTaskProvider(FeishuTaskProvider):
         def _execute_tool(self, request, *, tool_name, params=None, confirm_write=False):
+            calls.append((tool_name, params or {}))
             return SimpleNamespace(
                 status=feishu_resource_providers.ToolExecutionStatus.SUCCESS,
                 answer="查到任务",
@@ -372,11 +387,17 @@ def test_task_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
     assert result.result_type == "task_list"
     assert result.items[0]["title"] == "我的任务"
     assert "credential_mode" not in result.metadata
+    assert calls[0][0] == "task_qa"
+    assert calls[0][1]["scope_filter"]["scope"] == "self"
+    assert calls[0][1]["scope_filter"]["company_id"] == str(company_id)
+    assert calls[0][1]["scope_filter"]["actor_open_id"] == "ou_user"
+    assert calls[0][1]["owner_open_id"] == "ou_user"
 
 
 def test_calendar_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
 
     async def fail_resolve_user_token(*_args, **_kwargs):
         raise AssertionError("query must not resolve user token")
@@ -385,6 +406,7 @@ def test_calendar_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
 
     class ToolCalendarProvider(FeishuCalendarProvider):
         def _execute_tool(self, request, *, tool_name, params=None, confirm_write=False):
+            calls.append((tool_name, params or {}))
             return SimpleNamespace(
                 status=feishu_resource_providers.ToolExecutionStatus.SUCCESS,
                 answer="查到日程",
@@ -399,3 +421,37 @@ def test_calendar_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
     assert result.result_type == "calendar_event_list"
     assert result.items[0]["title"] == "我的日程"
     assert "credential_mode" not in result.metadata
+    assert calls[0][0] == "calendar_qa"
+    assert calls[0][1]["scope_filter"]["scope"] == "self"
+    assert calls[0][1]["scope_filter"]["company_id"] == str(company_id)
+    assert calls[0][1]["scope_filter"]["actor_open_id"] == "ou_user"
+    assert calls[0][1]["owner_open_id"] == "ou_user"
+
+
+def test_task_company_query_passes_scope_filter_without_owner_filter(monkeypatch):
+    company_id = uuid4()
+    app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
+
+    async def fail_resolve_user_token(*_args, **_kwargs):
+        raise AssertionError("query must not resolve user token")
+
+    monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fail_resolve_user_token)
+
+    class ToolTaskProvider(FeishuTaskProvider):
+        def _execute_tool(self, request, *, tool_name, params=None, confirm_write=False):
+            calls.append(params or {})
+            return SimpleNamespace(
+                status=feishu_resource_providers.ToolExecutionStatus.SUCCESS,
+                answer="查到任务",
+                error="",
+                structured_result={"response_payload": {"items": []}},
+            )
+
+    provider = ToolTaskProvider(db=_FakeDb(app_config=app_config))
+    result = provider.execute(_request(company_id=company_id, operation="list_my_tasks", data_scope="company"))
+
+    assert result.status == "success"
+    assert calls[0]["scope_filter"]["scope"] == "company"
+    assert calls[0]["scope_filter"]["actor_open_id"] == "ou_user"
+    assert "owner_open_id" not in calls[0]
