@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from app.core.config import settings
 from app.services.runtime_v5.capabilities import label_for_strategy
 from app.services.runtime_v5.models import CommandPlan, ComposedAnswer, ExecutionResult, IntentResult, PermissionDecision, PlannerResult, ResultContext, RuntimeResult, TargetUI
+from app.services.runtime_v5.policy_result_filter import build_policy_result_filter_payload
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload
 
 
@@ -39,6 +40,12 @@ def build_runtime_result(
         result_metadata=result_metadata,
         company_id=company_id,
     )
+    policy_result_filter = build_policy_result_filter_payload(
+        command_plan=command_plan,
+        permission=permission,
+        result_context=result_context,
+        scope_context=scope_context,
+    )
     title = label_for_strategy(command_plan.planner_result.strategy) or command_plan.intent
     return RuntimeResult(
         result_type=result_type,
@@ -67,6 +74,7 @@ def build_runtime_result(
             "execution_identity": permission.execution_identity,
             "result_context": result_metadata,
             "authorization": authorization,
+            "policy_result_filter": policy_result_filter,
         },
     )
 

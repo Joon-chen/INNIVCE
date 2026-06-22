@@ -2473,7 +2473,24 @@ def test_runtime_result_payload_serializes_builder_output() -> None:
 
 
 def test_runtime_result_includes_enterprise_scope_context_for_task_query() -> None:
-    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    permission = PermissionDecision(
+        allowed=True,
+        requires_confirmation=False,
+        execution_identity="bot",
+        metadata={
+            "policy_subject": {"actor_open_id": "ou_workspace", "company_id": "company_1"},
+            "policy_scope": {"requested_scope": "self", "resolved_scope": "self"},
+            "identity_decision": {
+                "actor_identity": "BOT",
+                "credential_mode": "TENANT_TOKEN",
+                "allows_fallback": True,
+                "requires_authorization": False,
+                "authorization_status": "AUTHORIZED",
+            },
+            "allowed_resource_types": ["task"],
+            "denied_resource_types": [],
+        },
+    )
     result = build_runtime_result(
         command_plan=_command_plan("task_query", result_type="task_query", sources=("task",)),
         permission=permission,
@@ -2496,6 +2513,61 @@ def test_runtime_result_includes_enterprise_scope_context_for_task_query() -> No
         "company_id": "company_1",
         "filters": {},
     }
+    policy_filter = payload["metadata"]["policy_result_filter"]
+    assert policy_filter["status"] == "applied"
+    assert policy_filter["filter_version"] == "policy_result_filter_v0"
+    assert policy_filter["scope"] == "SELF"
+    assert policy_filter["allowed_resource_types"] == ["task"]
+    assert policy_filter["denied_resource_types"] == []
+    assert policy_filter["identity_decision"]["actor_identity"] == "BOT"
+    assert policy_filter["resource_filters"] == [
+        {
+            "index": 0,
+            "resource_type": "operational",
+            "visible": True,
+            "redacted_fields": [],
+            "hidden_sections": [],
+            "aggregation_only": False,
+            "reason_hidden": False,
+            "source_reference_visible": True,
+        }
+    ]
+    assert policy_filter["section_filters"]["task"]["visible"] is True
+
+
+def test_runtime_result_filter_hides_cognitive_source_references_for_company_scope() -> None:
+    result = build_runtime_result(
+        command_plan=_command_plan("approval_query", data_scope="company", sources=("approval", "insight")),
+        permission=PermissionDecision(
+            allowed=True,
+            requires_confirmation=False,
+            execution_identity="bot",
+            metadata={
+                "policy_scope": {"requested_scope": "company", "resolved_scope": "company"},
+                "identity_decision": {"actor_identity": "BOT", "credential_mode": "TENANT_TOKEN"},
+                "allowed_resource_types": ["approval", "insight"],
+            },
+        ),
+        execution=None,
+        composed=ComposedAnswer(
+            answer="公司审批风险趋势。",
+            result_context=ResultContext(
+                result_type="approval_list",
+                count=1,
+                items=({"resource_type": "insight", "summary": "高金额审批增多"},),
+            ),
+        ),
+    )
+
+    policy_filter = runtime_result_payload(result)["metadata"]["policy_result_filter"]
+
+    assert policy_filter["scope"] == "COMPANY"
+    assert policy_filter["aggregation_only"] is True
+    assert policy_filter["source_reference_visible"] is False
+    assert policy_filter["resource_filters"][0]["aggregation_only"] is True
+    assert policy_filter["resource_filters"][0]["source_reference_visible"] is False
+    assert policy_filter["section_filters"]["approval"]["source_reference_visible"] is True
+    assert policy_filter["section_filters"]["insight"]["source_reference_visible"] is False
 
 
 def test_runtime_permission_denies_company_scope_for_ordinary_employee() -> None:
