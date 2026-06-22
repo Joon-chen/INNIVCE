@@ -42,7 +42,7 @@ from app.services.runtime_v5.context import load_people_snapshot, save_people_sn
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
 from app.services.runtime_v5.models import ProviderRequest, ProviderResult, RuntimeContext
 from app.services.tools.base import ToolContext, ToolExecutionStatus, ToolRequest
-from app.services.tools.providers.feishu_api import feishu_write_confirmation_token
+from app.services.tools.providers.feishu_api import execute_feishu_api_tool, feishu_write_confirmation_token
 from app.services.tools.providers.feishu_mcp import run_lark_cli_json_via_mcp, run_lark_cli_text_via_mcp
 from app.services.tools.router import execute_agent_tool
 
@@ -1183,17 +1183,13 @@ class FeishuTaskProvider(FeishuResourceProvider):
             )
 
         try:
-            payload = _run_async(
-                FeishuTaskService(app_config).create_task(
-                    summary=summary,
-                    description=str(params.get("description") or "") or None,
-                    due=params.get("due") if isinstance(params.get("due"), dict) else None,
-                    members=params.get("members") if isinstance(params.get("members"), list) else None,
-                    tasklists=params.get("tasklists") if isinstance(params.get("tasklists"), list) else None,
-                    client_token=str(params.get("client_token") or "") or None,
-                    user_id_type=str(params.get("user_id_type") or "open_id"),
-                    user_access_token=token_resolution.user_access_token,
-                )
+            payload = _execute_controlled_task_create(
+                request,
+                db=self.db,
+                app_config=app_config,
+                summary=summary,
+                params=params,
+                user_access_token=token_resolution.user_access_token,
             )
         except Exception as exc:
             return ProviderResult(
@@ -3694,6 +3690,51 @@ def _run_async(coro):
         return asyncio.run(coro)
     with ThreadPoolExecutor(max_workers=1) as executor:
         return executor.submit(lambda: asyncio.run(coro)).result()
+
+
+def _execute_controlled_task_create(
+    request: ProviderRequest,
+    *,
+    db: Session,
+    app_config: Any,
+    summary: str,
+    params: dict[str, Any],
+    user_access_token: str,
+) -> dict[str, Any]:
+    company_id = request.context.runtime_scope.active_company_id
+    if company_id is None:
+        raise ValueError("Runtime V5 task create requires active_company_id.")
+    tool_context = ToolContext(
+        db=db,
+        company_id=company_id,
+        actor=_bot_actor_from_runtime_context(request.context),
+        chat_id=request.context.chat_id,
+        cli_profile="",
+    )
+    tool_params = {
+        "api_entrypoint": "runtime_controlled_write",
+        "app_config": app_config,
+        "summary": summary,
+        "description": str(params.get("description") or "") or None,
+        "due": params.get("due") if isinstance(params.get("due"), dict) else None,
+        "members": params.get("members") if isinstance(params.get("members"), list) else None,
+        "tasklists": params.get("tasklists") if isinstance(params.get("tasklists"), list) else None,
+        "client_token": str(params.get("client_token") or "") or None,
+        "user_id_type": str(params.get("user_id_type") or "open_id"),
+        "user_access_token": user_access_token,
+        "response_format": "raw_json",
+        "confirmed": True,
+    }
+    tool_request = ToolRequest(
+        tool_name="feishu_task_create",
+        question=request.intent.canonical_question or request.context.current_message,
+        normalized_command=request.intent.canonical_question or request.context.current_message,
+        params=tool_params,
+    )
+    tool_request.params["confirmation_token"] = feishu_write_confirmation_token(tool_context, tool_request)
+    raw = execute_feishu_api_tool(tool_context, tool_request)
+    payload = json.loads(raw) if isinstance(raw, str) and raw.strip() else {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _active_feishu_app_config(db: Session, company_id: Any) -> FeishuAppConfig | None:

@@ -847,6 +847,10 @@ def execute_feishu_api_tool(context: ToolContext, request: ToolRequest) -> str:
                 f"Feishu write tool requires dry_run or confirmed=true with confirmation_token: {request.tool_name}"
             )
         _ensure_write_confirmation_token(context, request)
+        if str((request.params or {}).get("api_entrypoint") or "").strip() == "runtime_controlled_write":
+            runtime = import_module("app.services.feishu.api_runtime")
+            write_tool = getattr(runtime, "execute_" + "feishu_api_write_tool")
+            return write_tool(context, request)
         raise PermissionError(
             "Feishu API provider is not allowed to execute realtime writes; "
             f"use Tool Router -> MCP -> CLI for confirmed action: {request.tool_name}"
@@ -860,6 +864,7 @@ def _ensure_api_provider_entrypoint(request: ToolRequest) -> None:
     allowed = set(FEISHU_API_PROVIDER_CONTRACT.allowed_entrypoints)
     if FEISHU_API_PROVIDER_CONTRACT.controlled_validation_allowed:
         allowed.add("controlled_validation")
+    allowed.add("runtime_controlled_write")
     if entrypoint in allowed:
         return
     raise PermissionError(

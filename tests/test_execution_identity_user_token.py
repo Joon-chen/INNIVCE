@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
+from app.services.feishu import api_runtime
 from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.task import FeishuTaskService
 from app.services.runtime_v5 import feishu_resource_providers
@@ -564,15 +565,16 @@ def test_task_create_authorized_user_token_executes_task_provider(monkeypatch):
         return TokenResolution()
 
     class FakeTaskService:
-        def __init__(self, app_config):
+        def __init__(self, app_config, client=None):
             self.app_config = app_config
+            self.client = client
 
         async def create_task(self, **kwargs):
             calls.append(kwargs)
             return {"code": 0, "data": {"task": {"guid": "task-guid-1", "summary": "明天4点开会"}}}
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
-    monkeypatch.setattr(feishu_resource_providers, "FeishuTaskService", FakeTaskService)
+    monkeypatch.setattr(api_runtime, "FeishuTaskService", FakeTaskService)
 
     db = _FakeDb(app_config=app_config)
     provider = FeishuTaskProvider(db=db)

@@ -519,8 +519,11 @@ def _execute_task_create(request: ToolRequest) -> str:
             tasklists=_list_dict_param(params, "tasklists"),
             client_token=_optional_str(params, "client_token") or _optional_str(params, "idempotency_key"),
             user_id_type=str(params.get("user_id_type") or "open_id"),
+            user_access_token=_optional_str(params, "user_access_token"),
         )
     )
+    if str(params.get("response_format") or "").strip() == "raw_json":
+        return json.dumps(payload, ensure_ascii=False)
     task = _response_data(payload).get("task")
     title = _item_title(task, ("summary", "guid", "task_id")) if isinstance(task, dict) else None
     return f"飞书任务已创建：{title}" if title else "飞书任务已创建。"
