@@ -143,14 +143,17 @@ def test_task_query_bot_first_does_not_use_cli_or_local_realtime_sources():
     )
 
     assert result.status == "denied"
-    assert result.result_type == "task_list"
-    assert result.error == "enterprise_realtime_not_integrated"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
-    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.result_type == "waiting_authorization"
+    assert result.error == "missing_feishu_user_account"
+    assert result.metadata["provider_boundary"] == "user_token_required"
+    assert result.metadata["original_provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["workevent_as_realtime_source"] is False
     assert result.metadata["extracted_item_as_realtime_source"] is False
     assert result.metadata["user_fallback_allowed"] is True
+    assert result.metadata["waiting_authorization"] is True
+    assert result.metadata["authorization_status"] == "MISSING_AUTHORIZATION"
 
 
 def test_calendar_query_bot_first_does_not_use_cli_or_local_realtime_sources():
@@ -165,13 +168,15 @@ def test_calendar_query_bot_first_does_not_use_cli_or_local_realtime_sources():
     )
 
     assert result.status == "denied"
-    assert result.result_type == "calendar_event_list"
-    assert result.error == "enterprise_realtime_not_integrated"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.result_type == "waiting_authorization"
+    assert result.error == "missing_feishu_user_account"
+    assert result.metadata["provider_boundary"] == "user_token_required"
+    assert result.metadata["original_provider_boundary"] == "enterprise_realtime_not_integrated"
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["workevent_as_realtime_source"] is False
     assert result.metadata["extracted_item_as_realtime_source"] is False
     assert result.metadata["user_fallback_allowed"] is True
+    assert result.metadata["waiting_authorization"] is True
 
 
 def test_attendance_query_bot_first_does_not_use_user_cli():
@@ -646,12 +651,14 @@ def test_task_query_without_authorized_user_token_blocks_legacy_tool_path():
     result = provider.execute(_request(company_id=company_id, operation="list_my_tasks"))
 
     assert result.status == "denied"
-    assert result.result_type == "task_list"
-    assert result.error == "enterprise_realtime_not_integrated"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
-    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.result_type == "waiting_authorization"
+    assert result.error == "missing_feishu_user_account"
+    assert result.metadata["provider_boundary"] == "user_token_required"
+    assert result.metadata["original_provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["user_fallback_allowed"] is True
+    assert result.metadata["waiting_authorization"] is True
 
 
 def test_calendar_query_without_authorized_user_token_blocks_legacy_tool_path():
@@ -666,12 +673,14 @@ def test_calendar_query_without_authorized_user_token_blocks_legacy_tool_path():
     result = provider.execute(_request(company_id=company_id, operation="list_events"))
 
     assert result.status == "denied"
-    assert result.result_type == "calendar_event_list"
-    assert result.error == "enterprise_realtime_not_integrated"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
-    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.result_type == "waiting_authorization"
+    assert result.error == "missing_feishu_user_account"
+    assert result.metadata["provider_boundary"] == "user_token_required"
+    assert result.metadata["original_provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["user_fallback_allowed"] is True
+    assert result.metadata["waiting_authorization"] is True
 
 
 def test_task_company_query_passes_scope_filter_without_owner_filter(monkeypatch):

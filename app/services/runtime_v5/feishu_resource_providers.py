@@ -3158,6 +3158,48 @@ def _enterprise_realtime_boundary_result(
     if contract.get("credential_mode") != "TENANT_TOKEN" or contract.get("actor_identity") != "BOT":
         return None
     effective_user_fallback_allowed = bool(user_fallback_allowed and request.intent.data_scope == "self")
+    workspace_user_fallback_allowed = bool(effective_user_fallback_allowed and source in {"task", "calendar"})
+    if workspace_user_fallback_allowed:
+        fallback_contract = dict(contract)
+        owner = fallback_contract.get("credential_owner") if isinstance(fallback_contract.get("credential_owner"), dict) else {}
+        fallback_contract["actor_identity"] = "USER"
+        fallback_contract["credential_mode"] = "USER_TOKEN"
+        fallback_contract["requires_authorization"] = True
+        fallback_contract["authorization_status"] = "MISSING_AUTHORIZATION"
+        fallback_contract["credential_owner"] = {
+            "company_id": str(owner.get("company_id") or request.context.runtime_scope.active_company_id or ""),
+            "open_id": str(owner.get("open_id") or request.context.identity.open_id or ""),
+            "user_id": str(owner.get("user_id") or request.context.identity.user_id or ""),
+            "cli_profile": str(owner.get("cli_profile") or ""),
+        }
+        return ProviderResult(
+            source=source,
+            status="denied",
+            result_type="waiting_authorization",
+            count=0,
+            items=(),
+            metadata={
+                "operation": operation,
+                "current_provider": current_provider,
+                "credential_mode": "USER_TOKEN",
+                "actor_identity": "USER",
+                "execution_identity_contract": fallback_contract,
+                "error_type": "missing_user_authorization",
+                "provider_boundary": "user_token_required",
+                "original_provider_boundary": "enterprise_realtime_not_integrated",
+                "operational_source": "feishu_realtime",
+                "workevent_as_realtime_source": False,
+                "extracted_item_as_realtime_source": False,
+                "legacy_cli_fallback_used": False,
+                "user_fallback_allowed": True,
+                "waiting_authorization": True,
+                "authorization_status": "MISSING_AUTHORIZATION",
+                "authorization_error": "missing_feishu_user_account",
+                "recommended_next_step": "请先完成飞书用户授权；授权后 Runtime 才能读取当前用户个人资源。",
+            },
+            answer=f"{_provider_label(source)}个人实时读取需要本人飞书授权。请先完成授权后再查询。",
+            error="missing_feishu_user_account",
+        )
     return ProviderResult(
         source=source,
         status="denied",
