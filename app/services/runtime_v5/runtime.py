@@ -1003,6 +1003,8 @@ def _clarification_result_context(*, intent, plan, answer: str) -> ResultContext
     missing_params = list(getattr(intent, "missing_params", ()) or ())
     confidence = float(getattr(intent, "confidence", 0.0) or 0.0)
     reason = "missing_params" if missing_params else "low_confidence"
+    clarification_prompt = _clarification_prompt(intent=intent, fallback=answer)
+    clarification_options = _clarification_options(missing_params)
     next_step = "请补充：" + "、".join(_missing_param_label(param) for param in missing_params) if missing_params else "请补充更明确的对象、范围或时间。"
     return ResultContext(
         result_type=f"{plan.strategy}_clarification",
@@ -1017,7 +1019,9 @@ def _clarification_result_context(*, intent, plan, answer: str) -> ResultContext
                 "reason": reason,
                 "missing_params": missing_params,
                 "confidence": confidence,
-                "summary": answer or next_step,
+                "clarification_prompt": clarification_prompt,
+                "clarification_options": clarification_options,
+                "summary": clarification_prompt or next_step,
             },
         ),
         metadata={
@@ -1033,12 +1037,47 @@ def _clarification_result_context(*, intent, plan, answer: str) -> ResultContext
             "operation": plan.strategy,
             "result_sources": list(plan.sources),
             "missing_params": missing_params,
+            "clarification_prompt": clarification_prompt,
+            "clarification_options": clarification_options,
             "confidence": confidence,
             "item_count": 1,
             "display_count": 1,
         },
-        answer=answer or next_step,
+        answer=clarification_prompt or next_step,
     )
+
+
+def _clarification_prompt(*, intent, fallback: str) -> str:
+    entities = getattr(intent, "entities", {}) if isinstance(getattr(intent, "entities", {}), dict) else {}
+    prompt = entities.get("clarification_prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    return str(fallback or "").strip()
+
+
+def _clarification_options(missing_params: list[str]) -> list[dict[str, str]]:
+    options: list[dict[str, str]] = []
+    for param in missing_params:
+        options.extend(_clarification_options_for_param(str(param)))
+    return options
+
+
+def _clarification_options_for_param(param: str) -> list[dict[str, str]]:
+    if param == "scope":
+        return [
+            {"param": "scope", "label": "我的", "value": "self"},
+            {"param": "scope", "label": "部门", "value": "department"},
+            {"param": "scope", "label": "公司", "value": "company"},
+        ]
+    if param in {"time", "time_range", "start", "end"}:
+        return [
+            {"param": param, "label": "今天", "value": "today"},
+            {"param": param, "label": "本周", "value": "this_week"},
+            {"param": param, "label": "本月", "value": "this_month"},
+        ]
+    if param in {"person", "target", "recipient", "transfer_user_id", "add_sign_user_ids", "cc_user_ids"}:
+        return [{"param": param, "label": "指定人员", "value": "user"}]
+    return []
 
 
 def _missing_param_label(param: str) -> str:
@@ -1047,6 +1086,7 @@ def _missing_param_label(param: str) -> str:
         "target": "对象",
         "department": "部门",
         "time": "时间",
+        "time_range": "时间范围",
         "start": "开始时间",
         "end": "结束时间",
         "summary": "标题/内容",

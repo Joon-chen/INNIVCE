@@ -305,6 +305,10 @@ def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypa
     assert result.composed.result_context is not None
     assert result.composed.result_context.metadata["execution_status"] == "clarification"
     assert result.composed.result_context.metadata["missing_params"] == ["scope", "time_range"]
+    assert result.composed.result_context.metadata["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
+    assert result.composed.result_context.items[0]["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
+    option_values = {item["value"] for item in result.composed.result_context.metadata["clarification_options"]}
+    assert {"self", "department", "company", "today", "this_week", "this_month"}.issubset(option_values)
 
 
 def test_runtime_v5_command_llm_validator_does_not_escalate_query_to_action() -> None:
