@@ -214,6 +214,7 @@ def _provider_governance_blocked_result(
 def _execute_provider_request(*, provider: ResourceProvider, request: ProviderRequest) -> ProviderResult:
     started = perf_counter()
     result = provider.execute(request)
+    result = _policy_user_fallback_result(request=request, result=result)
     duration_ms = int((perf_counter() - started) * 1000)
     return replace(
         result,
@@ -223,6 +224,60 @@ def _execute_provider_request(*, provider: ResourceProvider, request: ProviderRe
             "operation": result.metadata.get("operation") if isinstance(result.metadata, dict) and result.metadata.get("operation") else request.operation,
             "duration_ms": duration_ms,
         },
+    )
+
+
+def _policy_user_fallback_result(*, request: ProviderRequest, result: ProviderResult) -> ProviderResult:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    if metadata.get("provider_boundary") != "enterprise_realtime_not_integrated":
+        return result
+    if not metadata.get("user_fallback_allowed"):
+        return result
+    if _resource_scope_for_intent(request.intent) != "SELF":
+        return result
+
+    original_contract = request.execution_identity_contract.payload()
+    credential_owner = dict(original_contract.get("credential_owner") or {})
+    user_contract = {
+        **original_contract,
+        "actor_identity": "USER",
+        "credential_mode": "USER_TOKEN",
+        "requires_authorization": True,
+        "authorization_status": "MISSING_AUTHORIZATION",
+        "fallback_used": False,
+        "fallback_reason": "enterprise_realtime_not_integrated",
+        "credential_owner": credential_owner,
+    }
+    return replace(
+        result,
+        status="denied",
+        result_type="waiting_authorization",
+        count=0,
+        items=(),
+        metadata={
+            **metadata,
+            "operation": metadata.get("operation") or request.operation,
+            "provider_boundary": "user_token_fallback_required",
+            "original_provider_boundary": "enterprise_realtime_not_integrated",
+            "waiting_authorization": True,
+            "authorization_status": "MISSING_AUTHORIZATION",
+            "authorization_error": "missing_user_token_for_policy_fallback",
+            "credential_mode": "USER_TOKEN",
+            "actor_identity": "USER",
+            "execution_identity_contract": user_contract,
+            "policy_fallback": {
+                "allowed": True,
+                "reason": "self_query_enterprise_realtime_not_integrated",
+                "original_credential_mode": metadata.get("credential_mode") or original_contract.get("credential_mode"),
+                "fallback_credential_mode": "USER_TOKEN",
+                "scope": "SELF",
+            },
+        },
+        answer=(
+            "企业实时读取主路径尚未接入。这个请求只涉及你自己的个人资源，"
+            "可以在你授权后改用个人身份读取；我不会把个人授权用于团队、部门或公司范围查询。"
+        ),
+        error="missing_user_token_for_policy_fallback",
     )
 
 

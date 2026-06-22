@@ -278,6 +278,104 @@ def test_runtime_query_identity_contract_ignores_user_requested_identity() -> No
     assert seen_contracts[0]["allows_cli_fallback"] is False
 
 
+def test_runtime_self_query_enterprise_realtime_gap_returns_user_fallback_authorization() -> None:
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"list_my_tasks": ("task.list_my_tasks", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            return ProviderResult(
+                source="task",
+                status="denied",
+                result_type="task_list",
+                count=0,
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "TENANT_TOKEN",
+                    "actor_identity": "BOT",
+                    "execution_identity_contract": request.execution_identity_contract.payload(),
+                    "error_type": "enterprise_realtime_not_integrated",
+                    "provider_boundary": "enterprise_realtime_not_integrated",
+                    "user_fallback_allowed": True,
+                    "legacy_cli_fallback_used": False,
+                },
+                answer="企业实时读取能力未接入。",
+                error="enterprise_realtime_not_integrated",
+            )
+
+    result = run_runtime_v5(
+        context=_context("我的任务"),
+        providers={"task": TaskProvider()},
+    )
+
+    assert result.execution is not None
+    assert result.execution.status == "denied"
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "waiting_authorization"
+    provider = result.composed.result_context.metadata["provider_results"][0]
+    assert provider["waiting_authorization"] is True
+    assert provider["credential_mode"] == "USER_TOKEN"
+    assert provider["provider_boundary"] == "user_token_fallback_required"
+    runtime_result = result.composed.metadata["runtime_result"]
+    assert runtime_result["result_type"] == "waiting_authorization"
+    assert runtime_result["status"] == "waiting_authorization"
+    assert runtime_result["metadata"]["authorization"]["credential_mode"] == "USER_TOKEN"
+    assert runtime_result["metadata"]["authorization"]["can_escalate_original_permissions"] is False
+    assert runtime_result["actions"][0]["action"] == "authorize_user_identity"
+
+
+def test_runtime_company_query_enterprise_realtime_gap_does_not_use_user_fallback() -> None:
+    class TaskProvider:
+        source = "task"
+        _OPERATIONS = {"list_my_tasks": ("task.list_my_tasks", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            return ProviderResult(
+                source="task",
+                status="denied",
+                result_type="task_list",
+                count=0,
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "TENANT_TOKEN",
+                    "actor_identity": "BOT",
+                    "execution_identity_contract": request.execution_identity_contract.payload(),
+                    "error_type": "enterprise_realtime_not_integrated",
+                    "provider_boundary": "enterprise_realtime_not_integrated",
+                    "user_fallback_allowed": True,
+                    "legacy_cli_fallback_used": False,
+                },
+                answer="企业实时读取能力未接入。",
+                error="enterprise_realtime_not_integrated",
+            )
+
+    context = _context("所有任务")
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="所有任务",
+    )
+    plan = PlannerResult(strategy="task_query", sources=("task",))
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+
+    execution = CapabilityRouter({"task": TaskProvider()}).execute(
+        context=context,
+        intent=intent,
+        plan=plan,
+        permission=permission,
+    )
+
+    assert execution.status == "denied"
+    assert execution.result_context is not None
+    assert execution.result_context.result_type == "task_list"
+    provider = execution.result_context.metadata["provider_results"][0]
+    assert provider["waiting_authorization"] is False
+    assert provider["credential_mode"] == "TENANT_TOKEN"
+    assert provider["provider_boundary"] == "enterprise_realtime_not_integrated"
+
+
 def test_runtime_v5_task_query_outputs_enterprise_scope_context() -> None:
     class TaskProvider:
         source = "task"
