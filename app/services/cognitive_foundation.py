@@ -11,6 +11,15 @@ from app.models.entities import MemoryCandidate, Snapshot, WorkEvent
 SNAPSHOT_STATUS_COMPLETED = "completed"
 MEMORY_CANDIDATE_STATUS = "candidate"
 WORKSPACE_COGNITIVE_PROJECTION_VERSION = "workspace_cognitive_projection_v0"
+WORKSPACE_AGGREGATION_VERSION = "workspace_aggregation_v0"
+WORKSPACE_V0_AGGREGATE_METRICS = (
+    "task_total",
+    "overdue_task_count",
+    "due_soon_task_count",
+    "calendar_conflict_count",
+    "meeting_occupied_minutes",
+    "workload_buckets",
+)
 WORKSPACE_COGNITIVE_FIELD_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "task": (
         "task_id",
@@ -43,7 +52,76 @@ WORKSPACE_COGNITIVE_FIELD_ALLOWLIST: dict[str, tuple[str, ...]] = {
         "is_conflict",
         "is_busy",
     ),
-}
+    }
+
+
+def build_workspace_aggregation_summary(
+    events: list[WorkEvent] | tuple[WorkEvent, ...],
+    *,
+    scope: str,
+    now: datetime | None = None,
+    due_soon_days: int = 7,
+) -> dict:
+    effective_now = now or datetime.now(UTC)
+    due_soon_until = effective_now + _timedelta_days(due_soon_days)
+    owner_stats: dict[str, dict[str, int]] = {}
+    task_total = 0
+    overdue_task_count = 0
+    due_soon_task_count = 0
+    calendar_conflict_count = 0
+    meeting_occupied_minutes = 0
+
+    for event in events:
+        projection = event.payload if isinstance(event.payload, dict) else {}
+        if projection.get("projection_version") != WORKSPACE_COGNITIVE_PROJECTION_VERSION:
+            continue
+        object_type = str(projection.get("object_type") or event.object_type or "").strip().lower()
+        fields = projection.get("cognitive_fields") if isinstance(projection.get("cognitive_fields"), dict) else {}
+        owner_key = str(fields.get("owner_user_id") or fields.get("owner_open_id") or "unknown").strip() or "unknown"
+        owner_bucket = owner_stats.setdefault(owner_key, {"task_count": 0, "overdue_count": 0, "meeting_minutes": 0, "conflict_count": 0})
+
+        if object_type == "task":
+            if _is_completed_task(fields):
+                continue
+            task_total += 1
+            owner_bucket["task_count"] += 1
+            due_at = _parse_datetime(fields.get("due_at"))
+            is_overdue = bool(fields.get("is_overdue")) or bool(due_at and due_at < effective_now)
+            if is_overdue:
+                overdue_task_count += 1
+                owner_bucket["overdue_count"] += 1
+            if due_at and effective_now <= due_at <= due_soon_until:
+                due_soon_task_count += 1
+        elif object_type == "calendar":
+            start_at = _parse_datetime(fields.get("start_at"))
+            end_at = _parse_datetime(fields.get("end_at"))
+            occupied = _meeting_minutes(start_at, end_at) if bool(fields.get("is_busy", True)) else 0
+            meeting_occupied_minutes += occupied
+            owner_bucket["meeting_minutes"] += occupied
+            if bool(fields.get("is_conflict")):
+                calendar_conflict_count += 1
+                owner_bucket["conflict_count"] += 1
+
+    return {
+        "aggregation_version": WORKSPACE_AGGREGATION_VERSION,
+        "scope": scope,
+        "detail_available": False,
+        "source_event_count": len(events),
+        "metrics": {
+            "task_total": task_total,
+            "overdue_task_count": overdue_task_count,
+            "due_soon_task_count": due_soon_task_count,
+            "calendar_conflict_count": calendar_conflict_count,
+            "meeting_occupied_minutes": meeting_occupied_minutes,
+            "workload_buckets": _workspace_workload_buckets(owner_stats),
+        },
+        "metric_order": list(WORKSPACE_V0_AGGREGATE_METRICS),
+        "policy_notes": [
+            "aggregation_only",
+            "operational_detail_not_included",
+            "source_visibility_must_be_filtered_before_display",
+        ],
+    }
 
 
 def append_cognitive_work_event(
@@ -159,7 +237,7 @@ def build_workspace_cognitive_projection(
         "visibility_scope": visibility_scope,
         "operational_detail_stored": False,
         "raw_detail_allowed": False,
-        "cognitive_fields": redact_payload(cognitive_fields),
+        "cognitive_fields": _redact_workspace_cognitive_fields(cognitive_fields),
         "aggregate_surfaces": {
             "self": ["count", "status", "due", "conflict", "workload"],
             "department": ["count", "overdue_count", "conflict_count", "workload_bucket"],
@@ -303,3 +381,60 @@ def _normalize_workspace_object_type(object_type: str) -> str:
 def _workspace_redacted_fields(raw_payload: dict, allowlist: tuple[str, ...]) -> list[str]:
     allowset = set(allowlist)
     return sorted(str(key) for key in raw_payload.keys() if str(key) not in allowset)
+
+
+def _redact_workspace_cognitive_fields(fields: dict) -> dict:
+    time_values = {key: fields[key] for key in ("due_at", "completed_at", "updated_at", "start_at", "end_at") if key in fields}
+    redacted = redact_payload(dict(fields))
+    for key in ("due_at", "completed_at", "updated_at", "start_at", "end_at"):
+        if key in time_values:
+            redacted[key] = time_values[key]
+    return redacted
+
+
+def _parse_datetime(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _timedelta_days(days: int):
+    from datetime import timedelta
+
+    return timedelta(days=max(0, int(days)))
+
+
+def _is_completed_task(fields: dict) -> bool:
+    status = str(fields.get("status") or "").strip().lower()
+    return status in {"done", "completed", "complete", "finished"} or bool(fields.get("completed_at"))
+
+
+def _meeting_minutes(start_at: datetime | None, end_at: datetime | None) -> int:
+    if start_at is None or end_at is None or end_at <= start_at:
+        return 0
+    return int((end_at - start_at).total_seconds() // 60)
+
+
+def _workspace_workload_buckets(owner_stats: dict[str, dict[str, int]]) -> dict[str, int]:
+    buckets = {"normal": 0, "busy": 0, "overloaded": 0, "at_risk": 0}
+    for stats in owner_stats.values():
+        task_count = int(stats.get("task_count") or 0)
+        meeting_minutes = int(stats.get("meeting_minutes") or 0)
+        overdue_count = int(stats.get("overdue_count") or 0)
+        conflict_count = int(stats.get("conflict_count") or 0)
+        if overdue_count > 0 or conflict_count > 0:
+            buckets["at_risk"] += 1
+        elif task_count >= 8 or meeting_minutes >= 360:
+            buckets["overloaded"] += 1
+        elif task_count >= 4 or meeting_minutes >= 180:
+            buckets["busy"] += 1
+        else:
+            buckets["normal"] += 1
+    return buckets

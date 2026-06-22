@@ -8,6 +8,7 @@ from app.services.cognitive_foundation import (
     MEMORY_CANDIDATE_STATUS,
     append_workspace_cognitive_event,
     append_cognitive_work_event,
+    build_workspace_aggregation_summary,
     build_workspace_cognitive_projection,
     get_completed_snapshot,
     upsert_snapshot,
@@ -133,6 +134,96 @@ def test_append_workspace_cognitive_event_inherits_owner_visibility() -> None:
     assert event.payload["cognitive_fields"]["event_id"] == "event-1"
     assert "description" not in event.payload["cognitive_fields"]
     assert "attendees" in event.payload["redacted_fields"]
+
+
+def test_workspace_aggregation_summary_outputs_v0_management_metrics_only() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+
+    events = [
+        append_workspace_cognitive_event(
+            db,
+            company_id=company_id,
+            object_type="task",
+            object_id="task-1",
+            source="feishu_user_sync",
+            actor="ou_1",
+            raw_payload={"task_id": "task-1", "title": "逾期任务", "status": "todo", "due_at": "2026-06-20T10:00:00+00:00"},
+            owner_user_id="user-1",
+            owner_open_id="ou_1",
+            owner_department_id="dept-1",
+        ),
+        append_workspace_cognitive_event(
+            db,
+            company_id=company_id,
+            object_type="task",
+            object_id="task-2",
+            source="feishu_user_sync",
+            actor="ou_2",
+            raw_payload={"task_id": "task-2", "title": "本周到期", "status": "todo", "due_at": "2026-06-25T10:00:00+00:00"},
+            owner_user_id="user-2",
+            owner_open_id="ou_2",
+            owner_department_id="dept-1",
+        ),
+        append_workspace_cognitive_event(
+            db,
+            company_id=company_id,
+            object_type="calendar",
+            object_id="event-1",
+            source="feishu_user_sync",
+            actor="ou_1",
+            raw_payload={
+                "event_id": "event-1",
+                "title": "冲突会议",
+                "start_at": "2026-06-23T02:00:00+00:00",
+                "end_at": "2026-06-23T03:00:00+00:00",
+                "is_conflict": True,
+                "is_busy": True,
+            },
+            owner_user_id="user-1",
+            owner_open_id="ou_1",
+            owner_department_id="dept-1",
+        ),
+        append_workspace_cognitive_event(
+            db,
+            company_id=company_id,
+            object_type="calendar",
+            object_id="event-2",
+            source="feishu_user_sync",
+            actor="ou_2",
+            raw_payload={
+                "event_id": "event-2",
+                "title": "普通会议",
+                "start_at": "2026-06-23T04:00:00+00:00",
+                "end_at": "2026-06-23T05:30:00+00:00",
+                "is_busy": True,
+            },
+            owner_user_id="user-2",
+            owner_open_id="ou_2",
+            owner_department_id="dept-1",
+        ),
+    ]
+
+    summary = build_workspace_aggregation_summary(
+        events,
+        scope="department",
+        now=events[0].occurred_at.replace(year=2026, month=6, day=23, hour=0, minute=0),
+    )
+
+    assert summary["detail_available"] is False
+    assert summary["scope"] == "department"
+    assert summary["metrics"]["task_total"] == 2
+    assert summary["metrics"]["overdue_task_count"] == 1
+    assert summary["metrics"]["due_soon_task_count"] == 1
+    assert summary["metrics"]["calendar_conflict_count"] == 1
+    assert summary["metrics"]["meeting_occupied_minutes"] == 150
+    assert summary["metrics"]["workload_buckets"]["at_risk"] == 1
+    assert summary["metrics"]["workload_buckets"]["normal"] == 1
+    assert summary["policy_notes"] == [
+        "aggregation_only",
+        "operational_detail_not_included",
+        "source_visibility_must_be_filtered_before_display",
+    ]
 
 
 def test_get_completed_snapshot_hides_incomplete_snapshot() -> None:

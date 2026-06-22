@@ -400,6 +400,26 @@ Workspace 管理视角可回答：
 - 日程冲突数量。
 - 团队负荷区间。
 
+Workspace Aggregation Summary V0 固定指标：
+
+```text
+task_total
+overdue_task_count
+due_soon_task_count
+calendar_conflict_count
+meeting_occupied_minutes
+workload_buckets
+```
+
+V0 聚合规则：
+
+- Aggregation Summary 必须由 Workspace Cognitive Projection WorkEvent 生成。
+- Aggregation Summary 必须标记 `detail_available=false`。
+- Aggregation Summary 不包含任务明细、日程明细、参会人明细或来源对象全文。
+- 聚合前必须先按来源对象权限和查询 scope 过滤可见 WorkEvent。
+- 展示前必须经过 Unified Policy Result Filter。
+- USER_TOKEN 只能作为授权观察个人资源的凭据，不能成为部门 / 公司越权聚合依据。
+
 Workspace 管理视角默认不可回答：
 
 - 某员工每条任务的完整内容。

@@ -27,6 +27,11 @@ IDENTIFIER_KEYS = {
 
 EMAIL_RE = re.compile(r"(?P<name>[A-Za-z0-9._%+-]{1,64})@(?P<domain>[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?\d[\d -]{7,}\d)(?!\d)")
+ISO_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}"
+    r"(?:[T ][0-2]\d:[0-5]\d(?::[0-5]\d(?:\.\d{1,6})?)?"
+    r"(?:Z|[+-][0-2]\d:?[0-5]\d)?)?$"
+)
 
 
 def mask_email(value: str) -> str:
@@ -40,6 +45,8 @@ def mask_email(value: str) -> str:
 
 
 def redact_text(value: str) -> str:
+    if ISO_DATETIME_RE.fullmatch(value.strip()):
+        return value
     value = mask_email(value)
     return PHONE_RE.sub("[PHONE_REDACTED]", value)
 
