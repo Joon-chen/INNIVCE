@@ -77,6 +77,13 @@ def check_runtime_permission(
         source_capabilities=source_capabilities,
         requires_confirmation=requires_confirmation,
     )
+    allowed = _is_company_allowed(context, intent)
+    user_fallback_allowed = _user_fallback_allowed(
+        intent=intent,
+        plan=plan,
+        bot_first_query=bot_first_query,
+    )
+    source_resource_types = list(dict.fromkeys(plan.sources))
     metadata = {
         "strategy": plan.strategy,
         "sources": list(plan.sources),
@@ -87,7 +94,16 @@ def check_runtime_permission(
         "execution_identity": execution_identity,
         "execution_identity_source": execution_identity_source,
         "query_identity_policy": "bot_first" if bot_first_query else "",
-        "user_fallback_allowed": allows_user_fallback_for_query(plan.strategy) if bot_first_query else False,
+        "user_fallback_allowed": user_fallback_allowed,
+        "policy_subject": _policy_subject(context),
+        "policy_scope": _policy_scope(context=context, intent=intent),
+        "identity_decision": _identity_decision(
+            execution_identity=execution_identity,
+            bot_first_query=bot_first_query,
+            user_fallback_allowed=user_fallback_allowed,
+        ),
+        "allowed_resource_types": source_resource_types if allowed else [],
+        "denied_resource_types": [] if allowed else source_resource_types,
         "requires_confirmation": requires_confirmation,
         "high_risk_action": high_risk_action,
         "action_question": intent.question_type == "action",
@@ -136,7 +152,6 @@ def check_runtime_permission(
             metadata=metadata,
         )
 
-    allowed = _is_company_allowed(context, intent)
     return PermissionDecision(
         allowed=allowed,
         reason="" if allowed else "permission_denied",
@@ -144,6 +159,63 @@ def check_runtime_permission(
         execution_identity=execution_identity,
         metadata=metadata,
     )
+
+
+def _policy_subject(context: RuntimeContext) -> dict[str, object]:
+    identity = context.identity
+    department_ids = [identity.department_id] if identity.department_id else []
+    return {
+        "actor_user_id": identity.user_id,
+        "actor_open_id": identity.open_id,
+        "company_id": str(context.runtime_scope.active_company_id or ""),
+        "role": identity.role,
+        "departments": department_ids,
+        "managed_departments": [],
+        "is_owner": identity.role == "owner",
+        "is_admin": identity.role == "admin",
+    }
+
+
+def _policy_scope(*, context: RuntimeContext, intent: IntentResult) -> dict[str, str]:
+    return {
+        "requested_scope": intent.data_scope,
+        "resolved_scope": intent.data_scope,
+        "target_user_id": str(intent.entities.get("target_user_id") or intent.entities.get("user_id") or ""),
+        "target_department_id": str(
+            intent.entities.get("target_department_id")
+            or intent.entities.get("department_id")
+            or context.runtime_scope.active_department_id
+            or ""
+        ),
+        "target_company_id": str(context.runtime_scope.active_company_id or ""),
+        "target_group_id": str(intent.entities.get("target_group_id") or intent.entities.get("group_id") or ""),
+    }
+
+
+def _identity_decision(
+    *,
+    execution_identity: str,
+    bot_first_query: bool,
+    user_fallback_allowed: bool,
+) -> dict[str, object]:
+    actor_identity = "BOT" if execution_identity == "bot" else "USER"
+    credential_mode = "TENANT_TOKEN" if execution_identity == "bot" else "USER_TOKEN"
+    return {
+        "actor_identity": actor_identity,
+        "credential_mode": credential_mode,
+        "allows_fallback": user_fallback_allowed,
+        "requires_authorization": bool(user_fallback_allowed and not bot_first_query),
+        "authorization_status": "AUTHORIZED" if execution_identity == "bot" else "UNKNOWN",
+    }
+
+
+def _user_fallback_allowed(
+    *,
+    intent: IntentResult,
+    plan: PlannerResult,
+    bot_first_query: bool,
+) -> bool:
+    return bool(bot_first_query and intent.data_scope == "self" and allows_user_fallback_for_query(plan.strategy))
 
 
 def _confirmation_reasons(

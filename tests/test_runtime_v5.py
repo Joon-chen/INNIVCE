@@ -425,6 +425,87 @@ def test_runtime_query_identity_policy_is_bot_first_for_query_strategies() -> No
         assert permission.metadata["user_fallback_allowed"] is user_fallback_allowed
 
 
+def test_workspace_policy_preflight_outputs_subject_scope_and_identity_metadata() -> None:
+    company_id = uuid4()
+    context = RuntimeContext(
+        identity=RuntimeIdentity(
+            user_id="user_1",
+            open_id="ou_workspace",
+            role="owner",
+            department_id="dept_1",
+            domains=("workspace",),
+        ),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看我的任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="self",
+        confidence=0.9,
+        canonical_question="查看我的任务",
+    )
+    plan = PlannerResult(strategy="task_query", sources=("task",))
+
+    permission = check_runtime_permission(context=context, intent=intent, plan=plan)
+
+    assert permission.allowed is True
+    assert permission.execution_identity == "bot"
+    assert permission.metadata["policy_subject"] == {
+        "actor_user_id": "user_1",
+        "actor_open_id": "ou_workspace",
+        "company_id": str(company_id),
+        "role": "owner",
+        "departments": ["dept_1"],
+        "managed_departments": [],
+        "is_owner": True,
+        "is_admin": False,
+    }
+    assert permission.metadata["policy_scope"] == {
+        "requested_scope": "self",
+        "resolved_scope": "self",
+        "target_user_id": "",
+        "target_department_id": "",
+        "target_company_id": str(company_id),
+        "target_group_id": "",
+    }
+    assert permission.metadata["identity_decision"] == {
+        "actor_identity": "BOT",
+        "credential_mode": "TENANT_TOKEN",
+        "allows_fallback": True,
+        "requires_authorization": False,
+        "authorization_status": "AUTHORIZED",
+    }
+    assert permission.metadata["allowed_resource_types"] == ["task"]
+    assert permission.metadata["denied_resource_types"] == []
+
+
+def test_workspace_company_query_preflight_blocks_current_user_fallback_for_member() -> None:
+    company_id = uuid4()
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_member", role="member"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看全公司任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="查看全公司任务",
+    )
+    plan = PlannerResult(strategy="task_query", sources=("task",))
+
+    permission = check_runtime_permission(context=context, intent=intent, plan=plan)
+
+    assert permission.allowed is False
+    assert permission.reason == "permission_denied"
+    assert permission.metadata["policy_scope"]["requested_scope"] == "company"
+    assert permission.metadata["identity_decision"]["actor_identity"] == "BOT"
+    assert permission.metadata["identity_decision"]["allows_fallback"] is False
+    assert permission.metadata["denied_resource_types"] == ["task"]
+
+
 def test_runtime_query_identity_contract_ignores_user_requested_identity() -> None:
     seen_contracts = []
     seen_identities = []
