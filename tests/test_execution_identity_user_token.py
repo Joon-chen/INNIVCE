@@ -4,7 +4,7 @@ from uuid import uuid4
 from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.task import FeishuTaskService
 from app.services.runtime_v5 import feishu_resource_providers
-from app.services.runtime_v5.feishu_resource_providers import FeishuCalendarProvider, FeishuTaskProvider
+from app.services.runtime_v5.feishu_resource_providers import FeishuAttendanceProvider, FeishuCalendarProvider, FeishuTaskProvider
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
 from app.services.runtime_v5.models import (
     CredentialOwner,
@@ -74,11 +74,12 @@ def _request(*, company_id, open_id="ou_user", params=None, operation="complete_
             intent_name = "task_complete"
             message = "完成任务"
             default_params = {"task_guid": "task-guid-1"}
+    is_query = operation in {"list_events", "list_my_tasks"}
     return ProviderRequest(
         source=source,
         operation=operation,
         intent=IntentResult(
-            question_type="query" if operation in {"list_events", "list_my_tasks"} else "action",
+            question_type="query" if is_query else "action",
             intent=intent_name,
             data_scope=data_scope,
             confidence=0.9,
@@ -90,15 +91,100 @@ def _request(*, company_id, open_id="ou_user", params=None, operation="complete_
             runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
             current_message=message,
         ),
-        execution_identity="user",
+        execution_identity="bot" if is_query else "user",
         params=params or default_params,
         execution_identity_contract=ExecutionIdentityContract(
-            actor_identity="USER",
-            credential_mode="USER_TOKEN",
+            actor_identity="BOT" if is_query else "USER",
+            credential_mode="TENANT_TOKEN" if is_query else "USER_TOKEN",
             credential_owner=CredentialOwner(company_id=str(company_id), open_id=open_id),
-            requires_authorization=True,
+            requires_authorization=not is_query,
         ),
     )
+
+
+def _bot_query_request(*, company_id, source, operation, strategy, params=None) -> ProviderRequest:
+    return ProviderRequest(
+        source=source,
+        operation=operation,
+        intent=IntentResult(
+            question_type="query",
+            intent=strategy,
+            data_scope="self",
+            confidence=0.9,
+            canonical_question=strategy,
+        ),
+        planner=PlannerResult(strategy=strategy, sources=(source,)),
+        context=RuntimeContext(
+            identity=RuntimeIdentity(open_id="ou_user", role="owner"),
+            runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+            current_message=strategy,
+        ),
+        execution_identity="bot",
+        params=params or {},
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            credential_owner=CredentialOwner(company_id=str(company_id), open_id="ou_user"),
+            requires_authorization=False,
+        ),
+    )
+
+
+def test_task_query_bot_first_does_not_use_cli_or_local_realtime_sources():
+    company_id = uuid4()
+
+    class Provider(FeishuTaskProvider):
+        def _execute_tool(self, *_args, **_kwargs):
+            raise AssertionError("bot-first task query must not fall through to task_qa CLI")
+
+    result = Provider(db=_FakeDb()).execute(
+        _bot_query_request(company_id=company_id, source="task", operation="list_my_tasks", strategy="task_query")
+    )
+
+    assert result.status == "denied"
+    assert result.result_type == "task_list"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["extracted_item_as_realtime_source"] is False
+    assert result.metadata["user_fallback_allowed"] is True
+
+
+def test_calendar_query_bot_first_does_not_use_cli_or_local_realtime_sources():
+    company_id = uuid4()
+
+    class Provider(FeishuCalendarProvider):
+        def _execute_tool(self, *_args, **_kwargs):
+            raise AssertionError("bot-first calendar query must not fall through to calendar_qa CLI")
+
+    result = Provider(db=_FakeDb()).execute(
+        _bot_query_request(company_id=company_id, source="calendar", operation="list_events", strategy="calendar_query")
+    )
+
+    assert result.status == "denied"
+    assert result.result_type == "calendar_event_list"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["extracted_item_as_realtime_source"] is False
+    assert result.metadata["user_fallback_allowed"] is True
+
+
+def test_attendance_query_bot_first_does_not_use_user_cli():
+    company_id = uuid4()
+
+    result = FeishuAttendanceProvider(db=_FakeDb()).execute(
+        _bot_query_request(company_id=company_id, source="attendance", operation="query_records", strategy="attendance_query")
+    )
+
+    assert result.status == "denied"
+    assert result.result_type == "attendance_record_list"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["current_provider"] == "lark-cli attendance user_tasks query"
+    assert result.metadata["legacy_cli_fallback_used"] is False
 
 
 def test_resolve_feishu_user_access_token_missing_account_returns_missing_authorization():
@@ -324,7 +410,8 @@ def test_task_create_authorized_user_token_executes_task_provider(monkeypatch):
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
     monkeypatch.setattr(feishu_resource_providers, "FeishuTaskService", FakeTaskService)
 
-    provider = FeishuTaskProvider(db=_FakeDb(app_config=app_config))
+    db = _FakeDb(app_config=app_config)
+    provider = FeishuTaskProvider(db=db)
     result = provider.execute(_request(company_id=company_id, operation="create_task"))
 
     assert result.status == "success"
@@ -333,7 +420,10 @@ def test_task_create_authorized_user_token_executes_task_provider(monkeypatch):
     assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["authorization_status"] == "AUTHORIZED"
     assert calls[0]["user_access_token"] == "user-token"
-    assert result.metadata["enterprise_write_through"] == "saved"
+    assert result.metadata["enterprise_write_through"] == "disabled"
+    assert result.metadata["operational_source"] == "feishu_realtime"
+    assert db.added == []
+    assert db.commits == 0
 
 
 def test_calendar_create_authorized_user_token_executes_calendar_provider(monkeypatch):
@@ -362,7 +452,8 @@ def test_calendar_create_authorized_user_token_executes_calendar_provider(monkey
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
     monkeypatch.setattr(feishu_resource_providers, "FeishuCalendarService", FakeCalendarService)
 
-    provider = FeishuCalendarProvider(db=_FakeDb(app_config=app_config))
+    db = _FakeDb(app_config=app_config)
+    provider = FeishuCalendarProvider(db=db)
     result = provider.execute(_request(company_id=company_id, operation="create_event"))
 
     assert result.status == "success"
@@ -371,14 +462,15 @@ def test_calendar_create_authorized_user_token_executes_calendar_provider(monkey
     assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["authorization_status"] == "AUTHORIZED"
     assert calls[0]["user_access_token"] == "user-token"
-    assert result.metadata["enterprise_write_through"] == "saved"
+    assert result.metadata["enterprise_write_through"] == "disabled"
+    assert result.metadata["operational_source"] == "feishu_realtime"
+    assert db.added == []
+    assert db.commits == 0
 
 
-def test_task_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
+def test_task_query_blocks_legacy_tool_path_until_bot_provider_is_connected(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
-    calls = []
-
     async def fail_resolve_user_token(*_args, **_kwargs):
         raise AssertionError("query must not resolve user token")
 
@@ -386,33 +478,23 @@ def test_task_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
 
     class ToolTaskProvider(FeishuTaskProvider):
         def _execute_tool(self, request, *, tool_name, params=None, confirm_write=False):
-            calls.append((tool_name, params or {}))
-            return SimpleNamespace(
-                status=feishu_resource_providers.ToolExecutionStatus.SUCCESS,
-                answer="查到任务",
-                error="",
-                structured_result={"response_payload": {"items": [{"guid": "task-1", "summary": "我的任务"}]}},
-            )
+            raise AssertionError("bot-first task query must not fall through to task_qa CLI")
 
     provider = ToolTaskProvider(db=_FakeDb(app_config=app_config))
     result = provider.execute(_request(company_id=company_id, operation="list_my_tasks"))
 
-    assert result.status == "success"
+    assert result.status == "denied"
     assert result.result_type == "task_list"
-    assert result.items[0]["title"] == "我的任务"
-    assert "credential_mode" not in result.metadata
-    assert calls[0][0] == "task_qa"
-    assert calls[0][1]["scope_filter"]["scope"] == "self"
-    assert calls[0][1]["scope_filter"]["company_id"] == str(company_id)
-    assert calls[0][1]["scope_filter"]["actor_open_id"] == "ou_user"
-    assert calls[0][1]["owner_open_id"] == "ou_user"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["user_fallback_allowed"] is True
 
 
-def test_calendar_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
+def test_calendar_query_blocks_legacy_tool_path_until_bot_provider_is_connected(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
-    calls = []
-
     async def fail_resolve_user_token(*_args, **_kwargs):
         raise AssertionError("query must not resolve user token")
 
@@ -420,33 +502,23 @@ def test_calendar_query_uses_enterprise_tool_path_not_user_token(monkeypatch):
 
     class ToolCalendarProvider(FeishuCalendarProvider):
         def _execute_tool(self, request, *, tool_name, params=None, confirm_write=False):
-            calls.append((tool_name, params or {}))
-            return SimpleNamespace(
-                status=feishu_resource_providers.ToolExecutionStatus.SUCCESS,
-                answer="查到日程",
-                error="",
-                structured_result={"response_payload": {"items": [{"event_id": "event-1", "summary": "我的日程"}]}},
-            )
+            raise AssertionError("bot-first calendar query must not fall through to calendar_qa CLI")
 
     provider = ToolCalendarProvider(db=_FakeDb(app_config=app_config))
     result = provider.execute(_request(company_id=company_id, operation="list_events"))
 
-    assert result.status == "success"
+    assert result.status == "denied"
     assert result.result_type == "calendar_event_list"
-    assert result.items[0]["title"] == "我的日程"
-    assert "credential_mode" not in result.metadata
-    assert calls[0][0] == "calendar_qa"
-    assert calls[0][1]["scope_filter"]["scope"] == "self"
-    assert calls[0][1]["scope_filter"]["company_id"] == str(company_id)
-    assert calls[0][1]["scope_filter"]["actor_open_id"] == "ou_user"
-    assert calls[0][1]["owner_open_id"] == "ou_user"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["user_fallback_allowed"] is True
 
 
 def test_task_company_query_passes_scope_filter_without_owner_filter(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
-    calls = []
-
     async def fail_resolve_user_token(*_args, **_kwargs):
         raise AssertionError("query must not resolve user token")
 
@@ -454,18 +526,12 @@ def test_task_company_query_passes_scope_filter_without_owner_filter(monkeypatch
 
     class ToolTaskProvider(FeishuTaskProvider):
         def _execute_tool(self, request, *, tool_name, params=None, confirm_write=False):
-            calls.append(params or {})
-            return SimpleNamespace(
-                status=feishu_resource_providers.ToolExecutionStatus.SUCCESS,
-                answer="查到任务",
-                error="",
-                structured_result={"response_payload": {"items": []}},
-            )
+            raise AssertionError("company task query must not fall through to task_qa CLI")
 
     provider = ToolTaskProvider(db=_FakeDb(app_config=app_config))
     result = provider.execute(_request(company_id=company_id, operation="list_my_tasks", data_scope="company"))
 
-    assert result.status == "success"
-    assert calls[0]["scope_filter"]["scope"] == "company"
-    assert calls[0]["scope_filter"]["actor_open_id"] == "ou_user"
-    assert "owner_open_id" not in calls[0]
+    assert result.status == "denied"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["legacy_cli_fallback_used"] is False

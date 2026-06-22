@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Company, ExtractedItem, FeishuAppConfig, MemoryFact, Snapshot, WorkEvent
+from app.models.entities import Company, FeishuAppConfig, MemoryFact, Snapshot, WorkEvent
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -1075,6 +1075,16 @@ class FeishuTaskProvider(FeishuResourceProvider):
             return _unsupported_operation_result("task", request.operation, sorted(self._OPERATIONS))
         tool_name, is_write = tool_spec
         if request.operation in {"list_my_tasks", "search_tasks"}:
+            boundary = _enterprise_realtime_boundary_result(
+                request,
+                source="task",
+                result_type="task_list",
+                operation=request.operation,
+                current_provider="task_qa",
+                user_fallback_allowed=True,
+            )
+            if boundary is not None:
+                return boundary
             params = _task_query_tool_params(request)
             if request.operation == "search_tasks":
                 keyword = str(request.params.get("keyword") or "").strip()
@@ -1200,14 +1210,6 @@ class FeishuTaskProvider(FeishuResourceProvider):
         item = _task_item(raw_task if isinstance(raw_task, dict) else {"summary": summary})
         task_id = str(item.get("task_guid") or item.get("guid") or item.get("id") or "")
         url = str(item.get("url") or item.get("app_link") or item.get("link") or "")
-        write_through_error = _record_runtime_task_write_through(
-            self.db,
-            request=request,
-            company_id=company_id,
-            task_id=task_id,
-            title=str(item.get("title") or summary),
-            payload=raw_task if isinstance(raw_task, dict) else {"summary": summary},
-        )
         return ProviderResult(
             source="task",
             status="success",
@@ -1222,8 +1224,8 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 "execution_identity_contract": identity_contract,
                 "summary": summary,
                 "raw": payload,
-                "enterprise_write_through": "failed" if write_through_error else "saved",
-                "enterprise_write_through_error": write_through_error,
+                "operational_source": "feishu_realtime",
+                "enterprise_write_through": "disabled",
             },
             answer=f"已创建任务：{summary}",
             error="",
@@ -1424,133 +1426,6 @@ def _task_completed_at(params: dict[str, Any]) -> str:
     return str(int(datetime.now(UTC).timestamp() * 1000))
 
 
-def _record_runtime_task_write_through(
-    db: Session,
-    *,
-    request: ProviderRequest,
-    company_id: Any,
-    task_id: str,
-    title: str,
-    payload: dict[str, Any],
-) -> str:
-    if company_id is None or not hasattr(db, "add"):
-        return ""
-    try:
-        identity = request.context.identity
-        normalized_payload = dict(payload)
-        normalized_payload.update(
-            {
-                "task_guid": task_id,
-                "guid": task_id,
-                "summary": title,
-                "owner_open_id": identity.open_id,
-                "assignee_open_id": identity.open_id,
-                "actor_open_id": identity.open_id,
-                "owner_user_id": identity.user_id,
-                "actor_user_id": identity.user_id,
-                "source": "runtime_write_through",
-            }
-        )
-        db.add(
-            ExtractedItem(
-                company_id=company_id,
-                item_type="task",
-                title=title or task_id or "未命名任务",
-                owner=identity.display_name or identity.open_id or identity.user_id,
-                status=str(payload.get("status") or "open"),
-                payload=normalized_payload,
-            )
-        )
-        if hasattr(db, "commit"):
-            db.commit()
-    except Exception as exc:
-        if hasattr(db, "rollback"):
-            db.rollback()
-        return str(exc)
-    return ""
-
-
-def _record_runtime_calendar_write_through(
-    db: Session,
-    *,
-    request: ProviderRequest,
-    company_id: Any,
-    event_id: str,
-    summary: str,
-    params: dict[str, Any],
-    payload: dict[str, Any],
-) -> str:
-    if company_id is None or not hasattr(db, "add"):
-        return ""
-    try:
-        identity = request.context.identity
-        occurred_at = _runtime_calendar_occurred_at(params.get("start_time") or params.get("start"))
-        normalized_payload = dict(payload)
-        normalized_payload.update(
-            {
-                "event_id": event_id,
-                "summary": summary,
-                "start": params.get("start"),
-                "end": params.get("end"),
-                "start_time": params.get("start_time") or params.get("start"),
-                "end_time": params.get("end_time") or params.get("end"),
-                "owner_open_id": identity.open_id,
-                "actor_open_id": identity.open_id,
-                "owner_user_id": identity.user_id,
-                "actor_user_id": identity.user_id,
-                "source": "runtime_write_through",
-            }
-        )
-        db.add(
-            WorkEvent(
-                company_id=company_id,
-                source="runtime",
-                source_type="feishu_user_identity",
-                visibility_scope="company",
-                business_domain="calendar",
-                event_type="feishu.calendar.event",
-                object_type="calendar_event",
-                object_id=event_id,
-                actor=identity.open_id or identity.user_id or "system",
-                external_id=event_id or None,
-                title=summary or event_id or "未命名日程",
-                content_text=summary or "",
-                occurred_at=occurred_at,
-                actors=[identity.open_id] if identity.open_id else [],
-                payload=normalized_payload,
-                raw_json=payload,
-            )
-        )
-        if hasattr(db, "commit"):
-            db.commit()
-    except Exception as exc:
-        if hasattr(db, "rollback"):
-            db.rollback()
-        return str(exc)
-    return ""
-
-
-def _runtime_calendar_occurred_at(value: Any) -> datetime:
-    if isinstance(value, dict):
-        timestamp = value.get("timestamp")
-        if timestamp is not None and str(timestamp).strip().isdigit():
-            return datetime.fromtimestamp(int(str(timestamp).strip()), tz=UTC)
-    if value is None:
-        return datetime.now(UTC)
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(int(value), tz=UTC)
-    text = str(value).strip()
-    if text.isdigit():
-        return datetime.fromtimestamp(int(text), tz=UTC)
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(UTC)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
-
-
 def _calendar_time_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict) and value:
         return value
@@ -1594,6 +1469,16 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         if tool_name is None:
             return _tool_not_installed_result("calendar", request.operation)
         if request.operation == "list_events":
+            boundary = _enterprise_realtime_boundary_result(
+                request,
+                source="calendar",
+                result_type="calendar_event_list",
+                operation=request.operation,
+                current_provider="calendar_qa",
+                user_fallback_allowed=True,
+            )
+            if boundary is not None:
+                return boundary
             result = self._execute_tool(
                 request,
                 tool_name=tool_name,
@@ -1730,15 +1615,6 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         event = data.get("event") if isinstance(data, dict) and isinstance(data.get("event"), dict) else data
         event_id = _first_nested_value(event, ("event_id", "id", "calendar_event_id"))
         url = _first_nested_value(event, ("url", "app_link", "link"))
-        write_through_error = _record_runtime_calendar_write_through(
-            self.db,
-            request=request,
-            company_id=company_id,
-            event_id=event_id,
-            summary=summary,
-            params=params,
-            payload=event if isinstance(event, dict) else {"summary": summary},
-        )
         return ProviderResult(
             source="calendar",
             status="success",
@@ -1761,8 +1637,8 @@ class FeishuCalendarProvider(FeishuResourceProvider):
                 "execution_identity_contract": identity_contract,
                 "summary": summary,
                 "raw": payload,
-                "enterprise_write_through": "failed" if write_through_error else "saved",
-                "enterprise_write_through_error": write_through_error,
+                "operational_source": "feishu_realtime",
+                "enterprise_write_through": "disabled",
             },
             answer=f"已创建日程：{summary}",
             error="",
@@ -1798,6 +1674,16 @@ class FeishuMailProvider(FeishuResourceProvider):
         if tool_name is None:
             return _tool_not_installed_result("mail", request.operation)
         if request.operation in {"list_recent", "search_messages"}:
+            boundary = _enterprise_realtime_boundary_result(
+                request,
+                source="mail",
+                result_type="mail_list",
+                operation=request.operation,
+                current_provider=str(tool_name),
+                user_fallback_allowed=True,
+            )
+            if boundary is not None:
+                return boundary
             params = _mail_tool_params(request)
             if request.operation == "search_messages":
                 query = str(request.params.get("query") or request.params.get("keyword") or "").strip()
@@ -2123,6 +2009,16 @@ class FeishuAttendanceProvider(FeishuResourceProvider):
     def execute(self, request: ProviderRequest) -> ProviderResult:
         if request.operation != "query_records":
             return _unsupported_operation_result("attendance", request.operation, sorted(self._OPERATIONS))
+        boundary = _enterprise_realtime_boundary_result(
+            request,
+            source="attendance",
+            result_type="attendance_record_list",
+            operation=request.operation,
+            current_provider="lark-cli attendance user_tasks query",
+            user_fallback_allowed=True,
+        )
+        if boundary is not None:
+            return boundary
         start_date = _first_text_param(request.params, "start_date", "check_date_from") or (date.today() - timedelta(days=7)).isoformat()
         end_date = _first_text_param(request.params, "end_date", "check_date_to") or date.today().isoformat()
         data = {
@@ -2282,6 +2178,16 @@ class FeishuSlidesProvider(FeishuResourceProvider):
             return _tool_not_installed_result("slides", request.operation)
         if request.operation != "read_slides":
             return _unsupported_operation_result("slides", request.operation, sorted(self._OPERATIONS))
+        boundary = _enterprise_realtime_boundary_result(
+            request,
+            source="slides",
+            result_type="slides_read",
+            operation=request.operation,
+            current_provider="lark-cli slides xml_presentations get",
+            user_fallback_allowed=False,
+        )
+        if boundary is not None:
+            return boundary
         presentation_id = _first_text_param(request.params, "xml_presentation_id", "presentation_id", "slides_token") or _slides_token_from_text(request.context.current_message)
         if not presentation_id:
             return _missing_params_result(
@@ -2354,6 +2260,16 @@ class FeishuWhiteboardProvider(FeishuResourceProvider):
             return _tool_not_installed_result("whiteboard", request.operation)
         if request.operation != "read_whiteboard":
             return _unsupported_operation_result("whiteboard", request.operation, sorted(self._OPERATIONS))
+        boundary = _enterprise_realtime_boundary_result(
+            request,
+            source="whiteboard",
+            result_type="whiteboard_read",
+            operation=request.operation,
+            current_provider="lark-cli whiteboard +query",
+            user_fallback_allowed=False,
+        )
+        if boundary is not None:
+            return boundary
         whiteboard_token = _first_text_param(request.params, "whiteboard_token", "board_token") or _whiteboard_token_from_text(request.context.current_message)
         if not whiteboard_token:
             return _missing_params_result(
@@ -3064,6 +2980,50 @@ def _tool_not_installed_result(source: str, operation: str) -> ProviderResult:
         },
         answer=f"{_provider_label(source)}能力已在 V5 登记，但底层飞书原子能力还没有接上：{operation}。",
         error=f"{source}_tool_not_installed",
+    )
+
+
+def _enterprise_realtime_boundary_result(
+    request: ProviderRequest,
+    *,
+    source: str,
+    result_type: str,
+    operation: str,
+    current_provider: str,
+    user_fallback_allowed: bool,
+) -> ProviderResult | None:
+    contract = request.execution_identity_contract.payload()
+    if contract.get("credential_mode") != "TENANT_TOKEN" or contract.get("actor_identity") != "BOT":
+        return None
+    return ProviderResult(
+        source=source,
+        status="denied",
+        result_type=result_type,
+        count=0,
+        items=(),
+        metadata={
+            "operation": operation,
+            "current_provider": current_provider,
+            "credential_mode": "TENANT_TOKEN",
+            "actor_identity": "BOT",
+            "execution_identity_contract": contract,
+            "error_type": "enterprise_realtime_not_integrated",
+            "provider_boundary": "enterprise_realtime_not_integrated",
+            "operational_source": "feishu_realtime",
+            "workevent_as_realtime_source": False,
+            "extracted_item_as_realtime_source": False,
+            "legacy_cli_fallback_used": False,
+            "user_fallback_allowed": user_fallback_allowed,
+            "recommended_next_step": (
+                f"接入 {_provider_label(source)} 的 Bot/Tenant 实时读取 Provider；"
+                "如需读取个人私有资源，应由 Policy/Runtime 显式进入 USER fallback。"
+            ),
+        },
+        answer=(
+            f"{_provider_label(source)}企业实时读取能力还没有接入 Bot/Tenant 主路径。"
+            "我不会改用本地认知数据或当前用户本机身份代查。"
+        ),
+        error="enterprise_realtime_not_integrated",
     )
 
 
