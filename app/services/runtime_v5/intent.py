@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import re
 from zoneinfo import ZoneInfo
 
+from app.services.runtime_v5.llm_intent import llm_command_intent
 from app.services.runtime_v5.models import IntentResult, RuntimeContext
 
 
@@ -20,6 +21,12 @@ _APPROVAL_CURRENT_KEY = "runtime_v5_current_approval_item"
 
 
 def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
+    rule_intent = _recognize_intent_by_rules(question, context)
+    llm_intent = llm_command_intent(question=question, context=context, rule_intent=rule_intent)
+    return llm_intent or rule_intent
+
+
+def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> IntentResult:
     current_message = context.current_message or ""
     text = question if question.strip() == current_message.strip() else f"{question} {current_message}"
     text = text.strip().lower()

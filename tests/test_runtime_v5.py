@@ -20,6 +20,7 @@ from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
 from app.services.runtime_v5.intent import recognize_intent
+from app.services.runtime_v5.llm_intent import LLMCommandIntentCandidate, validate_llm_command_intent
 from app.services.runtime_v5.permission import check_runtime_permission
 from app.services.runtime_v5.runtime import run_runtime_v5
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload, runtime_action_input_from_payload
@@ -155,6 +156,138 @@ def test_runtime_v5_calendar_create_still_handles_explicit_meeting() -> None:
     assert intent.entities["summary"] == "会议"
     assert intent.entities["start"]
     assert intent.entities["end"]
+
+
+def test_runtime_v5_command_llm_candidate_can_resolve_generic_company_task_query(monkeypatch) -> None:
+    def fake_candidate(**kwargs):
+        return LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            entities={"topic": "任务负荷"},
+            missing_params=(),
+            confidence=0.91,
+            canonical_question="查看公司任务负荷",
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    intent = recognize_intent("帮我看看企业工作负荷", _context("帮我看看企业工作负荷"))
+
+    assert intent.intent == "task_query"
+    assert intent.question_type == "query"
+    assert intent.data_scope == "company"
+    assert intent.entities == {"topic": "任务负荷"}
+    assert intent.canonical_question == "查看公司任务负荷"
+
+
+def test_runtime_v5_command_llm_candidate_does_not_override_confident_action(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return LLMCommandIntentCandidate(
+            question_type="query",
+            intent="calendar_query",
+            data_scope="company",
+            confidence=0.95,
+            canonical_question="查看公司日程",
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    intent = recognize_intent("创建一个任务：明天4点开会", _context("创建一个任务：明天4点开会"))
+
+    assert called is False
+    assert intent.intent == "task_create"
+    assert intent.question_type == "action"
+
+
+def test_runtime_v5_command_llm_validator_rejects_unknown_or_low_confidence_candidates() -> None:
+    rule_intent = IntentResult(
+        question_type="query",
+        intent="general_query",
+        data_scope="company",
+        confidence=0.55,
+        canonical_question="看看公司情况",
+    )
+
+    unknown = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="provider_direct_execute",
+            data_scope="company",
+            confidence=0.99,
+            canonical_question="非法候选",
+        ),
+        rule_intent=rule_intent,
+    )
+    low_confidence = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            confidence=0.5,
+            canonical_question="低置信候选",
+        ),
+        rule_intent=rule_intent,
+    )
+
+    assert unknown is None
+    assert low_confidence is None
+
+
+def test_runtime_v5_command_llm_low_confidence_with_missing_params_guides_clarification() -> None:
+    rule_intent = IntentResult(
+        question_type="analysis",
+        intent="general_analysis",
+        data_scope="company",
+        confidence=0.78,
+        canonical_question="看看情况",
+    )
+
+    validated = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            missing_params=("scope", "time_range"),
+            clarification="你想看哪个范围、哪个时间段的任务？",
+            confidence=0.52,
+            canonical_question="查看任务",
+        ),
+        rule_intent=rule_intent,
+    )
+
+    assert validated is not None
+    assert validated.intent == "task_query"
+    assert validated.needs_clarification is True
+    assert validated.missing_params == ("scope", "time_range")
+    assert validated.entities["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
+
+
+def test_runtime_v5_command_llm_validator_does_not_escalate_query_to_action() -> None:
+    rule_intent = IntentResult(
+        question_type="query",
+        intent="general_query",
+        data_scope="company",
+        confidence=0.55,
+        canonical_question="帮我看看工作安排",
+    )
+
+    validated = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="action",
+            intent="task_create",
+            data_scope="self",
+            confidence=0.95,
+            canonical_question="创建任务",
+        ),
+        rule_intent=rule_intent,
+    )
+
+    assert validated is None
 
 
 def test_runtime_v5_company_task_query_recognizes_company_scope() -> None:

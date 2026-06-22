@@ -177,6 +177,16 @@ Command Engine 禁止：
 - 写 WorkEvent。
 - 生成最终业务 Result。
 - 绕过 Policy 或 Runtime。
+- 让 LLM 直接选择 Provider、Tool、API、credential 或执行身份。
+
+Command LLM Intent V0 规则：
+
+- 规则解析优先保护高置信动作，例如创建、发送、审批、完成任务。
+- LLM 只能输出结构化 Intent Candidate，不得执行、不准越过 Validator。
+- Validator 只能接受已登记 Runtime strategy、合法 question_type、合法 data_scope。
+- 高置信 LLM 候选可补足泛化自然语言查询，例如企业任务负荷、公司日程风险。
+- 低置信 LLM 候选只有在给出 missing_params / clarification 时，才能进入引导式对话。
+- 未知 intent、低置信且不可追问候选、从 query 升级为 action 的候选必须丢弃。
 
 标准 Plan 最小结构：
 

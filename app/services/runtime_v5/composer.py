@@ -2770,6 +2770,9 @@ def _followup_metadata(result_context, followup: ResultFollowup) -> dict:
 
 
 def _clarification_text(intent: IntentResult) -> str:
+    clarification_prompt = intent.entities.get("clarification_prompt") if isinstance(intent.entities, dict) else None
+    if isinstance(clarification_prompt, str) and clarification_prompt.strip():
+        return clarification_prompt.strip()
     if "approval_item" in intent.missing_params:
         if intent.intent == "approval_detail":
             return "你要看第几个审批的详情？可以回复「第一个详情」或「展开第2个」。"
