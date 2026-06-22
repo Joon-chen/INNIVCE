@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlencode
 
 from app.core.config import settings
 from app.services.runtime_v5.capabilities import label_for_strategy
 from app.services.runtime_v5.models import CommandPlan, ComposedAnswer, ExecutionResult, IntentResult, PermissionDecision, PlannerResult, ResultContext, RuntimeResult, TargetUI
-from app.services.runtime_v5.policy_result_filter import build_policy_result_filter_payload
+from app.services.runtime_v5.policy_result_filter import apply_policy_result_filter, build_policy_result_filter_payload
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload
 
 
@@ -46,16 +47,21 @@ def build_runtime_result(
         result_context=result_context,
         scope_context=scope_context,
     )
+    filtered_items, policy_result_filter = apply_policy_result_filter(
+        items=result_context.items if result_context is not None else (),
+        filter_payload=policy_result_filter,
+    )
+    filtered_result_context = replace(result_context, items=filtered_items) if result_context is not None else None
     title = label_for_strategy(command_plan.planner_result.strategy) or command_plan.intent
     return RuntimeResult(
         result_type=result_type,
         status="waiting_authorization" if authorization else str(execution_status),
         title=title,
         summary=_summary_from_composed(composed),
-        items=result_context.items if result_context is not None else (),
+        items=filtered_items,
         actions=_actions_for_result(
             result_type=result_type,
-            result_context=result_context,
+            result_context=filtered_result_context,
             company_id=company_id,
             scope_context=scope_context,
             authorization=authorization,

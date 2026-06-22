@@ -2554,20 +2554,99 @@ def test_runtime_result_filter_hides_cognitive_source_references_for_company_sco
             result_context=ResultContext(
                 result_type="approval_list",
                 count=1,
-                items=({"resource_type": "insight", "summary": "高金额审批增多"},),
+                items=(
+                    {
+                        "resource_type": "insight",
+                        "summary": "高金额审批增多",
+                        "source_event_ids": ["event_1"],
+                        "source_object_id": "approval_1",
+                        "raw": {"source_object_id": "approval_1", "internal_note": "kept"},
+                    },
+                ),
             ),
         ),
     )
 
-    policy_filter = runtime_result_payload(result)["metadata"]["policy_result_filter"]
+    payload = runtime_result_payload(result)
+    policy_filter = payload["metadata"]["policy_result_filter"]
 
     assert policy_filter["scope"] == "COMPANY"
     assert policy_filter["aggregation_only"] is True
     assert policy_filter["source_reference_visible"] is False
+    assert policy_filter["redaction_applied"] is True
     assert policy_filter["resource_filters"][0]["aggregation_only"] is True
     assert policy_filter["resource_filters"][0]["source_reference_visible"] is False
     assert policy_filter["section_filters"]["approval"]["source_reference_visible"] is True
     assert policy_filter["section_filters"]["insight"]["source_reference_visible"] is False
+    assert payload["items"] == [{"resource_type": "insight", "summary": "高金额审批增多"}]
+
+
+def test_runtime_result_filter_removes_denied_mixed_resource_items() -> None:
+    result = build_runtime_result(
+        command_plan=_command_plan("task_query", result_type="task_query", sources=("task", "insight")),
+        permission=PermissionDecision(
+            allowed=True,
+            requires_confirmation=False,
+            execution_identity="bot",
+            metadata={
+                "allowed_resource_types": ["task"],
+                "denied_resource_types": ["insight"],
+            },
+        ),
+        execution=None,
+        composed=ComposedAnswer(
+            answer="你有 1 条任务。",
+            result_context=ResultContext(
+                result_type="task_list",
+                count=2,
+                items=(
+                    {"resource_type": "task", "title": "跟进客户", "task_guid": "task/1"},
+                    {"resource_type": "insight", "summary": "负荷偏高"},
+                ),
+            ),
+        ),
+    )
+
+    payload = runtime_result_payload(result)
+    policy_filter = payload["metadata"]["policy_result_filter"]
+
+    assert payload["items"] == [{"resource_type": "task", "title": "跟进客户", "task_guid": "task/1"}]
+    assert policy_filter["redaction_applied"] is True
+    assert policy_filter["resource_filters"][1]["visible"] is False
+    assert policy_filter["section_filters"]["insight"]["visible"] is False
+
+
+def test_runtime_result_filter_builds_actions_from_filtered_items() -> None:
+    result = build_runtime_result(
+        command_plan=_command_plan("approval_query", data_scope="company", sources=("approval", "insight")),
+        permission=PermissionDecision(
+            allowed=True,
+            requires_confirmation=False,
+            execution_identity="bot",
+            metadata={
+                "allowed_resource_types": ["approval"],
+                "denied_resource_types": ["insight"],
+            },
+        ),
+        execution=None,
+        composed=ComposedAnswer(
+            answer="公司审批风险。",
+            result_context=ResultContext(
+                result_type="approval_list",
+                count=2,
+                items=(
+                    {"resource_type": "approval", "approval_code": "approval_1", "instance_code": "instance_1", "task_id": "task_1"},
+                    {"resource_type": "insight", "summary": "隐藏的风险来源"},
+                ),
+            ),
+        ),
+    )
+
+    payload = runtime_result_payload(result)
+
+    assert [item["resource_type"] for item in payload["items"]] == ["approval"]
+    assert len(payload["actions"]) == 1
+    assert payload["actions"][0]["approval_code"] == "approval_1"
 
 
 def test_runtime_permission_denies_company_scope_for_ordinary_employee() -> None:
