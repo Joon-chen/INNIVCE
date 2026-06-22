@@ -32,21 +32,25 @@ Cognitive Engine 不负责执行动作。Action 继续归 Runtime Engine。
 
 ## 1. 目标
 
-建立三层数据模型的最小版本：
+建立企业认知最小闭环：
 
 ```text
-WorkEvent -> Snapshot -> MemoryCandidate
+Raw Data
+-> WorkEvent
+-> Evidence
+-> Snapshot
+-> Insight
 ```
 
-V1 代码中的最小落地仍以三层为主；架构语义已扩展为 WorkEvent / Evidence / Snapshot / Insight。
+V1 代码中的最小落地允许 Evidence 和 Insight 先作为 Snapshot payload / RuntimeResult metadata 的派生结构，不引入 Evidence Engine、Insight Engine 或 Insight Store。
 
-三层职责：
+核心职责：
 
 - WorkEvent：事实层，记录已经发生或已被系统观察到的事实。
+- Evidence：判断依据层，保存系统为什么得出判断的可解释依据。
 - Snapshot：当前认知层，保存系统对某个业务对象的最新判断。
+- Insight：建议层，输出 Recommendation，不负责执行。
 - MemoryCandidate：长期记忆候选层，保存可能值得沉淀的组织模式。
-- Evidence：V1 可先体现在 Snapshot payload 或分析结果中，后续再独立模型化。
-- Insight：V1 可先作为 Snapshot 派生建议，不引入 Insight Engine 或 Insight Store。
 - Profile / Style / Preference：属于 Cognitive Engine，但 V1 只冻结边界，不实现画像引擎。
 
 Approval 查询必须从 Snapshot 读取 AI 判断。附件未完成或 Snapshot 未完成时，Bot / Card / Portal / SidePanel 只能展示“分析中”，不得展示不完整 AI 建议。
@@ -137,6 +141,64 @@ Snapshot.status == completed -> 展示 recommendation / risk_level / reasons
 Bot Query 不允许同步读取附件或执行 AI 分析；只能合并 Feishu live data 与已有 Snapshot。
 Snapshot Builder 是本阶段唯一允许生成 completed Approval Snapshot 的组件。
 Snapshot 生成节奏由 `docs/SNAPSHOT_TRIGGER_MATRIX.md` 定义；Query 和页面打开不得触发 Snapshot Builder。
+
+## 3.1 Evidence Model
+
+Evidence 是判断依据层，不是展示缓存，也不是审批详情副本。
+
+建议字段：
+
+```text
+id
+company_id
+object_type
+object_id
+evidence_type
+quality
+summary
+facts
+conflicts
+missing_items
+source_event_ids
+created_at
+```
+
+语义规则：
+
+- Evidence 必须继承来源对象权限。
+- Evidence 可以来自附件解析、表单字段解析、OCR、规则校验、历史模式或人工补充。
+- Evidence 用于解释 Snapshot 和 Insight，不直接决定 Action。
+- Evidence 不保存无关原始附件全文，只保存判断所需的结构化依据和引用。
+- Evidence 细节必须经过 Unified Policy Result Filter 后才能展示。
+
+## 3.2 Insight Model
+
+Insight 是认知系统输出层，语义等于 Recommendation。
+
+建议字段：
+
+```text
+id
+company_id
+insight_type
+severity
+title
+summary
+recommendation
+evidence_refs
+snapshot_refs
+memory_refs
+scope
+created_at
+```
+
+语义规则：
+
+- Insight 不负责执行。
+- Action 继续归 Runtime。
+- Insight 可以被 Runtime 用作建议输入，但不能绕过 Policy 或确认。
+- Insight 可以聚合到管理视角，但必须脱敏，不得暴露无权限来源对象。
+- V1 不实现 Insight Store；Insight 可先作为 RuntimeResult / Snapshot metadata 的派生输出。
 
 ## 4. MemoryCandidate Model
 

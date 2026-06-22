@@ -2,71 +2,65 @@
 
 本文档只回答：现在在做什么。
 
-系统最高级规则见 `docs/V5_RUNTIME_CONSTITUTION.md`。
+最高级架构规则见 `docs/V5_RUNTIME_CONSTITUTION.md`。
 
 ## 当前阶段
 
 ```text
-Command LLM Intent V0 Acceptance Phase
+Architecture Documentation Consolidation Phase
 ```
 
 ## 当前目标
 
-把 LLM 纳入 V5 Command Engine，但只作为结构化 Intent Candidate 生成器。
+合并、整理、冻结 V5 架构文档。
 
-当前链路：
+当前架构总图冻结为：
 
 ```text
-User Message
--> Rule Intent Parser
--> LLM Intent Candidate
--> Command Validator
--> IntentResult
--> Planner
--> Policy
--> Runtime
+Foundation
+-> Core Engines
+-> Interface
+-> Observability
+-> Business Domains
 ```
 
-已完成：
+Core Engines：
 
-- `recognize_intent` 仍是 Command 统一入口。
-- 高置信规则动作优先，LLM 不覆盖写入/审批/发送类动作。
-- LLM 候选必须通过 Validator 才能变成 `IntentResult`。
-- Validator 限定已登记 intent、合法 question_type、合法 data_scope。
-- 低置信 LLM 候选可在带 `missing_params` 时进入引导式对话。
-- Composer 可优先展示 LLM 生成的 clarification prompt。
+```text
+Command
+Policy
+Runtime
+Cognitive
+Capability Registry
+```
+
+## 当前已完成
+
+- `V5_RUNTIME_CONSTITUTION.md` 明确唯一架构总图。
+- `V5_RUNTIME_CONSTITUTION.md` 明确 Architecture Index。
+- `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` 收口到 WorkEvent / Evidence / Snapshot / Insight。
+- `UNIFIED_POLICY_ENGINE_V0_DESIGN.md` 明确统一实时数据和认知数据权限。
+- `CAPABILITY_REGISTRY_MODEL.md` 明确 Registry 是能力元数据控制面，不属于 Diagnostics。
+- Command LLM Intent V0 已完成低置信引导式对话边界验证。
+- Task create 写入已收敛到 Runtime controlled write。
 
 ## 当前禁止范围
 
-- 不让 LLM 直接调用 Tool / Provider / Feishu API。
-- 不让 LLM 选择 credential、execution identity 或授权策略。
-- 不新增 Runtime Engine / Policy Engine / Cognitive Engine 概念。
+- 不新增 Engine。
+- 不新增 Foundation。
+- 不新增 Runtime Layer。
+- 不新增 Architecture V2。
+- 不新增 Policy V2。
 - 不新增数据库表。
-- 不改 UI 页面。
-- 不改 Provider 执行逻辑。
-- 不扩大 Task / Calendar 能力范围。
+- 不重构 UI。
+- 不扩展业务能力。
 
 ## 当前验收标准
 
-- 泛化自然语言查询可由 LLM Candidate 补足为现有 Runtime intent。
-- 低置信且缺参数时进入 clarification，不执行 Provider。
-- 未知 intent 被拒绝。
-- 低置信且无可追问参数的候选被拒绝。
-- Query 不得被 LLM 升级为 Action。
-- 高置信规则动作不得被 LLM 覆盖。
-
-## 当前验证
-
-```text
-.venv312/bin/python -m pytest tests/test_runtime_v5.py -q
-.venv312/bin/python -m py_compile app/services/runtime_v5/llm_intent.py app/services/runtime_v5/intent.py app/services/runtime_v5/composer.py tests/test_runtime_v5.py
-```
-
-已知未处理：
-
-- `tests/test_v5_architecture.py` 当前存在既有 Task write-service guard 失败：
-  `app/services/runtime_v5/feishu_resource_providers.py:1178: .create_task(`。
-  该问题属于 Task Provider 写入边界清理，不属于 Command LLM 本阶段。
+- 新成员只看 `V5_RUNTIME_CONSTITUTION.md` 即可理解 V5 五层结构。
+- ACTIVE / FROZEN / ARCHIVED 文档状态明确。
+- 重复概念已归并到现有文档。
+- `CURRENT_MISSION.md` 保持短文档，只描述当前任务。
 
 ## 下一步计划
 
@@ -74,6 +68,9 @@ User Message
 Unified Policy Engine V0 Implementation Planning
 ```
 
-- 将 Query 身份选择、Scope 允许范围、实时数据与认知数据裁剪统一进 Policy。
-- 先选择 Workspace 作为第一条 Policy 打通样板。
-- 再回到企业级 Bot/Tenant 查询能力接入。
+建议先选择 Workspace 作为第一条 Policy 打通样板：
+
+- Query identity：BOT/TENANT first，USER_TOKEN 只做受控个人 fallback。
+- Scope：SELF / USER / TEAM / DEPARTMENT / COMPANY。
+- Mixed Result Filter：Operational + Cognitive 统一裁剪。
+- RuntimeResult：只输出 Policy 过滤后的结果。

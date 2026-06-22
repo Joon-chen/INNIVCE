@@ -28,9 +28,9 @@ V5 冻结为五层：
 ```text
 Foundation Layer
 Core Engines
-Interface Layers
-Provider Layer
+Interface Layer
 Observability Layer
+Business Domains
 ```
 
 主链路：
@@ -40,7 +40,7 @@ Interaction
 -> Command Engine
 -> Policy Engine
 -> Runtime Engine / Cognitive Engine
--> Provider Layer
+-> Provider / Tool
 -> Policy Result Filter
 -> RuntimeResult / InteractionPayload
 -> Interaction
@@ -314,16 +314,13 @@ Insight
 -> Provider
 ```
 
-## 5. Interface Layers
+## 5. Interface Layer
 
-Interface Layers 包括：
+Interface Layer 包括：
 
 ```text
 Interaction Layer
-Provider Layer
 ```
-
-### 5.1 Interaction Layer
 
 包含：
 
@@ -347,7 +344,7 @@ Provider Layer
 - 自己解释业务状态。
 - 查询数据库补业务状态。
 
-### 5.2 Provider Layer
+### 5.1 Provider / Tool Boundary
 
 Provider / Tool 只做被动能力：
 
@@ -377,9 +374,37 @@ Observability 旁路观察全部，不参与业务执行。
 
 Observability 可以读取 Capability Registry 做健康检查，但 Capability Registry 不属于 Observability。
 
-## 7. Standard Contracts
+## 7. Business Domains
 
-### 7.1 RuntimeActionInput
+Business Domains 是企业工作分类，不是飞书产品模块，也不是 Runtime 模块。
+
+冻结 Domain：
+
+```text
+People
+Communication
+Workspace
+Process
+Knowledge
+Business
+Intelligence
+```
+
+映射规则：
+
+- People：组织、人员、通讯录、考勤、绩效、招聘、薪资。
+- Communication：消息、群聊、邮件、公告、机器人。
+- Workspace：任务、待办、OKR、项目、日程、会议。
+- Process：审批、报销、采购、付款、请假、出差。
+- Knowledge：知识库、Wiki、文档、文件、表格、纪要。
+- Business：客户、商机、订单、合同、供应商、产品、工单、库存。
+- Intelligence：日报、周报、总结、风险分析、经营分析、管理洞察。
+
+飞书功能只能映射为 Provider 或 Provider Binding。
+
+## 8. Standard Contracts
+
+### 8.1 RuntimeActionInput
 
 所有 Card / Portal / SidePanel / WebView action 必须转换为 RuntimeActionInput 后进入 Runtime。
 
@@ -432,7 +457,7 @@ payload
 created_at
 ```
 
-## 8. Architecture Index
+## 9. Architecture Index
 
 | Document | Status | Role |
 | --- | --- | --- |
@@ -448,7 +473,7 @@ created_at
 | `ECF_V1_FREEZE_REVIEW.md` | FROZEN | Cognitive V1 冻结评审 |
 | `docs/history/*` | ARCHIVED | 历史阶段归档 |
 
-## 9. Documentation Archive List
+## 10. Documentation Archive List
 
 以下文档只作为历史或样板参考，不再作为最高级架构入口：
 
@@ -464,7 +489,7 @@ created_at
 
 若这些文档与本文冲突，以本文为准。
 
-## 10. Duplicate Concept Cleanup
+## 11. Duplicate Concept Cleanup
 
 | Duplicate / Legacy Concept | Canonical Concept |
 | --- | --- |
@@ -472,13 +497,13 @@ created_at
 | Policy Layer / Policy & Context Layer | Policy Engine |
 | Agent Runtime / Runtime Layer | Runtime Engine |
 | Memory / WorkEvent / Snapshot scattered docs | Cognitive Engine |
-| Tool Layer | Provider Layer |
+| Tool Layer / Provider Layer as architecture layer | Provider / Tool Boundary |
 | Card Policy | Interaction render-only contract |
 | Diagnostics as business governance | Observability Layer |
 | Feishu product modules | Business Domain + Provider Binding |
 | Approval / Task as top-level module | Process / Workspace capabilities |
 
-## 11. Freeze Rule
+## 12. Freeze Rule
 
 禁止在未更新本文的情况下新增：
 

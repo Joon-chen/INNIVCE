@@ -218,6 +218,8 @@ All Query = BOT/TENANT first
 
 USER_TOKEN 只能作为受控 fallback 或代表当前用户执行动作的身份，不能作为 Query 默认入口。
 
+如果某个企业范围 Query 尚未接入 BOT/TENANT 主路径，系统必须明确返回“企业实时读取能力未授权/未接入”。不得偷偷改用当前用户 USER_TOKEN、本地认知数据或缓存伪装为企业实时读取结果。
+
 ### 3.5 PolicyDecision
 
 PolicyDecision 是 Preflight 的输出。
