@@ -23,6 +23,8 @@ from app.services.runtime_v5.models import (
 )
 from app.services.runtime_v5.provider_snapshot import build_runtime_provider_snapshot, provider_snapshot_operation
 
+COGNITIVE_SOURCES = {"workevent", "evidence", "snapshot", "insight", "memory"}
+
 
 class ResourceProvider(Protocol):
     source: str
@@ -233,15 +235,23 @@ def _item_with_resource_metadata(*, item: dict, request: ProviderRequest, result
     source_system = str(item.get("source_system") or _source_system_for_source(request.source)).strip()
     source_object_id = str(item.get("source_object_id") or _source_object_id(item=item, resource_type=resource_type)).strip()
     visibility_scope = str(item.get("visibility_scope") or _resource_scope_for_intent(request.intent)).strip()
+    resource_plane = str(item.get("resource_plane") or _resource_plane_for_source(request.source)).strip()
+    source_object_type = str(item.get("source_object_type") or item.get("object_type") or resource_type).strip()
     enriched = {
         **item,
-        "resource_plane": str(item.get("resource_plane") or "operational"),
+        "resource_plane": resource_plane,
         "resource_type": resource_type,
         "source_system": source_system,
-        "source_object_type": str(item.get("source_object_type") or resource_type),
+        "source_object_type": source_object_type,
         "source_object_id": source_object_id,
         "visibility_scope": visibility_scope,
     }
+    if resource_plane == "cognitive":
+        source_event_ids = item.get("source_event_ids") or item.get("evidence_event_ids")
+        if source_event_ids is not None:
+            enriched["source_event_ids"] = list(source_event_ids) if isinstance(source_event_ids, (list, tuple)) else [str(source_event_ids)]
+        inherited_visibility = item.get("inherited_visibility_scope") or visibility_scope
+        enriched["inherited_visibility_scope"] = str(inherited_visibility)
     company_id = str(item.get("company_id") or request.context.runtime_scope.active_company_id or "").strip()
     if company_id:
         enriched["company_id"] = company_id
@@ -270,9 +280,13 @@ def _resource_type_for_result(*, source: str, result_type: str) -> str:
         return "calendar"
     if result_type.startswith("approval") or source == "approval":
         return "approval"
-    if source in {"workevent", "evidence", "snapshot", "insight", "memory"}:
+    if source in COGNITIVE_SOURCES:
         return source
     return source or result_type or "operational"
+
+
+def _resource_plane_for_source(source: str) -> str:
+    return "cognitive" if source in COGNITIVE_SOURCES else "operational"
 
 
 def _source_system_for_source(source: str) -> str:
@@ -295,7 +309,7 @@ def _source_system_for_source(source: str) -> str:
         "wiki",
     }:
         return "feishu"
-    if source in {"workevent", "evidence", "snapshot", "insight", "memory"}:
+    if source in COGNITIVE_SOURCES:
         return "digital_advisor"
     return source or "unknown"
 
@@ -305,7 +319,12 @@ def _source_object_id(*, item: dict, resource_type: str) -> str:
         "task": ("task_guid", "guid", "task_id", "id"),
         "calendar": ("event_id", "calendar_event_id", "id"),
         "approval": ("instance_code", "approval_code", "task_id", "serial_number", "id"),
-    }.get(resource_type, ("id", "source_object_id"))
+        "workevent": ("object_id", "source_object_id", "id"),
+        "evidence": ("object_id", "source_object_id", "id"),
+        "snapshot": ("object_id", "source_object_id", "id"),
+        "insight": ("object_id", "source_object_id", "id"),
+        "memory": ("object_id", "source_object_id", "id"),
+    }.get(resource_type, ("source_object_id", "object_id", "id"))
     for key in candidate_keys:
         value = str(item.get(key) or "").strip()
         if value:

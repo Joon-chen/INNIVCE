@@ -97,7 +97,7 @@ def _resource_filter(
 ) -> dict[str, Any]:
     resource_type = _resource_type(item)
     visible = allowed and resource_type not in denied_resource_types
-    cognitive = resource_type in COGNITIVE_RESOURCE_TYPES
+    cognitive = _is_cognitive_resource(item=item, resource_type=resource_type)
     aggregate = visible and cognitive and scope in AGGREGATE_SCOPES
     return {
         "index": index,
@@ -138,6 +138,15 @@ def _resource_type(item: dict[str, Any]) -> str:
     return "operational"
 
 
+def _is_cognitive_resource(*, item: dict[str, Any], resource_type: str) -> bool:
+    if str(item.get("resource_plane") or "").strip().lower() == "cognitive":
+        return True
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    if str(raw.get("resource_plane") or "").strip().lower() == "cognitive":
+        return True
+    return resource_type in COGNITIVE_RESOURCE_TYPES
+
+
 def _redacted_item_copy(item: dict[str, Any], *, decision: dict[str, Any]) -> dict[str, Any]:
     redacted = dict(item)
     for field in decision.get("redacted_fields") or []:
@@ -161,6 +170,7 @@ def _source_reference_fields(item: dict[str, Any]) -> list[str]:
         "source_object_id",
         "source_object_type",
         "source_system",
+        "inherited_visibility_scope",
         "raw",
     )
     fields = [field for field in candidate_fields if field in item]

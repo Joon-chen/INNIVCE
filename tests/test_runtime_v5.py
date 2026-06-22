@@ -805,6 +805,54 @@ def test_runtime_v5_calendar_query_outputs_policy_resource_metadata() -> None:
     assert item["owner_open_id"] == "ou_test"
 
 
+def test_runtime_v5_cognitive_query_outputs_policy_resource_metadata() -> None:
+    class WorkEventProvider:
+        source = "workevent"
+        _OPERATIONS = {"risk_events": ("workevent.risk_events", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "risk_events"
+            return ProviderResult(
+                source="workevent",
+                status="success",
+                result_type="risk_event_list",
+                count=1,
+                items=(
+                    {
+                        "summary": "审批高金额风险",
+                        "object_type": "approval",
+                        "object_id": "approval_1",
+                        "source_event_ids": ["event_1"],
+                    },
+                ),
+                answer="发现 1 条风险事件。",
+            )
+
+    execution = CapabilityRouter({"workevent": WorkEventProvider()}).execute(
+        context=_context("公司风险"),
+        intent=IntentResult(
+            question_type="insight",
+            intent="risk_analysis",
+            data_scope="company",
+            confidence=0.9,
+            canonical_question="公司风险",
+        ),
+        plan=PlannerResult(strategy="risk_analysis", sources=("workevent",)),
+        permission=PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot"),
+    )
+
+    assert execution.result_context is not None
+    item = execution.result_context.items[0]
+    assert item["resource_plane"] == "cognitive"
+    assert item["resource_type"] == "workevent"
+    assert item["source_system"] == "digital_advisor"
+    assert item["source_object_type"] == "approval"
+    assert item["source_object_id"] == "approval_1"
+    assert item["source_event_ids"] == ["event_1"]
+    assert item["visibility_scope"] == "COMPANY"
+    assert item["inherited_visibility_scope"] == "COMPANY"
+
+
 def test_runtime_v5_task_query_to_complete_closes_runtime_interaction_loop() -> None:
     calls: list[tuple[str, str]] = []
 
