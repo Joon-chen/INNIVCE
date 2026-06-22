@@ -157,6 +157,22 @@ def test_runtime_v5_calendar_create_still_handles_explicit_meeting() -> None:
     assert intent.entities["end"]
 
 
+def test_runtime_v5_company_task_query_recognizes_company_scope() -> None:
+    intent = recognize_intent("查看全公司任务", _context("查看全公司任务"))
+
+    assert intent.intent == "task_query"
+    assert intent.question_type == "query"
+    assert intent.data_scope == "company"
+
+
+def test_runtime_v5_company_calendar_query_recognizes_company_scope() -> None:
+    intent = recognize_intent("查看全公司日程", _context("查看全公司日程"))
+
+    assert intent.intent == "calendar_query"
+    assert intent.question_type == "query"
+    assert intent.data_scope == "company"
+
+
 def test_runtime_v5_provider_request_carries_execution_identity_contract() -> None:
     seen_contracts = []
 

@@ -368,7 +368,7 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
         return IntentResult(
             question_type="query",
             intent="task_query",
-            data_scope="self",
+            data_scope=_query_data_scope(text),
             entities={"page_size": 20},
             missing_params=(),
             confidence=0.84,
@@ -379,7 +379,7 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
         return IntentResult(
             question_type="query",
             intent="calendar_query",
-            data_scope="self",
+            data_scope=_query_data_scope(text),
             entities=_calendar_query_params(question),
             missing_params=(),
             confidence=0.84,
@@ -771,7 +771,10 @@ def _is_task_complete(text: str) -> bool:
 
 
 def _is_task_query(text: str) -> bool:
-    return _has_any(text, ("我的任务", "我的待办", "待办有哪些", "任务有哪些", "查一下待办", "查一下任务", "查看待办", "查看任务"))
+    return (
+        _has_any(text, ("我的任务", "我的待办", "待办有哪些", "任务有哪些", "查一下待办", "查一下任务", "查看待办", "查看任务"))
+        or (_has_any(text, ("任务", "待办")) and _has_any(text, ("全公司", "公司", "所有", "全部", "延期", "高风险", "本周到期")))
+    )
 
 
 def _is_calendar_create(text: str) -> bool:
@@ -833,6 +836,10 @@ def _is_calendar_query(text: str) -> bool:
             "日程安排",
             "查看日程",
             "查一下日程",
+            "全公司日程",
+            "公司日程",
+            "所有日程",
+            "全部日程",
             "今天有什么会",
             "明天有什么会",
             "后天有什么会",
@@ -840,6 +847,12 @@ def _is_calendar_query(text: str) -> bool:
             "这周有什么会",
         ),
     )
+
+
+def _query_data_scope(text: str) -> str:
+    if _has_any(text, ("全公司", "公司", "所有", "全部")):
+        return "company"
+    return "self"
 
 
 def _is_mail_draft_create(text: str) -> bool:
