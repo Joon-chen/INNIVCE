@@ -591,3 +591,116 @@ One mixed-result filter
 ```
 
 不要再建立单独的 Cognitive Permission System。认知权限是 Policy Engine 对 Cognitive Data Plane 的资源策略。
+
+## 11. Implementation Planning
+
+V0 实施目标不是一次性实现完整权限中心，而是把现有 `permission.py` / `policy_layer.py` 收敛成可验证的 service-level Policy 主链路。
+
+第一条样板选择 Workspace，原因：
+
+- Task / Calendar 已经暴露出 Query identity、USER fallback、企业范围读取和个人动作写入的真实边界。
+- Workspace 同时覆盖 Query 和 Action，能验证 Policy Preflight。
+- 后续 Workspace Cognitive Sample 会混合 Operational Data + Cognitive Data，能验证 Result Filter。
+
+### 11.1 Phase 1: Policy Preflight Contract
+
+目标：
+
+```text
+CommandPlan
+-> Policy Preflight
+-> PermissionDecision metadata
+-> Runtime
+```
+
+最小实现：
+
+- 保留现有 `PermissionDecision`，不新增数据库表。
+- 在 `permission.py` 中显式输出：
+  - `policy_subject`
+  - `policy_scope`
+  - `identity_decision`
+  - `allowed_resource_types`
+  - `denied_resource_types`
+- `policy_subject` 先从 `RuntimeContext.identity` 构造。
+- `policy_scope` 先从 `IntentResult.data_scope` 和 `RuntimeScope` 构造。
+- `identity_decision` 先复用现有 BOT-first query 逻辑。
+
+验收：
+
+- Query 默认 `BOT / TENANT_TOKEN`。
+- SELF Query 可以标记 `user_fallback_allowed=true`。
+- COMPANY / DEPARTMENT / TEAM Query 不允许普通 USER fallback。
+- Action 继续按 Runtime 确认策略进入 USER 或 TENANT 执行身份。
+
+### 11.2 Phase 2: Workspace Query Policy Sample
+
+目标：
+
+```text
+task_query / calendar_query
+-> scope
+-> identity decision
+-> capability availability
+```
+
+最小规则：
+
+- `scope=self`：BOT/TENANT first；如果 Bot 不支持个人私有资源，可进入 USER fallback。
+- `scope=company`：只能 BOT/TENANT；未接入时返回企业实时读取能力未授权/未接入。
+- `scope=user`：不得用当前用户 USER_TOKEN 代查目标用户。
+- `scope=department/team`：必须基于管理范围；V0 可先拒绝或返回未接入。
+
+验收：
+
+- “查看我的任务 / 日程”：走 BOT first，不默认 USER。
+- “查看全公司任务 / 日程”：若企业 Provider 未接入，明确返回未接入，不查本地认知数据替代。
+- “查看张三任务 / 日程”：不使用当前用户 token 代查。
+
+### 11.3 Phase 3: Result Filter Skeleton
+
+目标：
+
+```text
+Operational Data
++ Cognitive Data
+-> Policy Result Filter
+-> RuntimeResult
+```
+
+最小实现：
+
+- 先不做完整 ACL。
+- 在 RuntimeResult metadata 中保留 `policy_filter` 摘要。
+- 对每个 result section 标记：
+  - visible
+  - redacted_fields
+  - hidden_sections
+  - aggregation_only
+  - source_reference_visible
+- V0 先用于 Workspace 样板；Approval 后续复用。
+
+验收：
+
+- RuntimeResult 只能包含 Policy 允许展示的内容。
+- Snapshot / Evidence / Insight 不得比来源 Operational Object 更开放。
+- 管理聚合可以展示，但来源明细必须按权限裁剪。
+
+### 11.4 Phase 4: Test Guard
+
+新增 Contract Test：
+
+- Query identity BOT-first。
+- USER fallback 只允许 SELF personal resource。
+- company / department / team 不允许当前用户 USER_TOKEN fallback。
+- enterprise Provider 未接入时不得 fallback 到本地认知数据。
+- RuntimeResult 包含 `policy_filter` 摘要。
+
+暂不实现：
+
+- Policy UI。
+- ACL DSL。
+- Resource permission index。
+- Delegated admin policy。
+- Target user authorization flow。
+- Insight Store。

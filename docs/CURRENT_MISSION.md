@@ -7,70 +7,56 @@
 ## 当前阶段
 
 ```text
-Architecture Documentation Consolidation Phase
+Unified Policy Engine V0 Implementation Planning
 ```
 
 ## 当前目标
 
-合并、整理、冻结 V5 架构文档。
+把 Unified Policy Engine V0 从设计文档推进到最小可实施计划。
 
-当前架构总图冻结为：
+第一条样板选择 Workspace：
 
-```text
-Foundation
--> Core Engines
--> Interface
--> Observability
--> Business Domains
-```
-
-Core Engines：
-
-```text
-Command
-Policy
-Runtime
-Cognitive
-Capability Registry
-```
+- `task_query`
+- `calendar_query`
+- `task_create`
+- `calendar_create`
 
 ## 当前已完成
 
-- `V5_RUNTIME_CONSTITUTION.md` 明确唯一架构总图。
-- `V5_RUNTIME_CONSTITUTION.md` 明确 Architecture Index。
-- `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` 收口到 WorkEvent / Evidence / Snapshot / Insight。
-- `UNIFIED_POLICY_ENGINE_V0_DESIGN.md` 明确统一实时数据和认知数据权限。
-- `CAPABILITY_REGISTRY_MODEL.md` 明确 Registry 是能力元数据控制面，不属于 Diagnostics。
-- Command LLM Intent V0 已完成低置信引导式对话边界验证。
-- Task create 写入已收敛到 Runtime controlled write。
+- 架构文档已收口到 V5 五层总图。
+- Query identity 已冻结为 BOT/TENANT first。
+- USER_TOKEN 只允许作为 SELF personal resource 的受控 fallback。
+- company / department / team Query 不允许当前用户 USER_TOKEN 代查。
+- Task create / Calendar create 写入已走 Runtime controlled write。
+- Policy 实施计划已并入 `UNIFIED_POLICY_ENGINE_V0_DESIGN.md`。
 
 ## 当前禁止范围
 
-- 不新增 Engine。
-- 不新增 Foundation。
-- 不新增 Runtime Layer。
-- 不新增 Architecture V2。
 - 不新增 Policy V2。
 - 不新增数据库表。
-- 不重构 UI。
-- 不扩展业务能力。
+- 不实现完整 ACL DSL。
+- 不做 Policy UI。
+- 不接新的飞书 Provider。
+- 不用本地认知数据伪装企业实时读取。
+- 不允许 Query 默认走 USER_TOKEN。
 
 ## 当前验收标准
 
-- 新成员只看 `V5_RUNTIME_CONSTITUTION.md` 即可理解 V5 五层结构。
-- ACTIVE / FROZEN / ARCHIVED 文档状态明确。
-- 重复概念已归并到现有文档。
-- `CURRENT_MISSION.md` 保持短文档，只描述当前任务。
+- Policy Preflight 输出 subject / scope / identity decision 摘要。
+- Workspace Query 默认 BOT/TENANT first。
+- SELF Query 可标记 USER fallback，非 SELF Query 不允许当前用户 fallback。
+- 企业范围 Provider 未接入时返回“企业实时读取能力未授权/未接入”。
+- RuntimeResult 后续只输出 Policy 过滤后的混合结果。
 
 ## 下一步计划
 
 ```text
-Unified Policy Engine V0 Implementation Planning
+Workspace Policy Preflight Contract Test
 ```
 
-建议先选择 Workspace 作为第一条 Policy 打通样板：
+先补 Contract Test，再做最小代码：
 
-- Query identity：BOT/TENANT first，USER_TOKEN 只做受控个人 fallback。
-- Scope：SELF / USER / TEAM / DEPARTMENT / COMPANY。
-- Mixed Result Filter：Operational + Cognitive 统一裁剪。
-- RuntimeResult：只输出 Policy 过滤后的结果。
+- `policy_subject` metadata。
+- `policy_scope` metadata。
+- `identity_decision` metadata。
+- Workspace company query 未接入返回明确原因。
