@@ -1,5 +1,9 @@
 # Capability Registry Model
 
+架构归属：`V5_RUNTIME_CONSTITUTION.md` 中的 Foundation Layer。
+
+本文档不是独立架构总图。它只定义 Business Domain Taxonomy、Capability Registry、Skill Registry 与 Provider Binding。若本文与 `V5_RUNTIME_CONSTITUTION.md` 冲突，以 Constitution 为准。
+
 本文档冻结 V5 Capability Registry 设计。
 
 Domain 已冻结为：
@@ -15,6 +19,18 @@ Intelligence
 ```
 
 本阶段不再调整 Domain。
+
+## 0. Foundation Boundary
+
+Capability Registry 是 System Metadata Foundation，不属于 Runtime Engine，也不属于 Observability Layer。
+
+它被以下模块共同使用：
+
+- Command Engine：识别 capability 候选。
+- Policy Engine：读取风险等级、确认策略、授权要求。
+- Runtime Engine：查找 execution strategy 与 provider operation。
+- Interaction Layer：展示能力目录、能力清册和治理中心。
+- Observability Layer：读取 Registry Health 做诊断。
 
 ## 1. Registry Purpose
 

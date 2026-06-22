@@ -1,8 +1,33 @@
 # Unified Policy Engine V0 Design
 
+架构归属：`V5_RUNTIME_CONSTITUTION.md` 中的 Policy Engine。
+
+本文档不是独立架构总图。它只定义 Policy Engine V0 的合同和边界。若本文与 `V5_RUNTIME_CONSTITUTION.md` 冲突，以 Constitution 为准。
+
 本文档冻结 Unified Policy Engine V0 的最小合同。
 
 本阶段不实现完整权限中心，不新增数据库表，不改 Runtime 执行逻辑，不接 OAuth，不做复杂 ACL，也不做权限 UI。
+
+## 0. Engine Boundary
+
+Policy Engine 独立于 Runtime Engine。
+
+V0 可以仍在同一代码仓库、同一进程内实现，但职责必须独立：
+
+```text
+Runtime Engine = 状态和执行
+Policy Engine = 边界、身份、授权、确认、结果裁剪
+```
+
+Policy Engine 横切：
+
+- Operational Data。
+- WorkEvent。
+- Evidence。
+- Snapshot。
+- Insight。
+- Profile / Style / Preference。
+- Action。
 
 ## 1. Why Unified Policy
 

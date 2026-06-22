@@ -1,8 +1,34 @@
 # Enterprise Cognitive Foundation V1
 
+架构归属：`V5_RUNTIME_CONSTITUTION.md` 中的 Cognitive Engine。
+
+本文档不是独立架构总图。它只定义 Cognitive Engine V1 内部的认知数据模型。若本文与 `V5_RUNTIME_CONSTITUTION.md` 冲突，以 Constitution 为准。
+
 V1 冻结结论见 `docs/ECF_V1_FREEZE_REVIEW.md`。
 
 本文档定义 Digital Advisor 企业认知系统的最小闭环。Approval 是第一条样板链路，但本阶段目标不是做审批专属缓存，而是建立可复制到 Task / Meeting / Customer 的认知数据底座。
+
+## 0. Engine Boundary
+
+Cognitive Engine 负责：
+
+```text
+Operational Data
+-> WorkEvent
+-> Evidence
+-> Snapshot
+-> Insight
+```
+
+其中：
+
+- WorkEvent：事实层。
+- Evidence：判断依据层。
+- Snapshot：当前认知层。
+- Insight：建议层。
+- Profile / Style / Preference：用户风格、角色画像、偏好快照。
+
+Cognitive Engine 不负责执行动作。Action 继续归 Runtime Engine。
 
 ## 1. 目标
 
@@ -12,11 +38,16 @@ V1 冻结结论见 `docs/ECF_V1_FREEZE_REVIEW.md`。
 WorkEvent -> Snapshot -> MemoryCandidate
 ```
 
+V1 代码中的最小落地仍以三层为主；架构语义已扩展为 WorkEvent / Evidence / Snapshot / Insight。
+
 三层职责：
 
 - WorkEvent：事实层，记录已经发生或已被系统观察到的事实。
 - Snapshot：当前认知层，保存系统对某个业务对象的最新判断。
 - MemoryCandidate：长期记忆候选层，保存可能值得沉淀的组织模式。
+- Evidence：V1 可先体现在 Snapshot payload 或分析结果中，后续再独立模型化。
+- Insight：V1 可先作为 Snapshot 派生建议，不引入 Insight Engine 或 Insight Store。
+- Profile / Style / Preference：属于 Cognitive Engine，但 V1 只冻结边界，不实现画像引擎。
 
 Approval 查询必须从 Snapshot 读取 AI 判断。附件未完成或 Snapshot 未完成时，Bot / Card / Portal / SidePanel 只能展示“分析中”，不得展示不完整 AI 建议。
 
