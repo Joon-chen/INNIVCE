@@ -55,8 +55,10 @@ def build_policy_result_filter_payload(
         "resource_filters": list(resource_filters),
         "section_filters": section_filters,
         "redaction_applied": False,
-        "aggregation_only": any(decision["aggregation_only"] for decision in section_filters.values()),
-        "source_reference_visible": all(decision["source_reference_visible"] for decision in section_filters.values()),
+        "aggregation_only": any(decision["aggregation_only"] for decision in section_filters.values())
+        or any(decision["aggregation_only"] for decision in resource_filters),
+        "source_reference_visible": all(decision["source_reference_visible"] for decision in section_filters.values())
+        and all(decision["source_reference_visible"] for decision in resource_filters),
     }
 
 

@@ -107,6 +107,16 @@ Result Filter 裁剪：
 - 是否只能展示聚合。
 - 是否需要隐藏 reason / source reference。
 
+V0 冻结实现状态：
+
+- `RuntimeResult.metadata.policy_result_filter` 是 Interaction Layer 可见的唯一过滤决策摘要。
+- `RuntimeResult.items` 必须使用过滤后的 item 副本。
+- `RuntimeResult.actions` 必须基于过滤后的 item 生成，禁止隐藏 item 继续生成 action。
+- `resource_plane=cognitive` 是认知层判定的主依据，`resource_type` 只是细分类型。
+- Team / Department / Company scope 下的 Cognitive item 默认隐藏来源引用字段，只保留可展示结论。
+- Denied resource item 必须在进入 InteractionPayload 前移除。
+- Card / Portal / SidePanel 只消费过滤后的 RuntimeResult，不重新解释权限。
+
 ## 3. Core Contracts
 
 V0 合同先作为 service-level dataclass / dict 使用。后续可提升为正式 Policy Engine 模型。
@@ -195,6 +205,15 @@ Cognitive resource examples:
 - Evidence: approval expense evidence。
 - Snapshot: approval cognitive state。
 - Insight: approval risk recommendation。
+
+V0 字段约定：
+
+- Operational resource 必须标注 `resource_plane=operational`。
+- Cognitive resource 必须标注 `resource_plane=cognitive`。
+- Cognitive resource 必须尽量携带 `source_event_ids` / `source_object_type` / `source_object_id`。
+- Cognitive resource 的 `visibility_scope` 默认继承来源对象权限。
+- `inherited_visibility_scope` 用于说明认知资源继承的来源可见范围。
+- 细分类型可以是 `approval_snapshot`、`approval_evidence`、`customer_insight` 等；Policy 判断不能依赖固定枚举。
 
 ### 3.4 IdentityDecision
 

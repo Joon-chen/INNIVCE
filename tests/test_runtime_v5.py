@@ -2673,6 +2673,49 @@ def test_runtime_result_filter_hides_cognitive_source_references_for_company_sco
     assert payload["items"] == [{"resource_type": "insight", "summary": "高金额审批增多"}]
 
 
+def test_runtime_result_filter_uses_resource_plane_for_custom_cognitive_type() -> None:
+    result = build_runtime_result(
+        command_plan=_command_plan("approval_query", data_scope="company", sources=("approval_snapshot",)),
+        permission=PermissionDecision(
+            allowed=True,
+            requires_confirmation=False,
+            execution_identity="bot",
+            metadata={"allowed_resource_types": ["approval_snapshot"]},
+        ),
+        execution=None,
+        composed=ComposedAnswer(
+            answer="审批当前认知。",
+            result_context=ResultContext(
+                result_type="approval_snapshot",
+                count=1,
+                items=(
+                    {
+                        "resource_plane": "cognitive",
+                        "resource_type": "approval_snapshot",
+                        "summary": "需关注",
+                        "source_event_ids": ["event_1"],
+                        "source_object_id": "approval_1",
+                    },
+                ),
+            ),
+        ),
+    )
+
+    payload = runtime_result_payload(result)
+    policy_filter = payload["metadata"]["policy_result_filter"]
+
+    assert policy_filter["aggregation_only"] is True
+    assert policy_filter["source_reference_visible"] is False
+    assert policy_filter["resource_filters"][0]["aggregation_only"] is True
+    assert payload["items"] == [
+        {
+            "resource_plane": "cognitive",
+            "resource_type": "approval_snapshot",
+            "summary": "需关注",
+        }
+    ]
+
+
 def test_runtime_result_filter_removes_denied_mixed_resource_items() -> None:
     result = build_runtime_result(
         command_plan=_command_plan("task_query", result_type="task_query", sources=("task", "insight")),
