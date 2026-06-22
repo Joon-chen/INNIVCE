@@ -267,6 +267,45 @@ def test_runtime_v5_command_llm_low_confidence_with_missing_params_guides_clarif
     assert validated.entities["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
 
 
+def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypatch) -> None:
+    provider_called = False
+
+    def fake_candidate(**kwargs):
+        return LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            missing_params=("scope", "time_range"),
+            clarification="你想看哪个范围、哪个时间段的任务？",
+            confidence=0.52,
+            canonical_question="查看任务",
+        )
+
+    class TaskProvider:
+        source = "task"
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            nonlocal provider_called
+            provider_called = True
+            return ProviderResult(source="task", status="success", result_type="task_list", count=1)
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    result = run_runtime_v5(
+        context=_context("帮我看看工作安排"),
+        providers={"task": TaskProvider()},
+    )
+
+    assert provider_called is False
+    assert result.execution is None
+    assert result.intent.intent == "task_query"
+    assert result.intent.needs_clarification is True
+    assert result.composed.answer == "你想看哪个范围、哪个时间段的任务？"
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.metadata["execution_status"] == "clarification"
+    assert result.composed.result_context.metadata["missing_params"] == ["scope", "time_range"]
+
+
 def test_runtime_v5_command_llm_validator_does_not_escalate_query_to_action() -> None:
     rule_intent = IntentResult(
         question_type="query",
