@@ -1081,13 +1081,44 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 keyword = str(request.params.get("keyword") or "").strip()
                 if keyword:
                     params["query"] = keyword
-            tenant_result = self._execute_task_query_with_tenant_token(
-                request,
-                operation=request.operation,
-                params=params,
-            )
-            if tenant_result is not None:
-                return tenant_result
+            query_path = _operational_query_read_path(request, source="task")
+            if query_path == "self_user_token_required":
+                user_fallback = self._execute_task_query_with_user_fallback(
+                    request,
+                    operation=request.operation,
+                    params=params,
+                )
+                if user_fallback is not None:
+                    return user_fallback
+                boundary = _enterprise_realtime_boundary_result(
+                    request,
+                    source="task",
+                    result_type="task_list",
+                    operation=request.operation,
+                    current_provider="task_qa",
+                    user_fallback_allowed=True,
+                )
+                if boundary is not None:
+                    return boundary
+            elif query_path == "tenant_query_not_integrated":
+                boundary = _enterprise_realtime_boundary_result(
+                    request,
+                    source="task",
+                    result_type="task_list",
+                    operation=request.operation,
+                    current_provider="task_qa",
+                    user_fallback_allowed=False,
+                )
+                if boundary is not None:
+                    return boundary
+            else:
+                tenant_result = self._execute_task_query_with_tenant_token(
+                    request,
+                    operation=request.operation,
+                    params=params,
+                )
+                if tenant_result is not None:
+                    return tenant_result
             user_fallback = self._execute_task_query_with_user_fallback(
                 request,
                 operation=request.operation,
@@ -1648,9 +1679,36 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         if tool_name is None:
             return _tool_not_installed_result("calendar", request.operation)
         if request.operation == "list_events":
-            tenant_result = self._execute_calendar_query_with_tenant_token(request)
-            if tenant_result is not None:
-                return tenant_result
+            query_path = _operational_query_read_path(request, source="calendar")
+            if query_path == "self_user_token_required":
+                user_fallback = self._execute_calendar_query_with_user_fallback(request)
+                if user_fallback is not None:
+                    return user_fallback
+                boundary = _enterprise_realtime_boundary_result(
+                    request,
+                    source="calendar",
+                    result_type="calendar_event_list",
+                    operation=request.operation,
+                    current_provider="calendar_qa",
+                    user_fallback_allowed=True,
+                )
+                if boundary is not None:
+                    return boundary
+            elif query_path == "tenant_query_not_integrated":
+                boundary = _enterprise_realtime_boundary_result(
+                    request,
+                    source="calendar",
+                    result_type="calendar_event_list",
+                    operation=request.operation,
+                    current_provider="calendar_qa",
+                    user_fallback_allowed=False,
+                )
+                if boundary is not None:
+                    return boundary
+            else:
+                tenant_result = self._execute_calendar_query_with_tenant_token(request)
+                if tenant_result is not None:
+                    return tenant_result
             user_fallback = self._execute_calendar_query_with_user_fallback(request)
             if user_fallback is not None:
                 return user_fallback
@@ -3383,6 +3441,7 @@ def _enterprise_realtime_boundary_result(
             "workevent_as_realtime_source": False,
             "extracted_item_as_realtime_source": False,
             "legacy_cli_fallback_used": False,
+            "fallback_used": False,
             "user_fallback_allowed": effective_user_fallback_allowed,
             "recommended_next_step": (
                 f"接入 {_provider_label(source)} 的 Bot/Tenant 实时读取 Provider；"
@@ -3395,6 +3454,43 @@ def _enterprise_realtime_boundary_result(
         ),
         error="enterprise_realtime_not_integrated",
     )
+
+
+def _operational_query_read_path(request: ProviderRequest, *, source: str) -> str:
+    """Return the realtime read path for an operational source and enterprise scope.
+
+    The policy answers semantic capability, not transport availability. A Bot/Tenant
+    API that can return a syntactically valid empty list is still not usable when it
+    does not represent the requested enterprise scope.
+    """
+
+    contract = request.execution_identity_contract.payload()
+    if contract.get("credential_mode") != "TENANT_TOKEN" or contract.get("actor_identity") != "BOT":
+        return "tenant_query_supported"
+
+    scope = _resource_scope_for_request(request)
+    workspace_primary_resources = {"task", "calendar"}
+    if source in workspace_primary_resources:
+        if scope == "SELF":
+            return "self_user_token_required"
+        if scope in {"USER", "TEAM", "DEPARTMENT", "COMPANY"}:
+            return "tenant_query_not_integrated"
+    return "tenant_query_supported"
+
+
+def _resource_scope_for_request(request: ProviderRequest) -> str:
+    normalized = str(request.intent.data_scope or "").strip().lower()
+    if normalized == "self":
+        return "SELF"
+    if normalized in {"person", "user"}:
+        return "USER"
+    if normalized == "department":
+        return "DEPARTMENT"
+    if normalized in {"project", "team"}:
+        return "TEAM"
+    if normalized in {"company", "organization"}:
+        return "COMPANY"
+    return normalized.upper() if normalized else "SELF"
 
 
 def _allows_self_user_query_fallback(request: ProviderRequest) -> bool:

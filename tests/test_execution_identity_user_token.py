@@ -193,13 +193,20 @@ def test_attendance_query_bot_first_does_not_use_user_cli():
     assert result.metadata["legacy_cli_fallback_used"] is False
 
 
-def test_task_query_uses_tenant_provider_before_authorized_self_user_fallback(monkeypatch):
+def test_task_query_uses_user_token_when_self_task_is_not_tenant_readable(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
     calls = []
 
+    class TokenResolution:
+        user_access_token = "user-token"
+        authorization_status = "AUTHORIZED"
+        account_id = "account-1"
+        error = ""
+        authorized = True
+
     async def fake_resolve_user_token(*_args, **_kwargs):
-        raise AssertionError("tenant-readable task query must not attempt USER fallback")
+        return TokenResolution()
 
     class FakeTaskService:
         def __init__(self, app_config):
@@ -207,6 +214,8 @@ def test_task_query_uses_tenant_provider_before_authorized_self_user_fallback(mo
 
         async def list_tasks(self, **kwargs):
             calls.append(kwargs)
+            if "user_access_token" not in kwargs:
+                raise AssertionError("self task query must not use tenant empty-list semantics")
             return {"code": 0, "data": {"items": [{"guid": "task-guid-1", "summary": "跟进客户"}]}}
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
@@ -214,7 +223,7 @@ def test_task_query_uses_tenant_provider_before_authorized_self_user_fallback(mo
 
     class Provider(FeishuTaskProvider):
         def _execute_tool(self, *_args, **_kwargs):
-            raise AssertionError("tenant-readable task query must not use CLI")
+            raise AssertionError("self task query must not use CLI")
 
     result = Provider(db=_FakeDb(app_config=app_config)).execute(
         _bot_query_request(company_id=company_id, source="task", operation="list_my_tasks", strategy="task_query")
@@ -223,14 +232,14 @@ def test_task_query_uses_tenant_provider_before_authorized_self_user_fallback(mo
     assert result.status == "success"
     assert result.result_type == "task_list"
     assert result.items[0]["title"] == "跟进客户"
-    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
-    assert result.metadata["actor_identity"] == "BOT"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime"
-    assert result.metadata["fallback_used"] is False
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
+    assert result.metadata["actor_identity"] == "USER"
+    assert result.metadata["provider_boundary"] == "user_token_fallback_used"
+    assert result.metadata["fallback_used"] is True
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["workevent_as_realtime_source"] is False
     assert result.metadata["extracted_item_as_realtime_source"] is False
-    assert "user_access_token" not in calls[0]
+    assert calls[0]["user_access_token"] == "user-token"
 
 
 def test_task_query_authorized_self_user_fallback_executes_when_tenant_read_fails(monkeypatch):
@@ -276,17 +285,23 @@ def test_task_query_authorized_self_user_fallback_executes_when_tenant_read_fail
     assert result.metadata["fallback_used"] is True
     assert result.metadata["fallback_scope"] == "SELF"
     assert result.metadata["cannot_escalate_to_company"] is True
-    assert "user_access_token" not in calls[0]
-    assert calls[1]["user_access_token"] == "user-token"
+    assert calls[0]["user_access_token"] == "user-token"
 
 
-def test_calendar_query_uses_tenant_provider_before_authorized_self_user_fallback(monkeypatch):
+def test_calendar_query_uses_user_token_when_self_calendar_is_not_tenant_readable(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
     calls = []
 
+    class TokenResolution:
+        user_access_token = "user-token"
+        authorization_status = "AUTHORIZED"
+        account_id = "account-1"
+        error = ""
+        authorized = True
+
     async def fake_resolve_user_token(*_args, **_kwargs):
-        raise AssertionError("tenant-readable calendar query must not attempt USER fallback")
+        return TokenResolution()
 
     class FakeCalendarService:
         def __init__(self, app_config):
@@ -294,6 +309,8 @@ def test_calendar_query_uses_tenant_provider_before_authorized_self_user_fallbac
 
         async def list_primary_events(self, **kwargs):
             calls.append(kwargs)
+            if "user_access_token" not in kwargs:
+                raise AssertionError("self calendar query must not use tenant primary-calendar semantics")
             return {"code": 0, "data": {"items": [{"event_id": "event-1", "summary": "会议"}]}}
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
@@ -301,7 +318,7 @@ def test_calendar_query_uses_tenant_provider_before_authorized_self_user_fallbac
 
     class Provider(FeishuCalendarProvider):
         def _execute_tool(self, *_args, **_kwargs):
-            raise AssertionError("tenant-readable calendar query must not use CLI")
+            raise AssertionError("self calendar query must not use CLI")
 
     result = Provider(db=_FakeDb(app_config=app_config)).execute(
         _bot_query_request(company_id=company_id, source="calendar", operation="list_events", strategy="calendar_query")
@@ -310,14 +327,14 @@ def test_calendar_query_uses_tenant_provider_before_authorized_self_user_fallbac
     assert result.status == "success"
     assert result.result_type == "calendar_event_list"
     assert result.items[0]["title"] == "会议"
-    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
-    assert result.metadata["actor_identity"] == "BOT"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime"
-    assert result.metadata["fallback_used"] is False
+    assert result.metadata["credential_mode"] == "USER_TOKEN"
+    assert result.metadata["actor_identity"] == "USER"
+    assert result.metadata["provider_boundary"] == "user_token_fallback_used"
+    assert result.metadata["fallback_used"] is True
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["workevent_as_realtime_source"] is False
     assert result.metadata["extracted_item_as_realtime_source"] is False
-    assert "user_access_token" not in calls[0]
+    assert calls[0]["user_access_token"] == "user-token"
 
 
 def test_calendar_query_authorized_self_user_fallback_executes_when_tenant_read_fails(monkeypatch):
@@ -363,8 +380,7 @@ def test_calendar_query_authorized_self_user_fallback_executes_when_tenant_read_
     assert result.metadata["fallback_used"] is True
     assert result.metadata["fallback_scope"] == "SELF"
     assert result.metadata["cannot_escalate_to_company"] is True
-    assert "user_access_token" not in calls[0]
-    assert calls[1]["user_access_token"] == "user-token"
+    assert calls[0]["user_access_token"] == "user-token"
 
 
 def test_company_task_query_does_not_use_user_fallback_even_when_authorized(monkeypatch):
@@ -395,8 +411,8 @@ def test_company_task_query_does_not_use_user_fallback_even_when_authorized(monk
         )
     )
 
-    assert result.status == "error"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_read_failed"
+    assert result.status == "denied"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
     assert result.metadata["credential_mode"] == "TENANT_TOKEN"
     assert result.metadata["fallback_used"] is False
 
@@ -794,8 +810,8 @@ def test_task_company_query_passes_scope_filter_without_owner_filter(monkeypatch
     provider = ToolTaskProvider(db=_FakeDb(app_config=app_config))
     result = provider.execute(_request(company_id=company_id, operation="list_my_tasks", data_scope="company"))
 
-    assert result.status == "error"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_read_failed"
+    assert result.status == "denied"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
     assert result.metadata["credential_mode"] == "TENANT_TOKEN"
     assert result.metadata["fallback_used"] is False
     assert result.metadata["legacy_cli_fallback_used"] is False
