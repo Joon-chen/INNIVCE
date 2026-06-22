@@ -7,56 +7,60 @@
 ## 当前阶段
 
 ```text
-Unified Policy Engine V0 Implementation Planning
+Architecture Documentation Consolidation Phase
 ```
 
 ## 当前目标
 
-把 Unified Policy Engine V0 从设计文档推进到最小可实施计划。
+合并、整理、冻结 V5 架构文档入口。
 
-第一条样板选择 Workspace：
+新成员只看 `V5_RUNTIME_CONSTITUTION.md`，应能理解：
 
-- `task_query`
-- `calendar_query`
-- `task_create`
-- `calendar_create`
+- Foundation
+- Core Engines
+- Interface
+- Observability
+- Business Domains
 
 ## 当前已完成
 
-- 架构文档已收口到 V5 五层总图。
-- Query identity 已冻结为 BOT/TENANT first。
-- USER_TOKEN 只允许作为 SELF personal resource 的受控 fallback。
-- company / department / team Query 不允许当前用户 USER_TOKEN 代查。
-- Task create / Calendar create 写入已走 Runtime controlled write。
-- Policy 实施计划已并入 `UNIFIED_POLICY_ENGINE_V0_DESIGN.md`。
+- V5 五层结构已冻结。
+- Business Domain 已冻结为 People / Communication / Workspace / Process / Knowledge / Business / Intelligence。
+- Capability Registry 归入 Foundation。
+- Command / Policy / Runtime / Cognitive 归入 Core Engines。
+- Profile / Style / Preference 归入 Cognitive Engine。
+- Policy 独立为 Engine，V0 可同仓同进程实现。
+- Command LLM Intent 已定义为结构化候选 + Validator。
+- 低置信 LLM 候选已支持引导式 clarification payload。
 
 ## 当前禁止范围
 
+- 不新增 Engine。
+- 不新增 Foundation。
+- 不新增 Runtime Layer。
+- 不新增 Architecture V2。
 - 不新增 Policy V2。
-- 不新增数据库表。
-- 不实现完整 ACL DSL。
-- 不做 Policy UI。
-- 不接新的飞书 Provider。
-- 不用本地认知数据伪装企业实时读取。
-- 不允许 Query 默认走 USER_TOKEN。
+- 不新增设计文档。
+- 不改 Runtime 执行业务逻辑。
+- 不做 UI Migration。
+- 不接新 Provider。
 
 ## 当前验收标准
 
-- Policy Preflight 输出 subject / scope / identity decision 摘要。
-- Workspace Query 默认 BOT/TENANT first。
-- SELF Query 可标记 USER fallback，非 SELF Query 不允许当前用户 fallback。
-- 企业范围 Provider 未接入时返回“企业实时读取能力未授权/未接入”。
-- RuntimeResult 后续只输出 Policy 过滤后的混合结果。
+- `V5_RUNTIME_CONSTITUTION.md` 是唯一架构总图。
+- Architecture Index 标记 ACTIVE / FROZEN / ARCHIVED。
+- 文档归档清单明确哪些文档只作历史参考。
+- 重复概念清单明确旧概念的 canonical concept。
+- `CURRENT_MISSION.md` 保持短文档，只回答当前任务。
 
 ## 下一步计划
 
 ```text
-Workspace Policy Preflight Contract Test
+Workspace Policy Result Filter Skeleton
 ```
 
-先补 Contract Test，再做最小代码：
+建议下一步只做最小合同验证：
 
-- `policy_subject` metadata。
-- `policy_scope` metadata。
-- `identity_decision` metadata。
-- Workspace company query 未接入返回明确原因。
+- Policy Preflight 已给出 subject / scope / identity decision。
+- Result Filter 在 RuntimeResult 生成前裁剪 Operational + Cognitive 混合结果。
+- 先用 Workspace Query 做样板，不做完整 ACL 引擎。

@@ -188,6 +188,14 @@ Command LLM Intent V0 规则：
 - 低置信 LLM 候选只有在给出 missing_params / clarification 时，才能进入引导式对话。
 - 未知 intent、低置信且不可追问候选、从 query 升级为 action 的候选必须丢弃。
 
+Command Guided Clarification V0：
+
+- 低置信但可追问的候选必须返回 clarification Result，不得执行 Provider。
+- RuntimeResult / ResultContext 必须保留 `clarification_prompt`。
+- 可选引导项进入 `clarification_options`，例如 scope 可给出 self / department / company，time_range 可给出 today / this_week / this_month。
+- 引导选项只是用户输入建议，不代表 Policy 已授权，也不代表 Runtime 已执行。
+- Interaction 可以渲染这些选项，但不能自己解释为业务状态或绕过 Command / Policy。
+
 标准 Plan 最小结构：
 
 ```json
@@ -420,7 +428,7 @@ result_id / task_id
 confirmation token when needed
 ```
 
-### 7.2 RuntimeResult
+### 8.2 RuntimeResult
 
 Runtime 输出给交互层的标准 Result：
 
@@ -439,7 +447,7 @@ Runtime 输出给交互层的标准 Result：
 
 InteractionPayload 只能由 InteractionPayload Builder 从 RuntimeResult 转换而来。
 
-### 7.3 WorkEvent
+### 8.3 WorkEvent
 
 WorkEvent 是 append-only 事实层，必须携带 company_id。
 
@@ -467,10 +475,17 @@ created_at
 | `UNIFIED_POLICY_ENGINE_V0_DESIGN.md` | ACTIVE | Policy Engine V0 |
 | `CURRENT_MISSION.md` | ACTIVE | 当前任务 |
 | `ENTERPRISE_SCOPE_MODEL_REVIEW.md` | FROZEN | Scope Model 评审记录 |
-| `TASK_ENTERPRISE_PROVIDER_FEASIBILITY_AUDIT.md` | FROZEN | Task 企业读取可行性审计 |
-| `TASK_RUNTIME_SAMPLE_*` | FROZEN | Task Runtime 样板历史 |
+| `EXECUTION_IDENTITY_AUDIT.md` | FROZEN | BOT / USER / TENANT / CLI 身份审计 |
+| `EXECUTION_IDENTITY_CONTRACT_DESIGN.md` | FROZEN | 执行身份合同设计 |
+| `TASK_RUNTIME_SAMPLE_*` | FROZEN | Task Runtime 样板记录 |
 | `APPROVAL_RUNTIME_SAMPLE.md` | FROZEN | Approval Runtime 样板 |
+| `APPROVAL_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md` | FROZEN | Approval 样板验收记录 |
 | `ECF_V1_FREEZE_REVIEW.md` | FROZEN | Cognitive V1 冻结评审 |
+| `SNAPSHOT_TRIGGER_MATRIX.md` | FROZEN | Snapshot 生成节奏规则 |
+| `REGISTRY_*` / `CAPABILITY_REGISTRY_*` review docs | FROZEN | Registry 设计和迁移评审记录 |
+| `ENTERPRISE_AI_OS_V1.md` | ARCHIVED | 旧企业 AI OS 草案，已被本文吸收 |
+| `V5_RUNTIME_ARCHITECTURE.md` | ARCHIVED | 旧 Runtime 架构草案，已被本文吸收 |
+| `V5_CAPABILITY_TAXONOMY.md` | ARCHIVED | 旧能力域分类草案，已被 Capability Registry 吸收 |
 | `docs/history/*` | ARCHIVED | 历史阶段归档 |
 
 ## 10. Documentation Archive List
@@ -478,14 +493,31 @@ created_at
 以下文档只作为历史或样板参考，不再作为最高级架构入口：
 
 - `docs/history/*`
+- `ENTERPRISE_AI_OS_V1.md`
+- `V5_RUNTIME_ARCHITECTURE.md`
+- `V5_CAPABILITY_TAXONOMY.md`
+- `CAPABILITY_REGISTRY_PAYLOAD_DESIGN.md`
+- `CAPABILITY_REGISTRY_READ_API_REVIEW.md`
+- `CAPABILITY_REGISTRY_SHADOW_VERIFICATION.md`
+- `REGISTRY_FALLBACK_DEPRECATION_REVIEW.md`
+- `REGISTRY_FALLBACK_OBSERVATION.md`
+- `REGISTRY_UI_FREEZE_REVIEW.md`
+- `SKILL_REGISTRY_CLEANUP_PLAN.md`
 - `TASK_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md`
 - `TASK_RUNTIME_SAMPLE_CONTRACT_REVIEW.md`
 - `TASK_RUNTIME_SAMPLE_FEISHU_MANUAL_ACCEPTANCE.md`
 - `TASK_COGNITIVE_SAMPLE_DESIGN.md`
 - `SECOND_BUSINESS_SAMPLE_SELECTION.md`
+- `APPROVAL_RUNTIME_SAMPLE_ACCEPTANCE_REVIEW.md`
+- `APPROVAL_INSIGHT_SAMPLE.md`
+- `INTERACTION_RENDERER_GENERALIZATION_AUDIT.md`
 - `ECF_V1_FREEZE_REVIEW.md`
-- `WORK_EVENT_V0_DESIGN.md`
 - `SNAPSHOT_TRIGGER_MATRIX.md`
+- `INSIGHT_CONTRACT_V0.md`
+- `INSIGHT_RENDERER_BOUNDARY.md`
+- `OA_INTELLIGENCE_LOOP_DESIGN.md`
+- `USER_RESOLUTION_AUDIT.md`
+- `PAGE_RESPONSIBILITY_AUDIT.md`
 
 若这些文档与本文冲突，以本文为准。
 
@@ -497,11 +529,15 @@ created_at
 | Policy Layer / Policy & Context Layer | Policy Engine |
 | Agent Runtime / Runtime Layer | Runtime Engine |
 | Memory / WorkEvent / Snapshot scattered docs | Cognitive Engine |
+| Cognitive Foundation | Cognitive Engine |
+| Profile / Style / Preference as separate subsystem | Cognitive Engine |
 | Tool Layer / Provider Layer as architecture layer | Provider / Tool Boundary |
 | Card Policy | Interaction render-only contract |
 | Diagnostics as business governance | Observability Layer |
 | Feishu product modules | Business Domain + Provider Binding |
 | Approval / Task as top-level module | Process / Workspace capabilities |
+| Capability Catalog / Skill Registry as runtime pages | Capability Registry consumers |
+| LLM agent directly choosing tools | Command LLM Intent Candidate + Validator |
 
 ## 12. Freeze Rule
 
