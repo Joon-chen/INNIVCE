@@ -239,6 +239,15 @@ USER_TOKEN 只能作为受控 fallback 或代表当前用户执行动作的身�
 
 如果某个企业范围 Query 尚未接入 BOT/TENANT 主路径，系统必须明确返回“企业实时读取能力未授权/未接入”。不得偷偷改用当前用户 USER_TOKEN、本地认知数据或缓存伪装为企业实时读取结果。
 
+Workspace 查询补充规则：
+
+- `SELF` operational detail 可以在 Bot/Tenant 不具备个人资源语义时，显式进入 USER_TOKEN fallback。
+- `USER` / `TEAM` / `DEPARTMENT` / `COMPANY` operational detail 不得默认使用当前用户 USER_TOKEN 代查。
+- 员工授权产生的 Workspace Cognitive Projection 不是该员工实时明细的授权副本。
+- 部门 / 公司管理查询可以读取认知聚合，例如任务数、逾期数、冲突数、负荷区间。
+- 认知聚合不得比来源对象权限更开放；明细展示必须重新经过 Result Filter。
+- User Token 只能证明系统可观察某个用户的个人资源，不能成为其他人访问该用户明细的依据。
+
 ### 3.5 PolicyDecision
 
 PolicyDecision 是 Preflight 的输出。

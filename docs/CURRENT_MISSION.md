@@ -7,14 +7,14 @@
 ## 当前阶段
 
 ```text
-Policy Filter Contract Freeze Review
+Workspace Cognitive Projection Contract
 ```
 
 ## 当前目标
 
-冻结 Unified Policy Result Filter V0 合同。
+冻结 Workspace 实时数据与认知数据的边界。
 
-确认 Operational Data + Cognitive Data 混合结果在进入 Interaction 前统一裁剪。
+个人任务 / 日程明细仍归 Operational Data；部门 / 公司管理视角优先读取 Cognitive Projection 聚合。
 
 ## 当前已完成
 
@@ -29,6 +29,8 @@ Policy Filter Contract Freeze Review
 - Policy Result Filter 已接入 RuntimeResult。
 - Workspace operational items 已标注 PolicyResource 元数据。
 - Cognitive items 已标注 `resource_plane=cognitive` 和继承可见范围。
+- Workspace Query 已阻断错误的 Tenant 空结果语义。
+- SELF Workspace Query 已改为显式 USER_TOKEN fallback。
 
 ## 当前禁止范围
 
@@ -42,24 +44,25 @@ Policy Filter Contract Freeze Review
 - 不接新 Provider。
 - 不做完整 ACL Engine。
 - 不新增权限数据库表。
+- 不同步完整个人任务 / 日程明细到 WorkEvent。
+- 不用 Cognitive Projection 冒充 Feishu realtime data。
 
 ## 当前验收标准
 
-- Policy Preflight 输出 subject / scope / identity decision。
-- RuntimeResult 生成前执行 Result Filter。
-- RuntimeResult items 是过滤后的副本。
-- RuntimeResult actions 基于过滤后的 items 生成。
-- Cognitive item 在 company / department / team scope 下隐藏来源引用。
-- Denied resource item 不进入 InteractionPayload。
+- Workspace Cognitive Projection 只保存允许字段。
+- 投影明确标记 `operational_detail_stored=false`。
+- 个人明细字段不得进入 WorkEvent。
+- 部门 / 公司查询读取认知聚合时必须经过 Policy Result Filter。
+- USER_TOKEN 只作为观察/执行身份，不作为越权依据。
 
 ## 下一步计划
 
 ```text
-Workspace Query Provider Completion
+Workspace Cognitive Sync Acceptance
 ```
 
 建议下一步：
 
-- 补 Workspace 的 Bot/Tenant 实时查询 Provider 能力评估。
-- 明确哪些 Task / Calendar 查询可由 Bot/Tenant 读取。
-- 对读不到的范围返回能力未接入，而不是走 User 或本地认知代查。
+- 用 Task / Calendar 授权数据生成 Workspace Cognitive Projection。
+- 验证部门 / 公司可读聚合，不可读无权限明细。
+- 接入 Workspace Evidence / Snapshot / Insight 前先完成投影验收。

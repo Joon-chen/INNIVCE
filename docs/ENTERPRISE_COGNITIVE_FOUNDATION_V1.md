@@ -323,7 +323,90 @@ ensure_approval_snapshot(...)
 - Approval 专属 Snapshot 表。
 - Bot / Card / Portal 直接实时生成 AI 建议。
 
-## 9. Acceptance Criteria
+## 9. Workspace Cognitive Projection V0
+
+Workspace 包含 Task / Calendar / Meeting / Project 等执行协作对象。
+
+Workspace 认知同步的目标不是复制飞书个人任务和个人日历明细，而是沉淀可被 Policy 安全聚合的企业认知原料。
+
+```text
+Feishu personal operational data
+-> User authorization / event observation
+-> Workspace Cognitive Projection
+-> WorkEvent
+-> Evidence / Snapshot / Insight
+```
+
+V0 投影原则：
+
+- Operational realtime detail 仍归 Feishu，不归 WorkEvent。
+- WorkEvent 只保存认知投影，不保存完整任务描述、会议详情、附件正文、参会人私密列表。
+- 个人明细查询仍必须遵守来源对象权限。
+- 部门 / 公司查询优先读取聚合认知，不假装读取了每个人的实时明细。
+- Snapshot / Insight 可以输出负荷、逾期、冲突、风险趋势，但不得暴露无权限个人明细。
+
+Task 允许进入认知投影的字段：
+
+```text
+task_id
+task_guid
+title
+status
+priority
+due_at
+completed_at
+updated_at
+owner_user_id
+owner_open_id
+owner_department_id
+assignee_count
+follower_count
+is_overdue
+```
+
+Calendar 允许进入认知投影的字段：
+
+```text
+event_id
+calendar_id
+title
+status
+start_at
+end_at
+updated_at
+owner_user_id
+owner_open_id
+owner_department_id
+attendee_count
+is_conflict
+is_busy
+```
+
+明确禁止进入 Workspace 认知投影的字段：
+
+- 完整任务描述。
+- 完整会议描述。
+- 附件正文。
+- 完整参会人清单。
+- 聊天记录原文。
+- 个人备注。
+- 任何源系统未授权给当前查询 scope 的明细。
+
+Workspace 管理视角可回答：
+
+- 每个人当前任务数量。
+- 部门逾期任务数量。
+- 公司任务风险趋势。
+- 日程冲突数量。
+- 团队负荷区间。
+
+Workspace 管理视角默认不可回答：
+
+- 某员工每条任务的完整内容。
+- 某员工每个会议的完整参会人与会议描述。
+- 未经授权的个人日历明细。
+
+## 10. Acceptance Criteria
 
 Approval 查询不再基于附件未完成时的实时分析。
 

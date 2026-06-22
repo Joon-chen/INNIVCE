@@ -6,7 +6,9 @@ from app.models.entities import Snapshot, WorkEvent
 from app.services.approval_snapshot_builder import build_approval_snapshot_from_work_event
 from app.services.cognitive_foundation import (
     MEMORY_CANDIDATE_STATUS,
+    append_workspace_cognitive_event,
     append_cognitive_work_event,
+    build_workspace_cognitive_projection,
     get_completed_snapshot,
     upsert_snapshot,
     write_memory_candidate,
@@ -68,6 +70,69 @@ def test_append_cognitive_work_event_is_append_only() -> None:
     assert first.object_id == "approval-1"
     assert first.actor == "ou_user"
     assert first.vector_status == "skipped"
+
+
+def test_workspace_cognitive_projection_keeps_aggregate_fields_not_raw_detail() -> None:
+    projection = build_workspace_cognitive_projection(
+        object_type="task",
+        raw_payload={
+            "task_id": "task-1",
+            "title": "出差西安",
+            "status": "todo",
+            "due_at": "2026-06-24T10:00:00+08:00",
+            "description": "客户和报价细节",
+            "attachments": [{"name": "报价单.pdf"}],
+        },
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+
+    assert projection["operational_detail_stored"] is False
+    assert projection["raw_detail_allowed"] is False
+    assert projection["cognitive_fields"]["task_id"] == "task-1"
+    assert projection["cognitive_fields"]["title"] == "出差西安"
+    assert projection["cognitive_fields"]["owner_user_id"] == "user-1"
+    assert "description" not in projection["cognitive_fields"]
+    assert "attachments" not in projection["cognitive_fields"]
+    assert projection["redacted_fields"] == ["attachments", "description"]
+    assert "overdue_count" in projection["aggregate_surfaces"]["department"]
+
+
+def test_append_workspace_cognitive_event_inherits_owner_visibility() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+
+    event = append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="calendar",
+        object_id="event-1",
+        source="feishu_user_sync",
+        actor="ou_1",
+        raw_payload={
+            "event_id": "event-1",
+            "title": "销售会",
+            "start_at": "2026-06-23T14:00:00+08:00",
+            "end_at": "2026-06-23T15:00:00+08:00",
+            "description": "客户细节",
+            "attendees": ["ou_2", "ou_3"],
+        },
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+        visibility_scope="self",
+    )
+
+    assert db.added == [event]
+    assert event.event_type == "workspace_calendar_observed"
+    assert event.visibility_scope == "self"
+    assert event.data_classification == "workspace_cognitive"
+    assert event.allowed_user_ids == ["user-1"]
+    assert event.allowed_departments == ["dept-1"]
+    assert event.payload["cognitive_fields"]["event_id"] == "event-1"
+    assert "description" not in event.payload["cognitive_fields"]
+    assert "attendees" in event.payload["redacted_fields"]
 
 
 def test_get_completed_snapshot_hides_incomplete_snapshot() -> None:
