@@ -17,10 +17,17 @@ class FeishuTaskService:
         *,
         page_size: int = 50,
         page_token: str | None = None,
+        user_access_token: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"page_size": min(max(page_size, 1), 100)}
         if page_token:
             params["page_token"] = page_token
+        if user_access_token:
+            return await self.client.api_get_user(
+                "/open-apis/task/v2/tasks",
+                user_access_token=user_access_token,
+                params=params,
+            )
         return await self.client.api_get("/open-apis/task/v2/tasks", params=params)
 
     async def create_task(
