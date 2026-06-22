@@ -15,8 +15,8 @@ from app.services.tools.providers.lark_cli import LARK_CLI_EXECUTION_CONTRACT
 from app.services.tools.providers.lark_cli import run_lark_cli_json as _run_lark_cli_json_base
 from app.services.tools.providers.lark_cli import run_lark_cli_json_loose as _run_lark_cli_json_loose_base
 from app.services.tools.providers.lark_cli import run_lark_cli_text as _run_lark_cli_text_base
-from sqlalchemy import select
-from app.models.entities import Account
+from sqlalchemy import or_, select
+from app.models.entities import Account, ExtractedItem, WorkEvent
 
 
 BITABLE_READONLY_FIELD_TYPES = {
@@ -65,6 +65,10 @@ def execute_feishu_mcp_tool(context: ToolContext, request: ToolRequest) -> str:
             if request.tool_name == "feishu_approval_task_query":
                 return _with_cli_profile(request, lambda: _execute_approval_task_query_with_context(request, context))
             return _with_cli_profile(request, lambda: _execute_feishu_mail_tool(request, context))
+        if request.tool_name == "task_qa" and context is not None and isinstance(request.params.get("scope_filter"), dict):
+            return _execute_enterprise_task_query_with_context(request, context)
+        if request.tool_name == "calendar_qa" and context is not None and isinstance(request.params.get("scope_filter"), dict):
+            return _execute_enterprise_calendar_query_with_context(request, context)
         return _with_cli_profile(request, lambda: handler(request))
     return execute_feishu_mcp_realtime_tool(context, request)
 
@@ -417,6 +421,83 @@ def _execute_cli_task_read(request: ToolRequest) -> str:
     if titles:
         return f"飞书任务已通过 CLI 读取 {len(items)} 条：{', '.join(titles)}"
     return f"飞书任务已通过 CLI 读取 {len(items)} 条。"
+
+
+def _execute_enterprise_task_query_with_context(request: ToolRequest, context: ToolContext) -> str:
+    if context.db is None:
+        return _execute_cli_task_read(request)
+    params = request.params
+    scope_filter = params.get("scope_filter") if isinstance(params.get("scope_filter"), dict) else {}
+    limit = _enterprise_query_limit(params, default=20)
+    rows = list(
+        context.db.scalars(
+            select(ExtractedItem)
+            .where(ExtractedItem.company_id == context.company_id)
+            .where(ExtractedItem.item_type == "task")
+            .where(ExtractedItem.status.notin_({"closed", "done", "resolved", "completed"}))
+            .order_by(ExtractedItem.created_at.desc())
+            .limit(max(limit, 50))
+        ).all()
+    )
+    items = [_enterprise_task_payload(row) for row in rows if _enterprise_scope_matches(row, scope_filter)]
+    items = _filter_enterprise_items_by_keyword(items, params.get("query") or params.get("keyword"))[:limit]
+    payload = {
+        "items": items,
+        "source": "enterprise_query",
+        "scope_filter": scope_filter,
+        "query_boundary": "bot_enterprise_scope_filter",
+    }
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    if not items:
+        return "我暂时没有在企业数据里看到符合范围的开放任务。"
+    titles = [str(item.get("summary") or item.get("title") or item.get("guid") or "").strip() for item in items[:5]]
+    titles = [title for title in titles if title]
+    return f"我按企业范围查询到 {len(items)} 条任务：{', '.join(titles)}" if titles else f"我按企业范围查询到 {len(items)} 条任务。"
+
+
+def _execute_enterprise_calendar_query_with_context(request: ToolRequest, context: ToolContext) -> str:
+    if context.db is None:
+        return _execute_cli_calendar_agenda(request)
+    params = request.params
+    scope_filter = params.get("scope_filter") if isinstance(params.get("scope_filter"), dict) else {}
+    limit = _enterprise_query_limit(params, default=20)
+    terms = _enterprise_calendar_terms(request.question or request.normalized_command)
+    conditions = []
+    for term in terms:
+        pattern = f"%{term}%"
+        conditions.extend(
+            [
+                WorkEvent.event_type.ilike(pattern),
+                WorkEvent.title.ilike(pattern),
+                WorkEvent.content_text.ilike(pattern),
+                WorkEvent.business_domain.ilike(pattern),
+            ]
+        )
+    rows = list(
+        context.db.scalars(
+            select(WorkEvent)
+            .where(WorkEvent.company_id == context.company_id)
+            .where(or_(*conditions))
+            .order_by(WorkEvent.occurred_at.desc())
+            .limit(max(limit, 50))
+        ).all()
+    )
+    items = [_enterprise_calendar_payload(row) for row in rows if _enterprise_scope_matches(row, scope_filter)]
+    items = _filter_enterprise_items_by_keyword(items, params.get("query") or params.get("keyword"))[:limit]
+    payload = {
+        "items": items,
+        "source": "enterprise_query",
+        "scope_filter": scope_filter,
+        "query_boundary": "bot_enterprise_scope_filter",
+    }
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    if not items:
+        return "我暂时没有在企业数据里看到符合范围的日程。"
+    titles = [str(item.get("summary") or item.get("title") or item.get("event_id") or "").strip() for item in items[:5]]
+    titles = [title for title in titles if title]
+    return f"我按企业范围查询到 {len(items)} 条日程：{', '.join(titles)}" if titles else f"我按企业范围查询到 {len(items)} 条日程。"
 
 
 def _execute_mail_triage_with_context(request: ToolRequest, context: ToolContext) -> str:
@@ -2835,6 +2916,138 @@ def _calendar_agenda_title(item: Any) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _enterprise_query_limit(params: dict[str, Any], *, default: int) -> int:
+    value = params.get("page_limit") if params.get("page_limit") is not None else params.get("page_size")
+    if value is None:
+        value = params.get("limit")
+    return _optional_cli_int({"limit": value}, "limit", default=default, minimum=1, maximum=50)
+
+
+def _enterprise_scope_matches(row: Any, scope_filter: dict[str, Any]) -> bool:
+    scope = str(scope_filter.get("scope") or "self").strip()
+    if scope == "company":
+        return True
+    payload = getattr(row, "payload", None)
+    payload = payload if isinstance(payload, dict) else {}
+    if scope == "department":
+        department_id = str(scope_filter.get("department_id") or "").strip()
+        if not department_id:
+            return False
+        return department_id in _enterprise_row_values(row, payload, ("department_id", "owner_department_id", "department_ids", "allowed_departments"))
+    if scope in {"team", "project"}:
+        project_id = str(scope_filter.get("project_id") or "").strip()
+        if not project_id:
+            return False
+        return project_id in _enterprise_row_values(row, payload, ("project_id", "team_id", "project_ids", "team_ids"))
+    if scope in {"self", "person", "user"}:
+        actor_values = {
+            str(scope_filter.get("actor_open_id") or "").strip(),
+            str(scope_filter.get("actor_user_id") or "").strip(),
+            str(scope_filter.get("target_open_id") or "").strip(),
+            str(scope_filter.get("target_user_id") or "").strip(),
+        }
+        actor_values = {value for value in actor_values if value}
+        if not actor_values:
+            return False
+        row_values = _enterprise_row_values(
+            row,
+            payload,
+            (
+                "owner_open_id",
+                "assignee_open_id",
+                "creator_open_id",
+                "actor_open_id",
+                "open_id",
+                "owner_user_id",
+                "assignee_user_id",
+                "creator_user_id",
+                "actor_user_id",
+                "user_id",
+                "owner",
+                "actor",
+                "allowed_user_ids",
+            ),
+        )
+        return bool(actor_values & row_values)
+    return True
+
+
+def _enterprise_row_values(row: Any, payload: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
+    values: set[str] = set()
+    for key in keys:
+        for source in (payload, getattr(row, "raw_json", None) if isinstance(getattr(row, "raw_json", None), dict) else {}):
+            value = source.get(key) if isinstance(source, dict) else None
+            values.update(_enterprise_string_values(value))
+        value = getattr(row, key, None)
+        values.update(_enterprise_string_values(value))
+    return {value for value in values if value}
+
+
+def _enterprise_string_values(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value.strip()} if value.strip() else set()
+    if isinstance(value, (int, float)):
+        return {str(value)}
+    if isinstance(value, dict):
+        values: set[str] = set()
+        for item in value.values():
+            values.update(_enterprise_string_values(item))
+        return values
+    if isinstance(value, list):
+        values: set[str] = set()
+        for item in value:
+            values.update(_enterprise_string_values(item))
+        return values
+    return {str(value).strip()} if str(value).strip() else set()
+
+
+def _enterprise_task_payload(row: Any) -> dict[str, Any]:
+    payload = getattr(row, "payload", None)
+    payload = payload if isinstance(payload, dict) else {}
+    task_id = str(payload.get("task_guid") or payload.get("guid") or payload.get("task_id") or getattr(row, "id", "") or "").strip()
+    return {
+        "guid": task_id,
+        "task_guid": task_id,
+        "summary": getattr(row, "title", None) or payload.get("summary") or payload.get("title") or task_id,
+        "title": getattr(row, "title", None) or payload.get("title") or payload.get("summary") or task_id,
+        "status": getattr(row, "status", None) or payload.get("status") or "",
+        "owner": getattr(row, "owner", None) or payload.get("owner") or payload.get("owner_open_id") or "",
+        "due": getattr(row, "due_at", None) or payload.get("due") or payload.get("due_time") or "",
+        "url": payload.get("url") or payload.get("app_link") or payload.get("link") or "",
+        "raw": payload or {"id": str(getattr(row, "id", ""))},
+    }
+
+
+def _enterprise_calendar_payload(row: Any) -> dict[str, Any]:
+    payload = getattr(row, "payload", None)
+    payload = payload if isinstance(payload, dict) else {}
+    event_id = str(payload.get("event_id") or payload.get("id") or getattr(row, "object_id", "") or getattr(row, "external_id", "") or "").strip()
+    title = getattr(row, "title", None) or payload.get("summary") or payload.get("title") or event_id
+    return {
+        "event_id": event_id,
+        "summary": title,
+        "title": title,
+        "start": payload.get("start") or payload.get("start_time") or getattr(row, "occurred_at", None) or "",
+        "end": payload.get("end") or payload.get("end_time") or "",
+        "url": payload.get("url") or payload.get("app_link") or payload.get("link") or "",
+        "raw": payload or {"id": str(getattr(row, "id", ""))},
+    }
+
+
+def _filter_enterprise_items_by_keyword(items: list[dict[str, Any]], keyword: Any) -> list[dict[str, Any]]:
+    text = str(keyword or "").strip().lower()
+    if not text:
+        return items
+    return [item for item in items if text in _json_arg(item).lower()]
+
+
+def _enterprise_calendar_terms(question: str) -> list[str]:
+    dynamic = [term for term in ["今天", "今日", "明天", "本周", "客户", "项目", "评审"] if term in question]
+    return ["calendar", "meeting", "日程", "会议", "开会", "议程", "安排", *dynamic]
 
 
 def _execute_cli_bitable_record_create(request: ToolRequest) -> str:

@@ -30,6 +30,18 @@ class _FakeDb:
     def __init__(self, *, app_config=None, accounts=None):
         self.app_config = app_config
         self.accounts = accounts or []
+        self.added = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def add(self, item):
+        self.added.append(item)
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
 
     def scalar(self, _query):
         return self.app_config
@@ -321,6 +333,7 @@ def test_task_create_authorized_user_token_executes_task_provider(monkeypatch):
     assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["authorization_status"] == "AUTHORIZED"
     assert calls[0]["user_access_token"] == "user-token"
+    assert result.metadata["enterprise_write_through"] == "saved"
 
 
 def test_calendar_create_authorized_user_token_executes_calendar_provider(monkeypatch):
@@ -358,6 +371,7 @@ def test_calendar_create_authorized_user_token_executes_calendar_provider(monkey
     assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["authorization_status"] == "AUTHORIZED"
     assert calls[0]["user_access_token"] == "user-token"
+    assert result.metadata["enterprise_write_through"] == "saved"
 
 
 def test_task_query_uses_enterprise_tool_path_not_user_token(monkeypatch):

@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Company, FeishuAppConfig, MemoryFact, Snapshot, WorkEvent
+from app.models.entities import Company, ExtractedItem, FeishuAppConfig, MemoryFact, Snapshot, WorkEvent
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -1200,6 +1200,14 @@ class FeishuTaskProvider(FeishuResourceProvider):
         item = _task_item(raw_task if isinstance(raw_task, dict) else {"summary": summary})
         task_id = str(item.get("task_guid") or item.get("guid") or item.get("id") or "")
         url = str(item.get("url") or item.get("app_link") or item.get("link") or "")
+        write_through_error = _record_runtime_task_write_through(
+            self.db,
+            request=request,
+            company_id=company_id,
+            task_id=task_id,
+            title=str(item.get("title") or summary),
+            payload=raw_task if isinstance(raw_task, dict) else {"summary": summary},
+        )
         return ProviderResult(
             source="task",
             status="success",
@@ -1214,6 +1222,8 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 "execution_identity_contract": identity_contract,
                 "summary": summary,
                 "raw": payload,
+                "enterprise_write_through": "failed" if write_through_error else "saved",
+                "enterprise_write_through_error": write_through_error,
             },
             answer=f"已创建任务：{summary}",
             error="",
@@ -1414,6 +1424,133 @@ def _task_completed_at(params: dict[str, Any]) -> str:
     return str(int(datetime.now(UTC).timestamp() * 1000))
 
 
+def _record_runtime_task_write_through(
+    db: Session,
+    *,
+    request: ProviderRequest,
+    company_id: Any,
+    task_id: str,
+    title: str,
+    payload: dict[str, Any],
+) -> str:
+    if company_id is None or not hasattr(db, "add"):
+        return ""
+    try:
+        identity = request.context.identity
+        normalized_payload = dict(payload)
+        normalized_payload.update(
+            {
+                "task_guid": task_id,
+                "guid": task_id,
+                "summary": title,
+                "owner_open_id": identity.open_id,
+                "assignee_open_id": identity.open_id,
+                "actor_open_id": identity.open_id,
+                "owner_user_id": identity.user_id,
+                "actor_user_id": identity.user_id,
+                "source": "runtime_write_through",
+            }
+        )
+        db.add(
+            ExtractedItem(
+                company_id=company_id,
+                item_type="task",
+                title=title or task_id or "未命名任务",
+                owner=identity.display_name or identity.open_id or identity.user_id,
+                status=str(payload.get("status") or "open"),
+                payload=normalized_payload,
+            )
+        )
+        if hasattr(db, "commit"):
+            db.commit()
+    except Exception as exc:
+        if hasattr(db, "rollback"):
+            db.rollback()
+        return str(exc)
+    return ""
+
+
+def _record_runtime_calendar_write_through(
+    db: Session,
+    *,
+    request: ProviderRequest,
+    company_id: Any,
+    event_id: str,
+    summary: str,
+    params: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    if company_id is None or not hasattr(db, "add"):
+        return ""
+    try:
+        identity = request.context.identity
+        occurred_at = _runtime_calendar_occurred_at(params.get("start_time") or params.get("start"))
+        normalized_payload = dict(payload)
+        normalized_payload.update(
+            {
+                "event_id": event_id,
+                "summary": summary,
+                "start": params.get("start"),
+                "end": params.get("end"),
+                "start_time": params.get("start_time") or params.get("start"),
+                "end_time": params.get("end_time") or params.get("end"),
+                "owner_open_id": identity.open_id,
+                "actor_open_id": identity.open_id,
+                "owner_user_id": identity.user_id,
+                "actor_user_id": identity.user_id,
+                "source": "runtime_write_through",
+            }
+        )
+        db.add(
+            WorkEvent(
+                company_id=company_id,
+                source="runtime",
+                source_type="feishu_user_identity",
+                visibility_scope="company",
+                business_domain="calendar",
+                event_type="feishu.calendar.event",
+                object_type="calendar_event",
+                object_id=event_id,
+                actor=identity.open_id or identity.user_id or "system",
+                external_id=event_id or None,
+                title=summary or event_id or "未命名日程",
+                content_text=summary or "",
+                occurred_at=occurred_at,
+                actors=[identity.open_id] if identity.open_id else [],
+                payload=normalized_payload,
+                raw_json=payload,
+            )
+        )
+        if hasattr(db, "commit"):
+            db.commit()
+    except Exception as exc:
+        if hasattr(db, "rollback"):
+            db.rollback()
+        return str(exc)
+    return ""
+
+
+def _runtime_calendar_occurred_at(value: Any) -> datetime:
+    if isinstance(value, dict):
+        timestamp = value.get("timestamp")
+        if timestamp is not None and str(timestamp).strip().isdigit():
+            return datetime.fromtimestamp(int(str(timestamp).strip()), tz=UTC)
+    if value is None:
+        return datetime.now(UTC)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(int(value), tz=UTC)
+    text = str(value).strip()
+    if text.isdigit():
+        return datetime.fromtimestamp(int(text), tz=UTC)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
 def _calendar_time_payload(value: Any) -> dict[str, Any]:
     if isinstance(value, dict) and value:
         return value
@@ -1593,6 +1730,15 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         event = data.get("event") if isinstance(data, dict) and isinstance(data.get("event"), dict) else data
         event_id = _first_nested_value(event, ("event_id", "id", "calendar_event_id"))
         url = _first_nested_value(event, ("url", "app_link", "link"))
+        write_through_error = _record_runtime_calendar_write_through(
+            self.db,
+            request=request,
+            company_id=company_id,
+            event_id=event_id,
+            summary=summary,
+            params=params,
+            payload=event if isinstance(event, dict) else {"summary": summary},
+        )
         return ProviderResult(
             source="calendar",
             status="success",
@@ -1615,6 +1761,8 @@ class FeishuCalendarProvider(FeishuResourceProvider):
                 "execution_identity_contract": identity_contract,
                 "summary": summary,
                 "raw": payload,
+                "enterprise_write_through": "failed" if write_through_error else "saved",
+                "enterprise_write_through_error": write_through_error,
             },
             answer=f"已创建日程：{summary}",
             error="",
