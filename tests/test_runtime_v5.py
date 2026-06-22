@@ -759,6 +759,50 @@ def test_runtime_v5_task_query_outputs_enterprise_scope_context() -> None:
     runtime_scope_context = result.composed.metadata["runtime_result"]["metadata"]["scope_context"]
     assert runtime_scope_context["scope"] == "SELF"
     assert runtime_scope_context["company_id"] == scope_context["company_id"]
+    item = result.composed.metadata["runtime_result"]["items"][0]
+    assert item["resource_plane"] == "operational"
+    assert item["resource_type"] == "task"
+    assert item["source_system"] == "feishu"
+    assert item["source_object_type"] == "task"
+    assert item["source_object_id"] == "task/1"
+    assert item["visibility_scope"] == "SELF"
+    assert item["company_id"] == runtime_scope_context["company_id"]
+    assert item["owner_open_id"] == "ou_test"
+    assert item["allowed_user_ids"] == ["ou_test"]
+
+
+def test_runtime_v5_calendar_query_outputs_policy_resource_metadata() -> None:
+    class CalendarProvider:
+        source = "calendar"
+        _OPERATIONS = {"list_events": ("calendar.list_events", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "list_events"
+            return ProviderResult(
+                source="calendar",
+                status="success",
+                result_type="calendar_event_list",
+                count=1,
+                items=({"title": "销售会", "event_id": "event_1"},),
+                answer="查询到 1 条日程。",
+            )
+
+    result = run_runtime_v5(
+        context=_context("我的日程"),
+        providers={"calendar": CalendarProvider()},
+    )
+
+    assert result.composed.result_context is not None
+    runtime_result = result.composed.metadata["runtime_result"]
+    item = runtime_result["items"][0]
+    assert item["resource_plane"] == "operational"
+    assert item["resource_type"] == "calendar"
+    assert item["source_system"] == "feishu"
+    assert item["source_object_type"] == "calendar"
+    assert item["source_object_id"] == "event_1"
+    assert item["visibility_scope"] == "SELF"
+    assert item["company_id"] == runtime_result["metadata"]["company_id"]
+    assert item["owner_open_id"] == "ou_test"
 
 
 def test_runtime_v5_task_query_to_complete_closes_runtime_interaction_loop() -> None:

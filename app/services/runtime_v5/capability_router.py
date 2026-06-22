@@ -218,6 +218,7 @@ def _execute_provider_request(*, provider: ResourceProvider, request: ProviderRe
     duration_ms = int((perf_counter() - started) * 1000)
     return replace(
         result,
+        items=tuple(_item_with_resource_metadata(item=item, request=request, result=result) for item in result.items),
         metadata={
             **result.metadata,
             "source": request.source,
@@ -225,6 +226,96 @@ def _execute_provider_request(*, provider: ResourceProvider, request: ProviderRe
             "duration_ms": duration_ms,
         },
     )
+
+
+def _item_with_resource_metadata(*, item: dict, request: ProviderRequest, result: ProviderResult) -> dict:
+    resource_type = str(item.get("resource_type") or _resource_type_for_result(source=request.source, result_type=result.result_type)).strip()
+    source_system = str(item.get("source_system") or _source_system_for_source(request.source)).strip()
+    source_object_id = str(item.get("source_object_id") or _source_object_id(item=item, resource_type=resource_type)).strip()
+    visibility_scope = str(item.get("visibility_scope") or _resource_scope_for_intent(request.intent)).strip()
+    enriched = {
+        **item,
+        "resource_plane": str(item.get("resource_plane") or "operational"),
+        "resource_type": resource_type,
+        "source_system": source_system,
+        "source_object_type": str(item.get("source_object_type") or resource_type),
+        "source_object_id": source_object_id,
+        "visibility_scope": visibility_scope,
+    }
+    company_id = str(item.get("company_id") or request.context.runtime_scope.active_company_id or "").strip()
+    if company_id:
+        enriched["company_id"] = company_id
+    owner_user_id = str(item.get("owner_user_id") or "").strip()
+    owner_open_id = str(item.get("owner_open_id") or "").strip()
+    if visibility_scope == "SELF":
+        owner_user_id = owner_user_id or str(request.context.identity.user_id or "").strip()
+        owner_open_id = owner_open_id or str(request.context.identity.open_id or "").strip()
+    if owner_user_id:
+        enriched["owner_user_id"] = owner_user_id
+    if owner_open_id:
+        enriched["owner_open_id"] = owner_open_id
+    owner_department_id = str(item.get("owner_department_id") or request.context.identity.department_id or "").strip()
+    if owner_department_id:
+        enriched["owner_department_id"] = owner_department_id
+    if visibility_scope == "SELF" and "allowed_user_ids" not in enriched:
+        allowed_user_id = owner_user_id or owner_open_id
+        enriched["allowed_user_ids"] = [allowed_user_id] if allowed_user_id else []
+    return enriched
+
+
+def _resource_type_for_result(*, source: str, result_type: str) -> str:
+    if result_type == "task_list" or source == "task":
+        return "task"
+    if result_type == "calendar_event_list" or source == "calendar":
+        return "calendar"
+    if result_type.startswith("approval") or source == "approval":
+        return "approval"
+    if source in {"workevent", "evidence", "snapshot", "insight", "memory"}:
+        return source
+    return source or result_type or "operational"
+
+
+def _source_system_for_source(source: str) -> str:
+    if source in {
+        "approval",
+        "attendance",
+        "calendar",
+        "docs",
+        "drive",
+        "im",
+        "mail",
+        "minutes",
+        "okr",
+        "people",
+        "sheets",
+        "slides",
+        "task",
+        "vc",
+        "whiteboard",
+        "wiki",
+    }:
+        return "feishu"
+    if source in {"workevent", "evidence", "snapshot", "insight", "memory"}:
+        return "digital_advisor"
+    return source or "unknown"
+
+
+def _source_object_id(*, item: dict, resource_type: str) -> str:
+    candidate_keys = {
+        "task": ("task_guid", "guid", "task_id", "id"),
+        "calendar": ("event_id", "calendar_event_id", "id"),
+        "approval": ("instance_code", "approval_code", "task_id", "serial_number", "id"),
+    }.get(resource_type, ("id", "source_object_id"))
+    for key in candidate_keys:
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    for key in candidate_keys:
+        value = str(raw.get(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _policy_user_fallback_result(*, request: ProviderRequest, result: ProviderResult) -> ProviderResult:
