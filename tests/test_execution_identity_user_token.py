@@ -193,7 +193,47 @@ def test_attendance_query_bot_first_does_not_use_user_cli():
     assert result.metadata["legacy_cli_fallback_used"] is False
 
 
-def test_task_query_authorized_self_user_fallback_executes_provider(monkeypatch):
+def test_task_query_uses_tenant_provider_before_authorized_self_user_fallback(monkeypatch):
+    company_id = uuid4()
+    app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
+
+    async def fake_resolve_user_token(*_args, **_kwargs):
+        raise AssertionError("tenant-readable task query must not attempt USER fallback")
+
+    class FakeTaskService:
+        def __init__(self, app_config):
+            self.app_config = app_config
+
+        async def list_tasks(self, **kwargs):
+            calls.append(kwargs)
+            return {"code": 0, "data": {"items": [{"guid": "task-guid-1", "summary": "跟进客户"}]}}
+
+    monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
+    monkeypatch.setattr(feishu_resource_providers, "FeishuTaskService", FakeTaskService)
+
+    class Provider(FeishuTaskProvider):
+        def _execute_tool(self, *_args, **_kwargs):
+            raise AssertionError("tenant-readable task query must not use CLI")
+
+    result = Provider(db=_FakeDb(app_config=app_config)).execute(
+        _bot_query_request(company_id=company_id, source="task", operation="list_my_tasks", strategy="task_query")
+    )
+
+    assert result.status == "success"
+    assert result.result_type == "task_list"
+    assert result.items[0]["title"] == "跟进客户"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["actor_identity"] == "BOT"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime"
+    assert result.metadata["fallback_used"] is False
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["extracted_item_as_realtime_source"] is False
+    assert "user_access_token" not in calls[0]
+
+
+def test_task_query_authorized_self_user_fallback_executes_when_tenant_read_fails(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
     calls = []
@@ -214,6 +254,8 @@ def test_task_query_authorized_self_user_fallback_executes_provider(monkeypatch)
 
         async def list_tasks(self, **kwargs):
             calls.append(kwargs)
+            if "user_access_token" not in kwargs:
+                raise RuntimeError("tenant task read unavailable")
             return {"code": 0, "data": {"items": [{"guid": "task-guid-1", "summary": "跟进客户"}]}}
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
@@ -234,10 +276,51 @@ def test_task_query_authorized_self_user_fallback_executes_provider(monkeypatch)
     assert result.metadata["fallback_used"] is True
     assert result.metadata["fallback_scope"] == "SELF"
     assert result.metadata["cannot_escalate_to_company"] is True
-    assert calls[0]["user_access_token"] == "user-token"
+    assert "user_access_token" not in calls[0]
+    assert calls[1]["user_access_token"] == "user-token"
 
 
-def test_calendar_query_authorized_self_user_fallback_executes_provider(monkeypatch):
+def test_calendar_query_uses_tenant_provider_before_authorized_self_user_fallback(monkeypatch):
+    company_id = uuid4()
+    app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
+    calls = []
+
+    async def fake_resolve_user_token(*_args, **_kwargs):
+        raise AssertionError("tenant-readable calendar query must not attempt USER fallback")
+
+    class FakeCalendarService:
+        def __init__(self, app_config):
+            self.app_config = app_config
+
+        async def list_primary_events(self, **kwargs):
+            calls.append(kwargs)
+            return {"code": 0, "data": {"items": [{"event_id": "event-1", "summary": "会议"}]}}
+
+    monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
+    monkeypatch.setattr(feishu_resource_providers, "FeishuCalendarService", FakeCalendarService)
+
+    class Provider(FeishuCalendarProvider):
+        def _execute_tool(self, *_args, **_kwargs):
+            raise AssertionError("tenant-readable calendar query must not use CLI")
+
+    result = Provider(db=_FakeDb(app_config=app_config)).execute(
+        _bot_query_request(company_id=company_id, source="calendar", operation="list_events", strategy="calendar_query")
+    )
+
+    assert result.status == "success"
+    assert result.result_type == "calendar_event_list"
+    assert result.items[0]["title"] == "会议"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["actor_identity"] == "BOT"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime"
+    assert result.metadata["fallback_used"] is False
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["extracted_item_as_realtime_source"] is False
+    assert "user_access_token" not in calls[0]
+
+
+def test_calendar_query_authorized_self_user_fallback_executes_when_tenant_read_fails(monkeypatch):
     company_id = uuid4()
     app_config = SimpleNamespace(id=uuid4(), company_id=company_id)
     calls = []
@@ -258,6 +341,8 @@ def test_calendar_query_authorized_self_user_fallback_executes_provider(monkeypa
 
         async def list_primary_events(self, **kwargs):
             calls.append(kwargs)
+            if "user_access_token" not in kwargs:
+                raise RuntimeError("tenant calendar read unavailable")
             return {"code": 0, "data": {"items": [{"event_id": "event-1", "summary": "会议"}]}}
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
@@ -278,7 +363,8 @@ def test_calendar_query_authorized_self_user_fallback_executes_provider(monkeypa
     assert result.metadata["fallback_used"] is True
     assert result.metadata["fallback_scope"] == "SELF"
     assert result.metadata["cannot_escalate_to_company"] is True
-    assert calls[0]["user_access_token"] == "user-token"
+    assert "user_access_token" not in calls[0]
+    assert calls[1]["user_access_token"] == "user-token"
 
 
 def test_company_task_query_does_not_use_user_fallback_even_when_authorized(monkeypatch):
@@ -290,6 +376,15 @@ def test_company_task_query_does_not_use_user_fallback_even_when_authorized(monk
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
 
+    class FakeTaskService:
+        def __init__(self, app_config):
+            self.app_config = app_config
+
+        async def list_tasks(self, **_kwargs):
+            raise RuntimeError("tenant task read unavailable")
+
+    monkeypatch.setattr(feishu_resource_providers, "FeishuTaskService", FakeTaskService)
+
     result = FeishuTaskProvider(db=_FakeDb(app_config=app_config)).execute(
         _bot_query_request(
             company_id=company_id,
@@ -300,9 +395,10 @@ def test_company_task_query_does_not_use_user_fallback_even_when_authorized(monk
         )
     )
 
-    assert result.status == "denied"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
-    assert "fallback_used" not in result.metadata
+    assert result.status == "error"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_read_failed"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["fallback_used"] is False
 
 
 def test_resolve_feishu_user_access_token_missing_account_returns_missing_authorization():
@@ -698,7 +794,8 @@ def test_task_company_query_passes_scope_filter_without_owner_filter(monkeypatch
     provider = ToolTaskProvider(db=_FakeDb(app_config=app_config))
     result = provider.execute(_request(company_id=company_id, operation="list_my_tasks", data_scope="company"))
 
-    assert result.status == "denied"
-    assert result.error == "enterprise_realtime_not_integrated"
-    assert result.metadata["provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.status == "error"
+    assert result.metadata["provider_boundary"] == "enterprise_realtime_read_failed"
+    assert result.metadata["credential_mode"] == "TENANT_TOKEN"
+    assert result.metadata["fallback_used"] is False
     assert result.metadata["legacy_cli_fallback_used"] is False

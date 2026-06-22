@@ -1076,10 +1076,22 @@ class FeishuTaskProvider(FeishuResourceProvider):
             return _unsupported_operation_result("task", request.operation, sorted(self._OPERATIONS))
         tool_name, is_write = tool_spec
         if request.operation in {"list_my_tasks", "search_tasks"}:
+            params = _task_query_tool_params(request)
+            if request.operation == "search_tasks":
+                keyword = str(request.params.get("keyword") or "").strip()
+                if keyword:
+                    params["query"] = keyword
+            tenant_result = self._execute_task_query_with_tenant_token(
+                request,
+                operation=request.operation,
+                params=params,
+            )
+            if tenant_result is not None:
+                return tenant_result
             user_fallback = self._execute_task_query_with_user_fallback(
                 request,
                 operation=request.operation,
-                params=_task_tool_params(request),
+                params=params,
             )
             if user_fallback is not None:
                 return user_fallback
@@ -1093,11 +1105,6 @@ class FeishuTaskProvider(FeishuResourceProvider):
             )
             if boundary is not None:
                 return boundary
-            params = _task_query_tool_params(request)
-            if request.operation == "search_tasks":
-                keyword = str(request.params.get("keyword") or "").strip()
-                if keyword:
-                    params["query"] = keyword
             return self._execute_task_query(
                 request,
                 tool_name=tool_name,
@@ -1266,6 +1273,90 @@ class FeishuTaskProvider(FeishuResourceProvider):
             },
             answer=_task_list_answer(items, query=str(params.get("query") or params.get("keyword") or "")),
             error=result.error or "",
+        )
+
+    def _execute_task_query_with_tenant_token(
+        self,
+        request: ProviderRequest,
+        *,
+        operation: str,
+        params: dict[str, Any],
+    ) -> ProviderResult | None:
+        identity_contract = request.execution_identity_contract.payload()
+        if identity_contract.get("actor_identity") != "BOT" or identity_contract.get("credential_mode") != "TENANT_TOKEN":
+            return None
+
+        company_id = request.context.runtime_scope.active_company_id
+        if self.db is None:
+            return None
+        app_config = _active_feishu_app_config(self.db, company_id)
+        if app_config is None:
+            return None
+
+        try:
+            payload = _run_async(
+                FeishuTaskService(app_config).list_tasks(
+                    page_size=int(params.get("page_size") or 50),
+                    page_token=str(params.get("page_token") or "") or None,
+                )
+            )
+        except Exception as exc:
+            if str(request.intent.data_scope or "").lower() == "self":
+                return None
+            return ProviderResult(
+                source="task",
+                status="error",
+                result_type="task_list",
+                metadata={
+                    "operation": operation,
+                    "credential_mode": "TENANT_TOKEN",
+                    "actor_identity": "BOT",
+                    "execution_identity_contract": identity_contract,
+                    "provider_boundary": "enterprise_realtime_read_failed",
+                    "legacy_cli_fallback_used": False,
+                    "fallback_used": False,
+                    "workevent_as_realtime_source": False,
+                    "extracted_item_as_realtime_source": False,
+                    "error_type": "provider_execution_failed",
+                    "tool_error": str(exc),
+                },
+                answer="任务企业实时读取失败。我不会改用本地认知数据或当前用户身份代查。",
+                error=str(exc),
+            )
+
+        data = _feishu_response_data(payload)
+        raw_items = _items_from_payload(data)
+        items = tuple(_task_item(item) for item in raw_items)
+        query = str(params.get("query") or params.get("keyword") or "").strip()
+        if operation == "search_tasks" and query:
+            lowered = query.lower()
+            items = tuple(
+                item
+                for item in items
+                if lowered in str(item.get("title") or "").lower()
+                or lowered in json.dumps(item.get("raw") or {}, ensure_ascii=False).lower()
+            )
+        return ProviderResult(
+            source="task",
+            status="success",
+            result_type="task_list",
+            count=len(items),
+            items=items,
+            metadata={
+                "operation": operation,
+                "credential_mode": "TENANT_TOKEN",
+                "actor_identity": "BOT",
+                "execution_identity_contract": identity_contract,
+                "provider_boundary": "enterprise_realtime",
+                "legacy_cli_fallback_used": False,
+                "fallback_used": False,
+                "workevent_as_realtime_source": False,
+                "extracted_item_as_realtime_source": False,
+                "query": query,
+                "raw": payload,
+            },
+            answer=_task_list_answer(items, query=query),
+            error="",
         )
 
     def _execute_task_query_with_user_fallback(
@@ -1557,6 +1648,9 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         if tool_name is None:
             return _tool_not_installed_result("calendar", request.operation)
         if request.operation == "list_events":
+            tenant_result = self._execute_calendar_query_with_tenant_token(request)
+            if tenant_result is not None:
+                return tenant_result
             user_fallback = self._execute_calendar_query_with_user_fallback(request)
             if user_fallback is not None:
                 return user_fallback
@@ -1602,6 +1696,77 @@ class FeishuCalendarProvider(FeishuResourceProvider):
             },
             answer=f"日程能力已进入 V5，但这个操作还没有接入：{request.operation}。",
             error=f"unsupported_operation:{request.operation}",
+        )
+
+    def _execute_calendar_query_with_tenant_token(self, request: ProviderRequest) -> ProviderResult | None:
+        identity_contract = request.execution_identity_contract.payload()
+        if identity_contract.get("actor_identity") != "BOT" or identity_contract.get("credential_mode") != "TENANT_TOKEN":
+            return None
+
+        company_id = request.context.runtime_scope.active_company_id
+        if self.db is None:
+            return None
+        app_config = _active_feishu_app_config(self.db, company_id)
+        if app_config is None:
+            return None
+
+        params = _calendar_tool_params(request)
+        try:
+            payload = _run_async(
+                FeishuCalendarService(app_config).list_primary_events(
+                    start_time=_calendar_datetime(params.get("start_time") or params.get("start")),
+                    end_time=_calendar_datetime(params.get("end_time") or params.get("end")),
+                    page_size=int(params.get("page_size") or 50),
+                    page_token=str(params.get("page_token") or "") or None,
+                )
+            )
+        except Exception as exc:
+            if str(request.intent.data_scope or "").lower() == "self":
+                return None
+            return ProviderResult(
+                source="calendar",
+                status="error",
+                result_type="calendar_event_list",
+                metadata={
+                    "operation": request.operation,
+                    "credential_mode": "TENANT_TOKEN",
+                    "actor_identity": "BOT",
+                    "execution_identity_contract": identity_contract,
+                    "provider_boundary": "enterprise_realtime_read_failed",
+                    "legacy_cli_fallback_used": False,
+                    "fallback_used": False,
+                    "workevent_as_realtime_source": False,
+                    "extracted_item_as_realtime_source": False,
+                    "error_type": "provider_execution_failed",
+                    "tool_error": str(exc),
+                },
+                answer="日程企业实时读取失败。我不会改用本地认知数据或当前用户身份代查。",
+                error=str(exc),
+            )
+
+        data = _feishu_response_data(payload)
+        raw_items = _items_from_payload(data)
+        items = tuple(_calendar_item(item) for item in raw_items)
+        return ProviderResult(
+            source="calendar",
+            status="success",
+            result_type="calendar_event_list",
+            count=len(items),
+            items=items,
+            metadata={
+                "operation": request.operation,
+                "credential_mode": "TENANT_TOKEN",
+                "actor_identity": "BOT",
+                "execution_identity_contract": identity_contract,
+                "provider_boundary": "enterprise_realtime",
+                "legacy_cli_fallback_used": False,
+                "fallback_used": False,
+                "workevent_as_realtime_source": False,
+                "extracted_item_as_realtime_source": False,
+                "raw": payload,
+            },
+            answer=_calendar_list_answer(items),
+            error="",
         )
 
     def _execute_calendar_query_with_user_fallback(self, request: ProviderRequest) -> ProviderResult | None:
