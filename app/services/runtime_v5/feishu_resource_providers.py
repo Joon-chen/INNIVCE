@@ -3157,6 +3157,7 @@ def _enterprise_realtime_boundary_result(
     contract = request.execution_identity_contract.payload()
     if contract.get("credential_mode") != "TENANT_TOKEN" or contract.get("actor_identity") != "BOT":
         return None
+    effective_user_fallback_allowed = bool(user_fallback_allowed and request.intent.data_scope == "self")
     return ProviderResult(
         source=source,
         status="denied",
@@ -3175,7 +3176,7 @@ def _enterprise_realtime_boundary_result(
             "workevent_as_realtime_source": False,
             "extracted_item_as_realtime_source": False,
             "legacy_cli_fallback_used": False,
-            "user_fallback_allowed": user_fallback_allowed,
+            "user_fallback_allowed": effective_user_fallback_allowed,
             "recommended_next_step": (
                 f"接入 {_provider_label(source)} 的 Bot/Tenant 实时读取 Provider；"
                 "如需读取个人私有资源，应由 Policy/Runtime 显式进入 USER fallback。"

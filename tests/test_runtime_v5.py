@@ -5,6 +5,7 @@ import pytest
 from app.services.runtime_v5.models import (
     CommandPlan,
     ComposedAnswer,
+    ExecutionIdentityContract,
     IntentResult,
     PermissionDecision,
     PlannerResult,
@@ -16,7 +17,7 @@ from app.services.runtime_v5.models import (
     RuntimeIdentity,
     RuntimeScope,
 )
-from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider
+from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuTaskProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
 from app.services.runtime_v5.intent import recognize_intent
@@ -504,6 +505,86 @@ def test_workspace_company_query_preflight_blocks_current_user_fallback_for_memb
     assert permission.metadata["identity_decision"]["actor_identity"] == "BOT"
     assert permission.metadata["identity_decision"]["allows_fallback"] is False
     assert permission.metadata["denied_resource_types"] == ["task"]
+
+
+def test_workspace_company_task_query_returns_enterprise_realtime_provider_gap() -> None:
+    company_id = uuid4()
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看全公司任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="查看全公司任务",
+    )
+    request = ProviderRequest(
+        source="task",
+        operation="list_my_tasks",
+        intent=intent,
+        planner=PlannerResult(strategy="task_query", sources=("task",)),
+        context=context,
+        execution_identity="bot",
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            resource_scope="COMPANY",
+            authorization_status="AUTHORIZED",
+        ),
+    )
+
+    result = FeishuTaskProvider(db=None).execute(request)  # type: ignore[arg-type]
+
+    assert result.status == "denied"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["error_type"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["extracted_item_as_realtime_source"] is False
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["user_fallback_allowed"] is False
+    assert "不会改用本地认知数据或当前用户本机身份代查" in result.answer
+
+
+def test_workspace_company_calendar_query_returns_enterprise_realtime_provider_gap() -> None:
+    company_id = uuid4()
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看全公司日程",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="calendar_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="查看全公司日程",
+    )
+    request = ProviderRequest(
+        source="calendar",
+        operation="list_events",
+        intent=intent,
+        planner=PlannerResult(strategy="calendar_query", sources=("calendar",)),
+        context=context,
+        execution_identity="bot",
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            resource_scope="COMPANY",
+            authorization_status="AUTHORIZED",
+        ),
+    )
+
+    result = FeishuCalendarProvider(db=None).execute(request)  # type: ignore[arg-type]
+
+    assert result.status == "denied"
+    assert result.error == "enterprise_realtime_not_integrated"
+    assert result.metadata["error_type"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["legacy_cli_fallback_used"] is False
+    assert result.metadata["user_fallback_allowed"] is False
 
 
 def test_runtime_query_identity_contract_ignores_user_requested_identity() -> None:
