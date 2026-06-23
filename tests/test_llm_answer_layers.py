@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
+from app.services.llm import conversation as conversation_module
 from app.services.llm.answer_rewriter import rewrite_bot_answer, should_rewrite_answer
+from app.services.llm.conversation import ConversationLLMContext, conversation_llm_reply, conversation_prompt, valid_conversation_reply
 from app.services.llm.answer_semantics import semantic_intent_for_question
 
 
@@ -655,6 +657,74 @@ def test_answer_rewriter_skips_confirmation_sensitive_answers() -> None:
         is False
     )
 
+
+def test_conversation_prompt_freezes_no_business_data_boundary() -> None:
+    prompt = conversation_prompt(
+        ConversationLLMContext(
+            question="你能查全公司任务吗",
+            fallback_answer="任务企业实时读取能力还没有接入 Bot/Tenant 主路径。",
+            actor_name="陈俊",
+            actor_role="owner",
+            profile_text="老板风格：简洁、直接",
+        )
+    )
+
+    assert "Conversation LLM" in prompt
+    assert "主动读取或编造企业业务数据" in prompt
+    assert "把闲聊升级成业务动作" in prompt
+    assert "改变权限边界" in prompt
+
+
+def test_conversation_reply_rejects_execution_claims() -> None:
+    assert (
+        valid_conversation_reply(
+            reply="我已查询到全公司有 10 条任务。",
+            fallback_answer="你可以补充范围后重新查询。",
+        )
+        is False
+    )
+
+
+def test_conversation_reply_respects_feature_switch(monkeypatch) -> None:
+    called = False
+
+    class FakeGateway:
+        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+            nonlocal called
+            called = True
+            return "不会被调用"
+
+    monkeypatch.setattr(conversation_module.settings, "bot_llm_conversation_enabled", False)
+    monkeypatch.setattr(conversation_module, "LLMGateway", lambda: FakeGateway())
+
+    answer = conversation_llm_reply(
+        ConversationLLMContext(
+            question="你好",
+            fallback_answer="我在。你可以继续让我查审批、任务、日程、邮件或通讯录。",
+        )
+    )
+
+    assert called is False
+    assert answer == "我在。你可以继续让我查审批、任务、日程、邮件或通讯录。"
+
+
+def test_conversation_reply_uses_llm_when_enabled(monkeypatch) -> None:
+    class FakeGateway:
+        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+            assert "Conversation LLM" in prompt
+            return "我在。你可以直接告诉我想查什么范围、对象或时间。"
+
+    monkeypatch.setattr(conversation_module.settings, "bot_llm_conversation_enabled", True)
+    monkeypatch.setattr(conversation_module, "LLMGateway", lambda: FakeGateway())
+
+    answer = conversation_llm_reply(
+        ConversationLLMContext(
+            question="在吗",
+            fallback_answer="我在。你可以继续让我查审批、任务、日程、邮件或通讯录。",
+        )
+    )
+
+    assert answer == "我在。你可以直接告诉我想查什么范围、对象或时间。"
 
 
 

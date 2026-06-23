@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     deepseek_use_for_extraction: bool = False
     deepseek_use_for_bot_analysis: bool = True
     bot_llm_semantics_enabled: bool = True
+    bot_llm_conversation_enabled: bool = True
     bot_llm_answer_rewrite_enabled: bool = True
     bot_llm_answer_rewrite_max_chars: int = Field(default=2600, ge=200, le=6000)
     approval_llm_advice_enabled: bool = True

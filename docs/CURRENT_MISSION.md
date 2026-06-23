@@ -32,6 +32,7 @@ Workspace Cognitive Aggregation V0
 - External Research 已定义为 Policy 管控的外部信息补充能力，不是自由浏览器。
 - ExternalResearchPolicy / Request / Result / SourceReference V0 合同已冻结。
 - Architecture Documentation Consolidation 已完成：总宪法成为唯一架构总图，ACTIVE / FROZEN / ARCHIVED 文档职责已收口。
+- Conversation LLM V0 已接入闲聊 / 边界解释 / 引导补充路径，不读取业务数据、不执行动作、不改变权限。
 - 低置信 LLM 候选已支持引导式 clarification payload。
 - Policy Result Filter 已接入 RuntimeResult。
 - Workspace operational items 已标注 PolicyResource 元数据。

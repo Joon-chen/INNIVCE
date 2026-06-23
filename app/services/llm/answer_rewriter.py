@@ -4,6 +4,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.db.session import SessionLocal as _SessionLocal
+from app.services.llm.conversation import ConversationLLMContext, conversation_context_from_actor, conversation_llm_reply
 from app.services.llm.gateway import LLMGateway
 
 # ── User personality profiles ───────────────────────────────────
@@ -102,8 +103,9 @@ def _get_session_context(chat_id: str | None, question: str = "") -> str:
             if settings.feishu_bot_runtime_v5_enabled:
                 return ctx
             try:
+                import json as _rj
+                import redis as _redis
                 from app.core.config import settings as _settings
-                import redis as _redis, json as _rj
                 _rc = _redis.Redis.from_url(_settings.redis_url, decode_responses=True)
                 _raw = _rc.get(f'feishu:result:{chat_id}')
                 if _raw:
@@ -148,16 +150,17 @@ def rewrite_bot_answer(
     session_ctx = _get_session_context(chat_id, question) if not _is_casual else ""
 
     if _is_casual:
-        _actor_name = getattr(actor, "display_name", "") or ""
-        _actor_role = getattr(actor, "role", "") or "员工"
-        _can_search = "可查询组织架构、通讯录、人员信息"
-        _can_biz = "可查看审批、任务、日程、邮件、会议记录、驾驶舱报告"
-        prompt = f"""你是大飞哥，企业数字助理。用户：{_actor_name}（{_actor_role}）
-对话上下文：{session_ctx}
-用户画像：{profile}
-
-用户消息：{question[:300]}
-不要主动提供任何公司业务数据（审批、组织架构、邮件、任务、日程、风险等），仅回应问候或闲聊本身。"""
+        actor_name, actor_role = conversation_context_from_actor(actor)
+        return conversation_llm_reply(
+            ConversationLLMContext(
+                question=question,
+                fallback_answer=answer,
+                actor_name=actor_name,
+                actor_role=actor_role,
+                profile_text=profile,
+                session_context=session_ctx,
+            )
+        )
     else:
                 prompt = f"""改写原答案，保持数据准确。不要编造原答案或会话上下文中没有的信息。
 原答案中的数据数量是确定的，改写后不得改变总数量（如人数、条数、笔数等）。
