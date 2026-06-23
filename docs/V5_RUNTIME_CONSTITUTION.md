@@ -322,6 +322,130 @@ Insight
 -> Provider
 ```
 
+### 4.5 LLM Capability Architecture
+
+LLM 不是一个单独大脑，也不是可以绕过系统边界的 Agent。V5 将 LLM 拆成五个受控能力位：
+
+```text
+Command LLM
+Reasoning LLM
+Conversation LLM
+Presentation LLM
+External Research Capability
+```
+
+统一链路：
+
+```text
+User Message
+-> Conversation State
+-> Command LLM / Rule Parser
+-> Policy Preflight
+-> Runtime / Provider / Cognitive Read
+-> Policy Result Filter
+-> Reasoning LLM
+-> RuntimeResult
+-> Presentation LLM
+-> InteractionPayload
+```
+
+#### Command LLM
+
+职责：
+
+- 理解用户目标。
+- 输出 intent、domain、capability、scope、对象、时间、约束、输出偏好。
+- 发现缺参并生成 clarification。
+- 作为 Command Enrichment 进入 RuntimeResult metadata。
+
+禁止：
+
+- 执行动作。
+- 选择 Provider / Tool / API。
+- 判断权限。
+- 决定执行身份。
+
+#### Reasoning LLM
+
+职责：
+
+- 基于 Policy 过滤后的 Operational Data / Evidence / Snapshot / Insight / MemoryCandidate 做分析。
+- 生成 Summary、Risk、Recommendation、Decision Basis。
+- 解释 AI 判断依据。
+
+禁止：
+
+- 读取未授权数据。
+- 直接执行 Action。
+- 用外部网页替代企业内部事实。
+
+#### Conversation LLM
+
+职责：
+
+- 闲聊。
+- 多轮澄清。
+- 解释缺参、权限边界、授权需求和失败原因。
+- 维护对话连续性。
+
+禁止：
+
+- 在闲聊中主动读取业务数据。
+- 将闲聊意图升级为业务动作。
+- 绕过 Command / Policy。
+
+#### Presentation LLM
+
+职责：
+
+- 输出侧表达优化。
+- 应用用户画像、角色、语气、详细程度、格式偏好。
+- 保持数量、状态、权限边界和业务结论不变。
+
+禁止：
+
+- 改变 Result 数量、状态、风险等级或建议含义。
+- 影响权限、Provider、Runtime 执行、Action 确认。
+- 把 Profile 写入 Command / Policy / Runtime 控制面。
+
+#### External Research Capability
+
+External Research 不是自由浏览器。它是受 Policy 管控的外部信息补充能力。
+
+归属：
+
+- Command LLM 判断是否需要 `external_research`。
+- Policy Engine 判断是否允许联网、允许哪些来源、哪些业务域可用。
+- Runtime Engine 统一执行。
+- Web Provider 负责检索和读取公开网页。
+- Reasoning LLM 基于外部来源与企业内部可见上下文分析。
+- Presentation LLM 负责引用来源和表达。
+
+必须支持开关：
+
+- 系统级：`external_research_enabled`。
+- 公司级：公司是否允许联网。
+- 业务域级：哪些 Domain 可联网。
+- 能力级：哪些 Capability 可联网。
+- 来源级：白名单 / 黑名单。
+
+RuntimeResult 必须标记：
+
+```text
+external_source_used
+sources
+retrieved_at
+confidence
+policy_decision
+```
+
+联网禁止：
+
+- 绕过 Policy。
+- 替代企业内部实时数据。
+- 用当前用户 USER_TOKEN 做外部研究越权。
+- 无来源引用地输出外部事实。
+
 ## 5. Interface Layer
 
 Interface Layer 包括：
