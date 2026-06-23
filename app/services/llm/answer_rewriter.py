@@ -5,7 +5,7 @@ from typing import Any
 from app.core.config import settings
 from app.db.session import SessionLocal as _SessionLocal
 from app.services.llm.conversation import ConversationLLMContext, conversation_context_from_actor, conversation_llm_reply
-from app.services.llm.gateway import LLMGateway
+from app.services.llm.presentation import PresentationLLMContext, presentation_llm_rewrite, valid_presentation_rewrite
 
 # ── User personality profiles ───────────────────────────────────
 import json as _json
@@ -161,28 +161,15 @@ def rewrite_bot_answer(
                 session_context=session_ctx,
             )
         )
-    else:
-                prompt = f"""改写原答案，保持数据准确。不要编造原答案或会话上下文中没有的信息。
-原答案中的数据数量是确定的，改写后不得改变总数量（如人数、条数、笔数等）。
-输出自然可读的版本。
-
-用户画像：{profile}
-{session_ctx}
-回答范围：{scope_label}
-用户问题：{question[:500]}
-
-原答案：
-{answer[:settings.bot_llm_answer_rewrite_max_chars]}
-
-输出改写后的答案："""
-
-    try:
-        rewritten = (LLMGateway().complete_text(prompt, temperature=0.3) or "").strip()
-    except Exception:
-        return answer
-    if not _valid_rewrite(original=answer, rewritten=rewritten):
-        return answer
-    return rewritten[:3500]
+    return presentation_llm_rewrite(
+        PresentationLLMContext(
+            question=question,
+            original_answer=answer,
+            profile_text=profile,
+            session_context=session_ctx,
+            scope_label=scope_label,
+        )
+    )
 
 
 def should_rewrite_answer(*, answer: str, route_label: str, route_path: str | None = None) -> bool:
@@ -268,30 +255,7 @@ def _style_for_actor(actor: Any) -> str:
 
 
 def _valid_rewrite(*, original: str, rewritten: str) -> bool:
-    if not rewritten:
-        return False
-    if len(rewritten) > max(len(original) * 2, 1200):
-        return False
-    # Data integrity: extract user count from both and reject if mismatch
-    import re as _vr_re
-    _orig_num = _vr_re.search(r'(?:共\s*)?(\d+)\s*(?:人|条|个|笔)', original)
-    _orig_alt = _vr_re.findall(r'(\d+)\s*[个条笔]', original)
-    _new_num = _vr_re.search(r'(\d+)\s*(?:名|条|个|笔)', rewritten)
-    if _orig_num and _new_num:
-        if _orig_num.group(1) != _new_num.group(1):
-            return False
-    _new_num2 = _vr_re.search(r'共有(\d+)', rewritten)
-    if _orig_num and not _new_num and _new_num2:
-        if _orig_num.group(1) != _new_num2.group(1):
-            return False
-    # Also check other occurrences: original has "X条" but rewritten says different number
-    _new_all = _vr_re.findall(r'(\d+)\s*(?:名|条|个|笔)', rewritten)
-    if _orig_alt and _new_all:
-        _orig_counts = set(_orig_alt)
-        _new_counts = set(_new_all)
-        if not _orig_counts.intersection(_new_counts) and len(_orig_counts) == 1:
-            return False
-    return True
+    return valid_presentation_rewrite(original=original, rewritten=rewritten)
 
 
 def _running_tests() -> bool:

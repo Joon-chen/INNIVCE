@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
 from app.services.llm import conversation as conversation_module
+from app.services.llm import presentation as presentation_module
 from app.services.llm.answer_rewriter import rewrite_bot_answer, should_rewrite_answer
 from app.services.llm.conversation import ConversationLLMContext, conversation_llm_reply, conversation_prompt, valid_conversation_reply
+from app.services.llm.presentation import PresentationLLMContext, presentation_llm_rewrite, presentation_prompt, valid_presentation_rewrite
 from app.services.llm.answer_semantics import semantic_intent_for_question
 
 
@@ -726,6 +728,78 @@ def test_conversation_reply_uses_llm_when_enabled(monkeypatch) -> None:
 
     assert answer == "我在。你可以直接告诉我想查什么范围、对象或时间。"
 
+
+def test_presentation_prompt_freezes_fact_boundary() -> None:
+    prompt = presentation_prompt(
+        PresentationLLMContext(
+            question="全公司任务",
+            original_answer="任务企业实时读取能力还没有接入 Bot/Tenant 主路径。",
+            profile_text="老板风格：简洁、直接",
+            scope_label="company",
+        )
+    )
+
+    assert "Presentation LLM" in prompt
+    assert "保持原答案中的数量、状态、权限边界" in prompt
+    assert "不得把未接入、无权限、分析中、未查询到改写成已完成或已查询" in prompt
+    assert "不得生成新的业务动作" in prompt
+
+
+def test_presentation_rewrite_rejects_count_change() -> None:
+    assert (
+        valid_presentation_rewrite(
+            original="你有 2 条任务。",
+            rewritten="你目前共有 3 条任务，我帮你整理好了。",
+        )
+        is False
+    )
+
+
+def test_presentation_rewrite_rejects_status_boundary_change() -> None:
+    assert (
+        valid_presentation_rewrite(
+            original="任务企业实时读取能力还没有接入 Bot/Tenant 主路径。",
+            rewritten="已查询到全公司任务，可以查看全部结果。",
+        )
+        is False
+    )
+
+
+def test_presentation_rewrite_uses_llm_when_valid(monkeypatch) -> None:
+    class FakeGateway:
+        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+            assert "Presentation LLM" in prompt
+            return "你有 2 条任务，我按当前范围整理如下。"
+
+    monkeypatch.setattr(presentation_module, "LLMGateway", lambda: FakeGateway())
+
+    answer = presentation_llm_rewrite(
+        PresentationLLMContext(
+            question="我的任务",
+            original_answer="你有 2 条任务。",
+            profile_text="员工风格：简明扼要",
+            scope_label="self",
+        )
+    )
+
+    assert answer == "你有 2 条任务，我按当前范围整理如下。"
+
+
+def test_presentation_rewrite_falls_back_when_invalid(monkeypatch) -> None:
+    class FakeGateway:
+        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+            return "已查询到全公司任务，可以查看全部结果。"
+
+    monkeypatch.setattr(presentation_module, "LLMGateway", lambda: FakeGateway())
+
+    answer = presentation_llm_rewrite(
+        PresentationLLMContext(
+            question="全公司任务",
+            original_answer="任务企业实时读取能力还没有接入 Bot/Tenant 主路径。",
+        )
+    )
+
+    assert answer == "任务企业实时读取能力还没有接入 Bot/Tenant 主路径。"
 
 
 
