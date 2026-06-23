@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -13,6 +14,7 @@ from app.services.runtime_v5.planner import strategy_registry
 
 
 _LLM_ACCEPT_THRESHOLD = 0.72
+_logger = logging.getLogger(__name__)
 _LLM_OVERRIDEABLE_RULE_INTENTS = {
     "general_query",
     "general_analysis",
@@ -66,11 +68,44 @@ def llm_command_intent(
     rule_intent: IntentResult,
 ) -> IntentResult | None:
     if not _should_try_llm(rule_intent):
+        _log_command_route(
+            question=question,
+            rule_intent=rule_intent,
+            final_intent=rule_intent,
+            llm_status="skipped",
+            llm_reason="rule_confident",
+        )
         return None
     candidate = llm_command_intent_candidate(question=question, context=context, rule_intent=rule_intent)
     if candidate is None:
+        _log_command_route(
+            question=question,
+            rule_intent=rule_intent,
+            final_intent=rule_intent,
+            llm_status="unavailable",
+            llm_reason="no_candidate",
+        )
         return None
-    return validate_llm_command_intent(candidate, rule_intent=rule_intent)
+    validated = validate_llm_command_intent(candidate, rule_intent=rule_intent)
+    if validated is None:
+        _log_command_route(
+            question=question,
+            rule_intent=rule_intent,
+            final_intent=rule_intent,
+            llm_status="rejected",
+            llm_reason=candidate.reason or "validation_failed",
+            candidate=candidate,
+        )
+        return None
+    _log_command_route(
+        question=question,
+        rule_intent=rule_intent,
+        final_intent=validated,
+        llm_status="accepted",
+        llm_reason=candidate.reason or "accepted",
+        candidate=candidate,
+    )
+    return validated
 
 
 def llm_command_intent_candidate(
@@ -124,6 +159,14 @@ def validate_llm_command_intent(
     entities = _merged_entities(candidate=candidate, rule_intent=rule_intent)
     if candidate.clarification:
         entities["clarification_prompt"] = candidate.clarification
+    entities["command_intent_trace"] = {
+        "source": "llm",
+        "rule_intent": rule_intent.intent,
+        "llm_intent": intent,
+        "final_intent": intent,
+        "confidence": confidence,
+        "reason": candidate.reason,
+    }
     return IntentResult(
         question_type=question_type,  # type: ignore[arg-type]
         intent=intent,
@@ -143,6 +186,36 @@ def _should_try_llm(rule_intent: IntentResult) -> bool:
     if rule_intent.intent in _LLM_OVERRIDEABLE_RULE_INTENTS or rule_intent.confidence < 0.72:
         return True
     return rule_intent.question_type in {"query", "analysis", "insight", "decision"}
+
+
+def _log_command_route(
+    *,
+    question: str,
+    rule_intent: IntentResult,
+    final_intent: IntentResult,
+    llm_status: str,
+    llm_reason: str,
+    candidate: LLMCommandIntentCandidate | None = None,
+) -> None:
+    if _running_tests():
+        return
+    _logger.info(
+        "command_intent_route question=%r rule=%s/%s/%s/%s llm_status=%s llm_candidate=%s/%s/%s final=%s/%s/%s/%s reason=%s",
+        question[:120],
+        rule_intent.intent,
+        rule_intent.question_type,
+        rule_intent.data_scope,
+        round(rule_intent.confidence, 3),
+        llm_status,
+        candidate.intent if candidate else "",
+        candidate.data_scope if candidate else "",
+        round(candidate.confidence, 3) if candidate else "",
+        final_intent.intent,
+        final_intent.question_type,
+        final_intent.data_scope,
+        round(final_intent.confidence, 3),
+        llm_reason[:160],
+    )
 
 
 def _can_override_rule_intent(*, candidate_intent: str, rule_intent: IntentResult) -> bool:

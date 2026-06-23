@@ -22,7 +22,7 @@ def compose_answer(
         return _compose_followup(context=context, followup=followup)
 
     if intent.intent == "smalltalk":
-        return ComposedAnswer(answer="我在。你可以继续让我查审批、任务、日程、邮件或通讯录。")
+        return ComposedAnswer(answer=_smalltalk_answer(context))
 
     if intent.intent == "action_trace":
         return ComposedAnswer(answer=_action_trace_answer(context))
@@ -198,6 +198,19 @@ def _with_followup_hint(answer: str, result_context) -> str:
     else:
         hint = "可继续问：展开 / 第一个是什么 / 全部显示。"
     return f"{text}\n\n{hint}"
+
+
+def _smalltalk_answer(context: RuntimeContext) -> str:
+    message = str(context.current_message or "").strip()
+    compact = message.replace(" ", "")
+    display_name = str(context.identity.display_name or "").strip()
+    if any(token in compact for token in ("我是谁", "你知道我是谁", "你知道我吗", "你认识我吗")):
+        if display_name:
+            return f"我知道，你是{display_name}。"
+        return "我知道你是当前飞书会话里的用户，但我还没有拿到可展示的姓名。"
+    if any(token in compact for token in ("你是谁", "你叫什么", "你叫什么名字")):
+        return "我是 Digital Advisor，你的企业数字参谋。"
+    return "我在，正在听。"
 
 
 def _partial_answer(execution: ExecutionResult) -> str:

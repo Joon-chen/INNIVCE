@@ -50,13 +50,14 @@ from app.services.tools.base import ToolExecutionStatus
 def _context(
     message: str,
     *,
+    display_name: str = "",
     result_context: ResultContext | None = None,
     session_context: dict | None = None,
     chat_id: str | None = None,
 ) -> RuntimeContext:
     company_id = uuid4()
     return RuntimeContext(
-        identity=RuntimeIdentity(open_id="ou_test", role="owner", domains=("all",)),
+        identity=RuntimeIdentity(open_id="ou_test", role="owner", display_name=display_name, domains=("all",)),
         runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
         current_message=message,
         session_context=session_context or {},
@@ -211,7 +212,10 @@ def test_runtime_v5_command_llm_candidate_can_resolve_generic_company_task_query
     assert intent.intent == "task_query"
     assert intent.question_type == "query"
     assert intent.data_scope == "company"
-    assert intent.entities == {"topic": "任务负荷"}
+    assert intent.entities["topic"] == "任务负荷"
+    assert intent.entities["command_intent_trace"]["source"] == "llm"
+    assert intent.entities["command_intent_trace"]["rule_intent"] == "general_query"
+    assert intent.entities["command_intent_trace"]["final_intent"] == "task_query"
     assert intent.canonical_question == "查看公司任务负荷"
 
 
@@ -356,6 +360,32 @@ def test_runtime_v5_command_llm_low_confidence_with_missing_params_guides_clarif
     assert validated.needs_clarification is True
     assert validated.missing_params == ("scope", "time_range")
     assert validated.entities["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
+    assert validated.entities["command_intent_trace"]["source"] == "llm"
+    assert validated.entities["command_intent_trace"]["final_intent"] == "task_query"
+
+
+def test_runtime_v5_smalltalk_composer_answers_identity_without_provider() -> None:
+    result = run_runtime_v5(
+        context=_context("你知道我是谁吗", display_name="陈俊"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer == "我知道，你是陈俊。"
+
+
+def test_runtime_v5_smalltalk_composer_answers_assistant_identity_without_provider() -> None:
+    result = run_runtime_v5(
+        context=_context("你是谁"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer == "我是 Digital Advisor，你的企业数字参谋。"
 
 
 def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypatch) -> None:
