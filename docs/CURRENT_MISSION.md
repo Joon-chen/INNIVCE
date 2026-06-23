@@ -33,6 +33,7 @@ Workspace Cognitive Aggregation V0
 - SELF Workspace Query 已改为显式 USER_TOKEN fallback。
 - Workspace Cognitive Projection Contract 已冻结。
 - Workspace Aggregation Summary V0 已固定六个管理指标。
+- Workspace Cognitive Sync Acceptance 已建立最小验收链路：授权观察项 -> Projection WorkEvent -> Aggregation Summary。
 
 ## 当前禁止范围
 
@@ -58,17 +59,18 @@ Workspace Cognitive Aggregation V0
 - Workspace Aggregation Summary 固定输出 `task_total` / `overdue_task_count` / `due_soon_task_count` / `calendar_conflict_count` / `meeting_occupied_minutes` / `workload_buckets`。
 - Workspace Aggregation Summary 必须标记 `detail_available=false`。
 - Workspace Aggregation Summary 不包含任务 / 日程运营明细。
+- Workspace 授权观察项只能写入认知投影，不得写入完整任务 / 日程明细。
 - 部门 / 公司查询读取认知聚合时必须经过 Policy Result Filter。
 - USER_TOKEN 只作为观察/执行身份，不作为越权依据。
 
 ## 下一步计划
 
 ```text
-Workspace Cognitive Sync Acceptance
+Workspace Cognitive Query Integration
 ```
 
 建议下一步：
 
-- 用 Task / Calendar 授权数据生成 Workspace Cognitive Projection。
+- 将 Workspace Aggregation Summary 接入部门 / 公司查询的认知结果分支。
 - 验证部门 / 公司可读 Aggregation Summary，不可读无权限明细。
 - 接入 Workspace Evidence / Snapshot / Insight 前先完成投影验收。

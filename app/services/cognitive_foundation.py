@@ -20,6 +20,7 @@ WORKSPACE_V0_AGGREGATE_METRICS = (
     "meeting_occupied_minutes",
     "workload_buckets",
 )
+WORKSPACE_SYNC_SOURCE = "feishu_user_observation"
 WORKSPACE_COGNITIVE_FIELD_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "task": (
         "task_id",
@@ -122,6 +123,57 @@ def build_workspace_aggregation_summary(
             "source_visibility_must_be_filtered_before_display",
         ],
     }
+
+
+def append_workspace_cognitive_observations(
+    db: Session,
+    *,
+    company_id: UUID,
+    object_type: str,
+    raw_items: list[dict] | tuple[dict, ...],
+    actor: str,
+    owner_user_id: str = "",
+    owner_open_id: str = "",
+    owner_department_id: str = "",
+    visibility_scope: str = "self",
+    source: str = WORKSPACE_SYNC_SOURCE,
+) -> tuple[WorkEvent, ...]:
+    """Store authorized Workspace observations as cognitive projections only."""
+    normalized_type = _normalize_workspace_object_type(object_type)
+    events: list[WorkEvent] = []
+    for index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, dict):
+            continue
+        object_id = _workspace_observation_object_id(normalized_type, raw_item, index)
+        events.append(
+            append_workspace_cognitive_event(
+                db,
+                company_id=company_id,
+                object_type=normalized_type,
+                object_id=object_id,
+                source=source,
+                actor=actor,
+                raw_payload=raw_item,
+                owner_user_id=owner_user_id,
+                owner_open_id=owner_open_id,
+                owner_department_id=owner_department_id,
+                visibility_scope=visibility_scope,
+            )
+        )
+    return tuple(events)
+
+
+def build_workspace_aggregation_from_visible_events(
+    events: list[WorkEvent] | tuple[WorkEvent, ...],
+    *,
+    scope: str,
+    now: datetime | None = None,
+) -> dict:
+    summary = build_workspace_aggregation_summary(events, scope=scope, now=now)
+    summary["workevent_as_realtime_source"] = False
+    summary["operational_detail_available"] = False
+    summary["source"] = "workspace_cognitive_projection"
+    return summary
 
 
 def append_cognitive_work_event(
@@ -381,6 +433,18 @@ def _normalize_workspace_object_type(object_type: str) -> str:
 def _workspace_redacted_fields(raw_payload: dict, allowlist: tuple[str, ...]) -> list[str]:
     allowset = set(allowlist)
     return sorted(str(key) for key in raw_payload.keys() if str(key) not in allowset)
+
+
+def _workspace_observation_object_id(object_type: str, raw_item: dict, index: int) -> str:
+    if object_type == "task":
+        for key in ("task_id", "task_guid", "guid", "id"):
+            if raw_item.get(key):
+                return str(raw_item[key])
+    if object_type == "calendar":
+        for key in ("event_id", "calendar_id", "id"):
+            if raw_item.get(key):
+                return str(raw_item[key])
+    return f"{object_type}:observed:{index}"
 
 
 def _redact_workspace_cognitive_fields(fields: dict) -> dict:

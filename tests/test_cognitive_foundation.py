@@ -7,6 +7,8 @@ from app.services.approval_snapshot_builder import build_approval_snapshot_from_
 from app.services.cognitive_foundation import (
     MEMORY_CANDIDATE_STATUS,
     append_workspace_cognitive_event,
+    append_workspace_cognitive_observations,
+    build_workspace_aggregation_from_visible_events,
     append_cognitive_work_event,
     build_workspace_aggregation_summary,
     build_workspace_cognitive_projection,
@@ -224,6 +226,73 @@ def test_workspace_aggregation_summary_outputs_v0_management_metrics_only() -> N
         "operational_detail_not_included",
         "source_visibility_must_be_filtered_before_display",
     ]
+
+
+def test_workspace_cognitive_sync_acceptance_writes_projection_then_aggregates() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+
+    task_events = append_workspace_cognitive_observations(
+        db,
+        company_id=company_id,
+        object_type="task",
+        actor="ou_1",
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+        raw_items=[
+            {
+                "task_guid": "task-guid-1",
+                "title": "跟进合同",
+                "status": "todo",
+                "due_at": "2026-06-20T10:00:00+00:00",
+                "description": "完整客户合同细节不应进入认知投影",
+            },
+        ],
+    )
+    calendar_events = append_workspace_cognitive_observations(
+        db,
+        company_id=company_id,
+        object_type="calendar",
+        actor="ou_1",
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+        raw_items=[
+            {
+                "event_id": "event-1",
+                "title": "客户会议",
+                "start_at": "2026-06-23T02:00:00+00:00",
+                "end_at": "2026-06-23T03:00:00+00:00",
+                "is_conflict": True,
+                "attendees": ["ou_2", "ou_3"],
+            },
+        ],
+    )
+
+    events = task_events + calendar_events
+    summary = build_workspace_aggregation_from_visible_events(
+        events,
+        scope="department",
+        now=events[0].occurred_at.replace(year=2026, month=6, day=23, hour=0, minute=0),
+    )
+
+    assert len(events) == 2
+    assert events[0].event_type == "workspace_task_observed"
+    assert events[1].event_type == "workspace_calendar_observed"
+    assert events[0].data_classification == "workspace_cognitive"
+    assert events[0].allowed_user_ids == ["user-1"]
+    assert events[0].allowed_departments == ["dept-1"]
+    assert events[0].payload["operational_detail_stored"] is False
+    assert "description" not in events[0].payload["cognitive_fields"]
+    assert "attendees" not in events[1].payload["cognitive_fields"]
+    assert summary["source"] == "workspace_cognitive_projection"
+    assert summary["detail_available"] is False
+    assert summary["operational_detail_available"] is False
+    assert summary["workevent_as_realtime_source"] is False
+    assert summary["metrics"]["task_total"] == 1
+    assert summary["metrics"]["overdue_task_count"] == 1
+    assert summary["metrics"]["calendar_conflict_count"] == 1
 
 
 def test_get_completed_snapshot_hides_incomplete_snapshot() -> None:
