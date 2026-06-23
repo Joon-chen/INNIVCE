@@ -551,6 +551,8 @@ def _is_organization_export(text: str) -> bool:
 def _is_smalltalk(text: str) -> bool:
     normalized = text.strip().lower().strip("。.!！?？ ")
     compact = re.sub(r"\s+", "", normalized)
+    if any(token in compact for token in ("现在几点", "几点了", "今天几号", "今天日期", "今天星期几")):
+        return True
     terms = {
         "在不在",
         "在吗",

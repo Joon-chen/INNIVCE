@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from app.services.runtime_v5.models import (
     ComposedAnswer,
     ExecutionResult,
@@ -8,6 +11,9 @@ from app.services.runtime_v5.models import (
     ResultFollowup,
     RuntimeContext,
 )
+
+
+_LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def compose_answer(
@@ -204,6 +210,14 @@ def _smalltalk_answer(context: RuntimeContext) -> str:
     message = str(context.current_message or "").strip()
     compact = message.replace(" ", "")
     display_name = str(context.identity.display_name or "").strip()
+    now = datetime.now(_LOCAL_TZ)
+    if any(token in compact for token in ("现在几点", "几点了")):
+        return f"现在是北京时间 {now:%H:%M}。"
+    if any(token in compact for token in ("今天几号", "今天日期")):
+        return f"今天是 {now:%Y年%m月%d日}。"
+    if "今天星期几" in compact:
+        weekdays = ("一", "二", "三", "四", "五", "六", "日")
+        return f"今天是星期{weekdays[now.weekday()]}。"
     if any(token in compact for token in ("我是谁", "你知道我是谁", "你知道我吗", "你认识我吗")):
         if display_name:
             return f"我知道，你是{display_name}。"

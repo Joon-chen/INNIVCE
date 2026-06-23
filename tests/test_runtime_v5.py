@@ -116,7 +116,7 @@ def _command_plan(
 
 
 def test_runtime_v5_identity_smalltalk_does_not_route_to_people_lookup() -> None:
-    for question in ("你好呀", "你是谁", "我是谁", "你知道我吗", "你知道我是谁吗"):
+    for question in ("你好呀", "你好，现在几点了。", "你是谁", "我是谁", "你知道我吗", "你知道我是谁吗"):
         intent = recognize_intent(question, _context(question))
 
         assert intent.intent == "smalltalk"
@@ -386,6 +386,18 @@ def test_runtime_v5_smalltalk_composer_answers_assistant_identity_without_provid
     assert result.execution is not None
     assert result.execution.status == "skipped"
     assert result.composed.answer == "我是 Digital Advisor，你的企业数字参谋。"
+
+
+def test_runtime_v5_smalltalk_composer_answers_current_time_without_provider() -> None:
+    result = run_runtime_v5(
+        context=_context("你好，现在几点了。"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer.startswith("现在是北京时间 ")
 
 
 def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypatch) -> None:

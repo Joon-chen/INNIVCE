@@ -340,7 +340,8 @@ def _prompt(*, question: str, context: RuntimeContext, rule_intent: IntentResult
 	3. 不要输出 Provider、Tool、API、credential 或执行身份字段。
 	4. 你可以补充业务语义字段：business_domain、capability、objective、constraints、time_range、output_preferences、semantic_tags。
 	5. 规则已经高置信命中具体业务 intent 时，除非用户表达明显不是这个业务，否则保持相同 intent，只做语义补充。
-	6. 不确定时降低 confidence，不要编造参数。
+	6. 寒暄、询问你是谁、询问当前用户是谁、当前时间/日期等非业务对话，输出 intent=smalltalk。
+	7. 不确定时降低 confidence，不要编造参数。
 
 用户问题：{question[:500]}
 
