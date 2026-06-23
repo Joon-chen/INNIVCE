@@ -439,6 +439,55 @@ confidence
 policy_decision
 ```
 
+External Research V0 合同：
+
+```json
+{
+  "ExternalResearchPolicy": {
+    "enabled": false,
+    "company_id": "",
+    "allowed_domains": [],
+    "allowed_capabilities": [],
+    "allowed_sources": [],
+    "blocked_sources": [],
+    "requires_citation": true,
+    "max_source_age_days": null
+  },
+  "ExternalResearchRequest": {
+    "company_id": "",
+    "domain": "",
+    "capability": "",
+    "query": "",
+    "purpose": "supplement_internal_context",
+    "source_constraints": [],
+    "requested_at": ""
+  },
+  "ExternalResearchResult": {
+    "status": "success/failed/blocked",
+    "summary": "",
+    "sources": [],
+    "retrieved_at": "",
+    "confidence": "low/medium/high",
+    "policy_decision": {}
+  },
+  "ExternalSourceReference": {
+    "title": "",
+    "url": "",
+    "source_type": "public_web/official_doc/news/other",
+    "published_at": "",
+    "retrieved_at": "",
+    "excerpt": ""
+  }
+}
+```
+
+合同边界：
+
+- `ExternalResearchPolicy` 由 Policy Engine 生成，不由 LLM 生成。
+- `ExternalResearchRequest` 由 Command Layer 生成候选，必须经过 Policy Preflight 才能执行。
+- `ExternalResearchResult` 只能作为 Reasoning LLM 的补充输入，不得覆盖企业内部事实。
+- `ExternalSourceReference` 必须进入 RuntimeResult metadata，供 Presentation LLM 引用。
+
 联网禁止：
 
 - 绕过 Policy。

@@ -271,7 +271,32 @@ PolicyDecision 是 Preflight 的输出。
 - `allowed=true`：Runtime 可按 `identity_decision` 尝试读取或执行。
 - `allowed_resource_types` / `denied_resource_types` 用于混合读取，例如允许 operational approval detail，但不允许 evidence detail。
 
-### 3.6 ResultFilterDecision
+### 3.6 ExternalResearchPolicy
+
+ExternalResearchPolicy 是 Policy Preflight 对联网查询的输出。External Research 不属于默认能力，必须显式开启。
+
+```json
+{
+  "enabled": false,
+  "company_id": "",
+  "allowed_domains": [],
+  "allowed_capabilities": [],
+  "allowed_sources": [],
+  "blocked_sources": [],
+  "requires_citation": true,
+  "max_source_age_days": null
+}
+```
+
+规则：
+
+- `enabled=false` 时，Runtime 不得调用 Web Provider。
+- `allowed_domains` / `allowed_capabilities` 限制哪些业务域和能力可以联网。
+- `allowed_sources` / `blocked_sources` 由公司策略和系统策略共同决定。
+- `requires_citation=true` 时，Result Filter 必须保留可展示的来源引用或阻断输出外部事实。
+- External Research 只能补充外部公开信息，不能替代 Operational Data、WorkEvent、Evidence、Snapshot 或 Insight。
+
+### 3.7 ResultFilterDecision
 
 ResultFilterDecision 是 Result Filter 对单个资源或结果 section 的裁剪输出。
 

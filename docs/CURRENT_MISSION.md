@@ -30,6 +30,7 @@ Workspace Cognitive Aggregation V0
 - Command Enrichment 已进入 RuntimeResult metadata，并被 Composer 用于查询类结果的目标 / 视图 / 关注点表达。
 - LLM Capability Architecture 已冻结为 Command / Reasoning / Conversation / Presentation / External Research 五个受控能力位。
 - External Research 已定义为 Policy 管控的外部信息补充能力，不是自由浏览器。
+- ExternalResearchPolicy / Request / Result / SourceReference V0 合同已冻结。
 - 低置信 LLM 候选已支持引导式 clarification payload。
 - Policy Result Filter 已接入 RuntimeResult。
 - Workspace operational items 已标注 PolicyResource 元数据。
@@ -86,5 +87,5 @@ Workspace Cognitive Query Integration
 - 用真实已授权用户的 Task / Calendar 观察数据产生 Projection。
 - 在飞书 Bot 中验证“全公司任务 / 全公司日程”能返回认知聚合。
 - 继续让 Command Enrichment 驱动后续 Result layout / InteractionPayload，而不是只影响文本表达。
-- 若进入联网能力，先冻结 ExternalResearchPolicy / ExternalResearchRequest / ExternalResearchResult / ExternalSourceReference。
+- 若进入联网能力，先做 External Research Provider 接入评审，不直接实现自由联网。
 - 接入 Workspace Evidence / Snapshot / Insight 前先完成投影验收。
