@@ -551,7 +551,26 @@ def _is_organization_export(text: str) -> bool:
 def _is_smalltalk(text: str) -> bool:
     normalized = text.strip().lower().strip("。.!！?？ ")
     compact = re.sub(r"\s+", "", normalized)
-    terms = {"在不在", "在吗", "在么", "你在吗", "你在不在", "有人吗", "能听到吗", "还在吗", "hello", "hi", "嗨"}
+    terms = {
+        "在不在",
+        "在吗",
+        "在么",
+        "你在吗",
+        "你在不在",
+        "有人吗",
+        "能听到吗",
+        "还在吗",
+        "hello",
+        "hi",
+        "嗨",
+        "你是谁",
+        "你叫什么",
+        "你叫什么名字",
+        "你知道我吗",
+        "你认识我吗",
+        "你知道我是谁吗",
+        "我是谁",
+    }
     return normalized in terms or compact in terms or any(compact == term * 2 for term in terms)
 
 

@@ -114,6 +114,14 @@ def _command_plan(
     )
 
 
+def test_runtime_v5_identity_smalltalk_does_not_route_to_people_lookup() -> None:
+    for question in ("你是谁", "我是谁", "你知道我吗", "你知道我是谁吗"):
+        intent = recognize_intent(question, _context(question))
+
+        assert intent.intent == "smalltalk"
+        assert intent.data_scope == "self"
+
+
 def _assert_runtime_state_company_id(runtime_state: dict, company_id: str = "company_1") -> None:
     assert runtime_state["metadata"]["company_id"] == company_id
     assert runtime_state["actions"][0]["metadata"]["company_id"] == company_id

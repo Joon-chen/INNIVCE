@@ -83,6 +83,17 @@ class LLMGateway:
                     return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
                 except Exception:
                     pass
+                if self.provider == "hybrid":
+                    try:
+                        fallback = self.complete_openai_text(prompt, temperature=temperature)
+                    except Exception:
+                        fallback = None
+                    if fallback:
+                        return fallback
+                    try:
+                        return self.complete_deepseek_text(prompt, temperature=temperature)
+                    except Exception:
+                        return None
                 return None
         response = self.client.responses.create(
             model=self.model,
