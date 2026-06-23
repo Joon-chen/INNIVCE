@@ -31,6 +31,7 @@ Workspace Cognitive Aggregation V0
 - LLM Capability Architecture 已冻结为 Command / Reasoning / Conversation / Presentation / External Research 五个受控能力位。
 - External Research 已定义为 Policy 管控的外部信息补充能力，不是自由浏览器。
 - ExternalResearchPolicy / Request / Result / SourceReference V0 合同已冻结。
+- Architecture Documentation Consolidation 已完成：总宪法成为唯一架构总图，ACTIVE / FROZEN / ARCHIVED 文档职责已收口。
 - 低置信 LLM 候选已支持引导式 clarification payload。
 - Policy Result Filter 已接入 RuntimeResult。
 - Workspace operational items 已标注 PolicyResource 元数据。

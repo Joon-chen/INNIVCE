@@ -4,6 +4,14 @@
 
 本文档更新频率应很低，只在长期架构边界变化时修改。
 
+阅读规则：
+
+- 先看本文，理解系统是什么。
+- 再看 ACTIVE 文档，理解仍在生效的专项合同。
+- FROZEN 文档只作为样板、审计或阶段结论参考。
+- ARCHIVED 文档只保留历史，不再作为设计依据。
+- 若任何文档与本文冲突，以本文为准。
+
 ## 1. System Goal
 
 Digital Advisor 不是一组飞书 API、卡片逻辑或后台调试接口的集合，而是面向企业工作的 AI OS。
@@ -640,6 +648,14 @@ created_at
 
 ## 9. Architecture Index
 
+状态定义：
+
+- ACTIVE：仍是当前系统合同的一部分。
+- FROZEN：阶段结论或样板已冻结，后续可参考但不继续扩展。
+- ARCHIVED：历史文档，已被本文或 ACTIVE 文档吸收。
+
+### 9.1 Active Documents
+
 | Document | Status | Role |
 | --- | --- | --- |
 | `V5_RUNTIME_CONSTITUTION.md` | ACTIVE | 唯一架构总图 |
@@ -647,6 +663,11 @@ created_at
 | `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` | ACTIVE | Cognitive Engine V1 |
 | `UNIFIED_POLICY_ENGINE_V0_DESIGN.md` | ACTIVE | Policy Engine V0 |
 | `CURRENT_MISSION.md` | ACTIVE | 当前任务 |
+
+### 9.2 Frozen References
+
+| Document | Status | Role |
+| --- | --- | --- |
 | `ENTERPRISE_SCOPE_MODEL_REVIEW.md` | FROZEN | Scope Model 评审记录 |
 | `EXECUTION_IDENTITY_AUDIT.md` | FROZEN | BOT / USER / TENANT / CLI 身份审计 |
 | `EXECUTION_IDENTITY_CONTRACT_DESIGN.md` | FROZEN | 执行身份合同设计 |
@@ -656,6 +677,11 @@ created_at
 | `ECF_V1_FREEZE_REVIEW.md` | FROZEN | Cognitive V1 冻结评审 |
 | `SNAPSHOT_TRIGGER_MATRIX.md` | FROZEN | Snapshot 生成节奏规则 |
 | `REGISTRY_*` / `CAPABILITY_REGISTRY_*` review docs | FROZEN | Registry 设计和迁移评审记录 |
+
+### 9.3 Archived Documents
+
+| Document | Status | Role |
+| --- | --- | --- |
 | `ENTERPRISE_AI_OS_V1.md` | ARCHIVED | 旧企业 AI OS 草案，已被本文吸收 |
 | `V5_RUNTIME_ARCHITECTURE.md` | ARCHIVED | 旧 Runtime 架构草案，已被本文吸收 |
 | `V5_CAPABILITY_TAXONOMY.md` | ARCHIVED | 旧能力域分类草案，已被 Capability Registry 吸收 |
