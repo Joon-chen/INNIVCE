@@ -100,7 +100,7 @@ def compose_answer(
         if not answer:
             answer = "已取得结构化结果，但暂时无法生成可读摘要。你可以继续问「展开」或「第一个详情」。"
         return ComposedAnswer(
-            answer=_with_followup_hint(answer, execution.result_context),
+            answer=_with_followup_hint(_with_command_enrichment(answer, intent=intent), execution.result_context),
             result_context=execution.result_context,
             metadata={"strategy": execution.strategy},
         )
@@ -112,7 +112,7 @@ def compose_answer(
             answer = _result_context_items_answer(execution.result_context)
         if answer:
             return ComposedAnswer(
-                answer=_with_followup_hint(answer, execution.result_context),
+                answer=_with_followup_hint(_with_command_enrichment(answer, intent=intent), execution.result_context),
                 result_context=execution.result_context,
                 metadata={"strategy": execution.strategy},
             )
@@ -122,6 +122,64 @@ def compose_answer(
     if errors:
         return ComposedAnswer(answer=errors[0])
     return ComposedAnswer(answer="暂时没有查到可用结果。")
+
+
+def _with_command_enrichment(answer: str, *, intent: IntentResult) -> str:
+    enrichment = _command_enrichment(intent)
+    if not enrichment:
+        return answer
+    objective = str(enrichment.get("objective") or "").strip()
+    output_preferences = enrichment.get("output_preferences") if isinstance(enrichment.get("output_preferences"), dict) else {}
+    preference_text = _output_preference_text(output_preferences)
+    tags = enrichment.get("semantic_tags") if isinstance(enrichment.get("semantic_tags"), list) else []
+    tag_text = "、".join(str(item).strip() for item in tags[:3] if str(item).strip())
+    context_parts = []
+    if objective:
+        context_parts.append(f"目标：{objective}")
+    if preference_text:
+        context_parts.append(f"视图：{preference_text}")
+    if tag_text:
+        context_parts.append(f"关注：{tag_text}")
+    if not context_parts:
+        return answer
+    text = str(answer or "").strip()
+    if not text:
+        return "；".join(context_parts)
+    if text.startswith("目标："):
+        return answer
+    return f"{'；'.join(context_parts)}。\n{text}"
+
+
+def _command_enrichment(intent: IntentResult) -> dict:
+    entities = intent.entities if isinstance(intent.entities, dict) else {}
+    enrichment = entities.get("command_enrichment")
+    return enrichment if isinstance(enrichment, dict) else {}
+
+
+def _output_preference_text(preferences: dict) -> str:
+    labels = []
+    detail_level = str(preferences.get("detail_level") or "").strip()
+    if detail_level:
+        labels.append({"summary": "摘要", "detail": "明细", "detailed": "明细"}.get(detail_level, detail_level))
+    group_by = str(preferences.get("group_by") or "").strip()
+    if group_by:
+        labels.append(f"按{_group_by_label(group_by)}分组")
+    sort_by = str(preferences.get("sort_by") or "").strip()
+    if sort_by:
+        labels.append(f"按{_group_by_label(sort_by)}排序")
+    return "，".join(labels)
+
+
+def _group_by_label(value: str) -> str:
+    return {
+        "owner": "负责人",
+        "assignee": "负责人",
+        "department": "部门",
+        "risk": "风险",
+        "due": "截止时间",
+        "status": "状态",
+        "time": "时间",
+    }.get(value, value)
 
 
 def _with_followup_hint(answer: str, result_context) -> str:

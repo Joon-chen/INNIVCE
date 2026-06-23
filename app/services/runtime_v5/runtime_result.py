@@ -73,6 +73,7 @@ def build_runtime_result(
             "intent": command_plan.intent,
             "question_type": command_plan.intent_result.question_type,
             "data_scope": command_plan.intent_result.data_scope,
+            "command_enrichment": _command_enrichment_metadata(command_plan.intent_result),
             "scope_context": scope_context,
             "sources": list(command_plan.planner_result.sources),
             "permission_allowed": permission.allowed,
@@ -83,6 +84,23 @@ def build_runtime_result(
             "policy_result_filter": policy_result_filter,
         },
     )
+
+
+def _command_enrichment_metadata(intent: IntentResult) -> dict[str, Any]:
+    entities = intent.entities if isinstance(intent.entities, dict) else {}
+    enrichment = entities.get("command_enrichment")
+    if not isinstance(enrichment, dict):
+        return {}
+    allowed = {
+        "business_domain",
+        "capability",
+        "objective",
+        "constraints",
+        "time_range",
+        "output_preferences",
+        "semantic_tags",
+    }
+    return {key: value for key, value in enrichment.items() if key in allowed}
 
 
 def _scope_context(*, company_id: str, data_scope: str, result_metadata: dict[str, Any]) -> dict[str, Any]:

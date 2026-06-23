@@ -5,6 +5,7 @@ import pytest
 from app.services.runtime_v5.models import (
     CommandPlan,
     ComposedAnswer,
+    ExecutionResult,
     ExecutionIdentityContract,
     IntentResult,
     PermissionDecision,
@@ -20,6 +21,7 @@ from app.services.runtime_v5.models import (
 from app.services.cognitive_foundation import append_workspace_cognitive_event
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuTaskProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
+from app.services.runtime_v5.composer import compose_answer
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
 from app.services.runtime_v5.intent import recognize_intent
 from app.services.runtime_v5.llm_intent import LLMCommandIntentCandidate, validate_llm_command_intent
@@ -2721,6 +2723,100 @@ def test_runtime_result_payload_serializes_builder_output() -> None:
     assert [action["action"] for action in payload["actions"]] == ["approve", "reject"]
     assert payload["metadata"]["company_id"] == "company_1"
     assert payload["metadata"]["strategy"] == "approval_detail"
+
+
+def test_runtime_result_payload_includes_command_enrichment() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    command_plan = _command_plan("task_query", result_type="task_query", sources=("task",), data_scope="company")
+    enriched_intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        entities={
+            "command_enrichment": {
+                "business_domain": "Workspace",
+                "capability": "task_query",
+                "objective": "查看公司任务负荷",
+                "constraints": {"status": "open"},
+                "time_range": {"preset": "current"},
+                "output_preferences": {"detail_level": "summary", "group_by": "owner"},
+                "semantic_tags": ["workload", "risk"],
+                "unsafe_extra": "ignored",
+            }
+        },
+        confidence=0.9,
+        canonical_question="查看公司任务负荷",
+    )
+    command_plan = CommandPlan(
+        intent=command_plan.intent,
+        steps=command_plan.steps,
+        target_ui=command_plan.target_ui,
+        tool_candidates=command_plan.tool_candidates,
+        context_scope=command_plan.context_scope,
+        intent_result=enriched_intent,
+        planner_result=command_plan.planner_result,
+    )
+
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(
+            answer="公司任务聚合。",
+            result_context=ResultContext(result_type="task_list", count=1),
+        ),
+    )
+
+    enrichment = runtime_result_payload(result)["metadata"]["command_enrichment"]
+
+    assert enrichment == {
+        "business_domain": "Workspace",
+        "capability": "task_query",
+        "objective": "查看公司任务负荷",
+        "constraints": {"status": "open"},
+        "time_range": {"preset": "current"},
+        "output_preferences": {"detail_level": "summary", "group_by": "owner"},
+        "semantic_tags": ["workload", "risk"],
+    }
+
+
+def test_runtime_v5_composer_uses_command_enrichment_for_query_answer() -> None:
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        entities={
+            "command_enrichment": {
+                "objective": "查看公司任务负荷和风险",
+                "output_preferences": {"detail_level": "summary", "group_by": "owner"},
+                "semantic_tags": ["workload", "risk"],
+            }
+        },
+        confidence=0.9,
+        canonical_question="查看公司任务负荷",
+    )
+    result_context = ResultContext(
+        result_type="task_list",
+        count=1,
+        items=({"title": "出差西安", "status": "todo", "task_guid": "task/1"},),
+        answer="任务 1 个。",
+    )
+
+    composed = compose_answer(
+        context=_context("全公司任务"),
+        intent=intent,
+        permission=PermissionDecision(allowed=True),
+        execution=ExecutionResult(
+            strategy="task_query",
+            status="success",
+            provider_results=(ProviderResult(source="task", status="success", result_type="task_list", count=1),),
+            result_context=result_context,
+        ),
+    )
+
+    assert composed.answer.startswith("目标：查看公司任务负荷和风险；视图：摘要，按负责人分组；关注：workload、risk。")
+    assert "任务 1 个。" in composed.answer
+    assert "可继续问" in composed.answer
 
 
 def test_runtime_result_includes_enterprise_scope_context_for_task_query() -> None:
