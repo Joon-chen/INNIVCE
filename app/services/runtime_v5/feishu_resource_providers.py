@@ -27,6 +27,7 @@ from app.services.feishu.approval_advice import approval_attachment_basis, rule_
 from app.services.feishu.approval_attachments import FeishuApprovalAttachmentService
 from app.services.cognitive_foundation import (
     append_cognitive_work_event,
+    build_workspace_aggregation_from_visible_events,
     get_completed_snapshot,
     get_snapshot,
     upsert_snapshot,
@@ -1101,6 +1102,14 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 if boundary is not None:
                     return boundary
             elif query_path == "tenant_query_not_integrated":
+                cognitive_aggregation = _workspace_cognitive_aggregation_result(
+                    self.db,
+                    request,
+                    source="task",
+                    operation=request.operation,
+                )
+                if cognitive_aggregation is not None:
+                    return cognitive_aggregation
                 boundary = _enterprise_realtime_boundary_result(
                     request,
                     source="task",
@@ -1695,6 +1704,14 @@ class FeishuCalendarProvider(FeishuResourceProvider):
                 if boundary is not None:
                     return boundary
             elif query_path == "tenant_query_not_integrated":
+                cognitive_aggregation = _workspace_cognitive_aggregation_result(
+                    self.db,
+                    request,
+                    source="calendar",
+                    operation=request.operation,
+                )
+                if cognitive_aggregation is not None:
+                    return cognitive_aggregation
                 boundary = _enterprise_realtime_boundary_result(
                     request,
                     source="calendar",
@@ -3453,6 +3470,98 @@ def _enterprise_realtime_boundary_result(
             "我不会改用本地认知数据或当前用户本机身份代查。"
         ),
         error="enterprise_realtime_not_integrated",
+    )
+
+
+def _workspace_cognitive_aggregation_result(
+    db: Session | None,
+    request: ProviderRequest,
+    *,
+    source: str,
+    operation: str,
+) -> ProviderResult | None:
+    scope = _resource_scope_for_request(request)
+    if scope not in {"DEPARTMENT", "COMPANY", "TEAM"} or db is None:
+        return None
+    company_id = request.context.runtime_scope.active_company_id
+    if company_id is None:
+        return None
+
+    query = (
+        select(WorkEvent)
+        .where(WorkEvent.company_id == company_id)
+        .where(WorkEvent.data_classification == "workspace_cognitive")
+        .where(WorkEvent.event_type.in_(("workspace_task_observed", "workspace_calendar_observed")))
+        .order_by(WorkEvent.occurred_at.desc())
+        .limit(1000)
+    )
+    department_id = str(request.context.runtime_scope.active_department_id or request.context.identity.department_id or "").strip()
+    if scope == "DEPARTMENT" and department_id:
+        query = query.where(WorkEvent.allowed_departments.has_any([department_id]))
+
+    events = list(db.scalars(query).all())
+    if not events:
+        return None
+
+    summary = build_workspace_aggregation_from_visible_events(events, scope=scope.lower())
+    metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+    item = {
+        "title": f"Workspace {scope.lower()} 认知聚合",
+        "summary": _workspace_aggregation_answer(metrics, scope=scope),
+        "result_type": "workspace_aggregation_summary",
+        "resource_plane": "cognitive",
+        "resource_type": "workspace_aggregation",
+        "source_system": "digital_advisor",
+        "source_object_type": "workspace_aggregation",
+        "source_object_id": f"{str(company_id)}:{scope.lower()}",
+        "visibility_scope": scope,
+        "company_id": str(company_id),
+        "data_classification": "workspace_cognitive",
+        "detail_available": False,
+        "operational_detail_available": False,
+        "workevent_as_realtime_source": False,
+        "metrics": metrics,
+        "metric_order": summary.get("metric_order") or [],
+        "policy_notes": summary.get("policy_notes") or [],
+        "source_event_count": summary.get("source_event_count", 0),
+    }
+    return ProviderResult(
+        source=source,
+        status="success",
+        result_type="workspace_aggregation_summary",
+        count=1,
+        items=(item,),
+        metadata={
+            "operation": operation,
+            "provider_boundary": "workspace_cognitive_aggregation",
+            "operational_source": "workspace_cognitive_projection",
+            "realtime_provider_boundary": "enterprise_realtime_not_integrated",
+            "workevent_as_realtime_source": False,
+            "extracted_item_as_realtime_source": False,
+            "legacy_cli_fallback_used": False,
+            "fallback_used": False,
+            "user_fallback_allowed": False,
+            "scope": scope,
+            "source_event_count": summary.get("source_event_count", 0),
+        },
+        answer=(
+            f"{_provider_label(source)}企业实时读取能力还没有接入 Bot/Tenant 主路径。"
+            f"以下是基于已授权观察数据生成的 Workspace 认知聚合：\n"
+            f"{_workspace_aggregation_answer(metrics, scope=scope)}\n"
+            "这不是飞书实时明细，不包含无权限任务或日程详情。"
+        ),
+        error="",
+    )
+
+
+def _workspace_aggregation_answer(metrics: dict[str, Any], *, scope: str) -> str:
+    return (
+        f"{scope} 范围：任务 {int(metrics.get('task_total') or 0)} 个，"
+        f"逾期 {int(metrics.get('overdue_task_count') or 0)} 个，"
+        f"7天内到期 {int(metrics.get('due_soon_task_count') or 0)} 个，"
+        f"日程冲突 {int(metrics.get('calendar_conflict_count') or 0)} 个，"
+        f"会议占用 {int(metrics.get('meeting_occupied_minutes') or 0)} 分钟，"
+        f"负荷分布 {metrics.get('workload_buckets') or {}}。"
     )
 
 

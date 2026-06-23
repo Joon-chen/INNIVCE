@@ -17,6 +17,7 @@ from app.services.runtime_v5.models import (
     RuntimeIdentity,
     RuntimeScope,
 )
+from app.services.cognitive_foundation import append_workspace_cognitive_event
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuTaskProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
@@ -60,6 +61,28 @@ def _context(
         result_context=result_context,
         chat_id=chat_id,
     )
+
+
+class _RuntimeWriteDb:
+    def __init__(self) -> None:
+        self.added = []
+
+    def add(self, item) -> None:
+        self.added.append(item)
+
+    def flush(self) -> None:
+        return None
+
+    def scalars(self, query):
+        return _RuntimeScalarResult(self.added)
+
+
+class _RuntimeScalarResult:
+    def __init__(self, items) -> None:
+        self._items = list(items)
+
+    def all(self):
+        return list(self._items)
 
 
 def _command_plan(
@@ -550,6 +573,85 @@ def test_workspace_company_task_query_returns_enterprise_realtime_provider_gap()
     assert result.metadata["legacy_cli_fallback_used"] is False
     assert result.metadata["user_fallback_allowed"] is False
     assert "不会改用本地认知数据或当前用户本机身份代查" in result.answer
+
+
+def test_workspace_company_task_query_returns_cognitive_aggregation_when_projection_exists() -> None:
+    company_id = uuid4()
+    db = _RuntimeWriteDb()
+    append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-1",
+        source="feishu_user_observation",
+        actor="ou_owner",
+        raw_payload={"task_guid": "task-1", "title": "逾期任务", "status": "todo", "due_at": "2026-06-20T10:00:00+00:00"},
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+    append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="calendar",
+        object_id="event-1",
+        source="feishu_user_observation",
+        actor="ou_owner",
+        raw_payload={
+            "event_id": "event-1",
+            "title": "冲突会议",
+            "start_at": "2026-06-23T02:00:00+00:00",
+            "end_at": "2026-06-23T03:00:00+00:00",
+            "is_conflict": True,
+        },
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看全公司任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="查看全公司任务",
+    )
+    request = ProviderRequest(
+        source="task",
+        operation="list_my_tasks",
+        intent=intent,
+        planner=PlannerResult(strategy="task_query", sources=("task",)),
+        context=context,
+        execution_identity="bot",
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            resource_scope="COMPANY",
+            authorization_status="AUTHORIZED",
+        ),
+    )
+
+    result = FeishuTaskProvider(db=db).execute(request)  # type: ignore[arg-type]
+
+    assert result.status == "success"
+    assert result.result_type == "workspace_aggregation_summary"
+    assert result.metadata["provider_boundary"] == "workspace_cognitive_aggregation"
+    assert result.metadata["realtime_provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["operational_source"] == "workspace_cognitive_projection"
+    assert result.metadata["workevent_as_realtime_source"] is False
+    assert result.metadata["user_fallback_allowed"] is False
+    item = result.items[0]
+    assert item["resource_plane"] == "cognitive"
+    assert item["detail_available"] is False
+    assert item["operational_detail_available"] is False
+    assert item["metrics"]["task_total"] == 1
+    assert item["metrics"]["overdue_task_count"] == 1
+    assert item["metrics"]["calendar_conflict_count"] == 1
+    assert "这不是飞书实时明细" in result.answer
 
 
 def test_workspace_company_calendar_query_returns_enterprise_realtime_provider_gap() -> None:
