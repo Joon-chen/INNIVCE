@@ -228,6 +228,79 @@ def test_workspace_aggregation_summary_outputs_v0_management_metrics_only() -> N
     ]
 
 
+def test_workspace_aggregation_uses_latest_projection_per_object() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+
+    append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-1",
+        source="feishu_user_sync",
+        actor="ou_1",
+        raw_payload={"task_guid": "task-1", "title": "旧状态", "status": "todo", "due_at": "2026-06-20T10:00:00+00:00"},
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+    latest = append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-1",
+        source="feishu_user_sync",
+        actor="ou_1",
+        raw_payload={"task_guid": "task-1", "title": "新状态", "status": "completed", "completed_at": "2026-06-23T10:00:00+00:00"},
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+    latest.occurred_at = latest.occurred_at.replace(year=2026, month=6, day=23, hour=10)
+
+    summary = build_workspace_aggregation_summary(
+        tuple(db.added),
+        scope="department",
+        now=latest.occurred_at.replace(hour=12),
+    )
+
+    assert summary["source_event_count"] == 2
+    assert summary["metrics"]["task_total"] == 0
+    assert summary["metrics"]["overdue_task_count"] == 0
+
+
+def test_workspace_aggregation_treats_epoch_completed_at_as_unfinished() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+
+    event = append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-1",
+        source="feishu_user_sync",
+        actor="ou_1",
+        raw_payload={
+            "task_guid": "task-1",
+            "title": "待完成任务",
+            "status": "todo",
+            "completed_at": "1970-01-01T00:00:00+00:00",
+        },
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+
+    summary = build_workspace_aggregation_summary(
+        tuple(db.added),
+        scope="department",
+        now=event.occurred_at.replace(year=2026, month=6, day=23, hour=12),
+    )
+
+    assert summary["metrics"]["task_total"] == 1
+    assert summary["metrics"]["overdue_task_count"] == 0
+
+
 def test_workspace_cognitive_sync_acceptance_writes_projection_then_aggregates() -> None:
     db = _WriteDb()
     company_id = uuid4()

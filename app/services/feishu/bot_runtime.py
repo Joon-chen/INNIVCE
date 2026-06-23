@@ -20,6 +20,7 @@ from app.services.runtime_v5.bot_trace import runtime_v5_bot_trace_payload, runt
 from app.services.runtime_v5.feishu_resource_providers import build_feishu_provider_registry
 from app.services.runtime_v5.models import ResultContext
 from app.services.runtime_v5.runtime import run_runtime_v5
+from app.services.llm.answer_rewriter import rewrite_bot_answer
 
 _APPROVAL_BATCH_SELECTION_KEY = "runtime_v5_approval_batch_selection"
 
@@ -144,6 +145,16 @@ def employee_bot_answer_result(
             )
         elif envelope.intent.intent == "governance_view":
             answer = _governance_view_answer_from_snapshot(diagnostics_snapshot, message=question)
+        else:
+            answer = _rewrite_runtime_v5_answer(
+                answer=answer,
+                question=question,
+                identity=identity,
+                route_label=route_label,
+                route_path=route_path,
+                envelope=envelope,
+                chat_id=chat_id,
+            )
         return BotRuntimeAnswer(
             answer=answer,
             trace_payload=runtime_v5_bot_trace_payload(
@@ -163,6 +174,63 @@ def employee_bot_answer_result(
         answer="V5 Runtime 当前未启用，已停止回退旧运行链路。请先开启 V5 后再继续。",
         trace_payload=runtime_v5_disabled_trace_payload(),
     )
+
+
+def _rewrite_runtime_v5_answer(
+    *,
+    answer: str,
+    question: str,
+    identity: BotIdentity,
+    route_label: str,
+    route_path: str,
+    envelope: Any,
+    chat_id: str | None,
+) -> str:
+    if not _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer=answer):
+        return answer
+    actor = BotActor(
+        open_id=identity.open_id,
+        role=identity.role,
+        access_scope=identity.access_scope,
+        domains=tuple(identity.domains or ()),
+        display_name=identity.display_name,
+    )
+    return rewrite_bot_answer(
+        question=question,
+        answer=answer,
+        actor=actor,
+        scope_label=str(envelope.intent.data_scope or ""),
+        route_label=route_label,
+        style_override=None,
+        chat_id=chat_id,
+        is_casual=envelope.intent.intent == "smalltalk",
+    )
+
+
+def _runtime_v5_answer_rewrite_allowed(*, envelope: Any, answer: str) -> bool:
+    if not settings.bot_llm_answer_rewrite_enabled:
+        return False
+    if not str(answer or "").strip():
+        return False
+    intent = str(getattr(envelope.intent, "intent", "") or "")
+    result_type = str(getattr(getattr(envelope, "composed", None), "result_context", None).result_type if getattr(getattr(envelope, "composed", None), "result_context", None) else "")
+    blocked_intents = {"runtime_status", "governance_view", "action_trace"}
+    blocked_result_types = {
+        "runtime_pending_confirmation",
+        "runtime_waiting_input",
+        "waiting_authorization",
+        "runtime_action",
+        "approval_approve",
+        "approval_reject",
+        "task_complete",
+        "task_create",
+        "calendar_create",
+    }
+    if intent in blocked_intents or result_type in blocked_result_types:
+        return False
+    if any(text in answer for text in ("操作确认", "请先完成飞书用户授权", "请回复", "缺少公司上下文")):
+        return False
+    return True
 
 
 def employee_bot_approval_fast_answer_result(

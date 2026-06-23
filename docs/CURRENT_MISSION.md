@@ -35,6 +35,9 @@ Workspace Cognitive Aggregation V0
 - Workspace Aggregation Summary V0 已固定六个管理指标。
 - Workspace Cognitive Sync Acceptance 已建立最小验收链路：授权观察项 -> Projection WorkEvent -> Aggregation Summary。
 - Workspace Cognitive Query Integration 已开始：企业 Task / Calendar 实时未接入时，可返回已授权观察数据生成的认知聚合。
+- SELF Task / Calendar 查询成功后会写入 Workspace Cognitive Projection，作为后续部门 / 公司聚合原料。
+- Workspace 聚合已处理飞书 `1970-01-01` 完成时间哨兵，避免把未完成任务误判为完成。
+- V5 Bot 回答已开始接入 Profile / LLM Answer Rewrite，但动作确认、授权、诊断类答案不改写。
 
 ## 当前禁止范围
 
@@ -62,6 +65,7 @@ Workspace Cognitive Aggregation V0
 - Workspace Aggregation Summary 不包含任务 / 日程运营明细。
 - Workspace 授权观察项只能写入认知投影，不得写入完整任务 / 日程明细。
 - 企业 Task / Calendar 查询返回认知聚合时，必须明确标记不是 Feishu 实时明细。
+- Workspace 聚合必须按对象取最新投影，不能因为 WorkEvent append-only 重复计数。
 - 部门 / 公司查询读取认知聚合时必须经过 Policy Result Filter。
 - USER_TOKEN 只作为观察/执行身份，不作为越权依据。
 
@@ -75,4 +79,5 @@ Workspace Cognitive Query Integration
 
 - 用真实已授权用户的 Task / Calendar 观察数据产生 Projection。
 - 在飞书 Bot 中验证“全公司任务 / 全公司日程”能返回认知聚合。
+- 继续把 LLM Command / Profile 从“局部接入”推进到 RuntimeResult / Composer 的标准合同。
 - 接入 Workspace Evidence / Snapshot / Insight 前先完成投影验收。

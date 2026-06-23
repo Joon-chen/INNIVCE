@@ -72,7 +72,7 @@ def build_workspace_aggregation_summary(
     calendar_conflict_count = 0
     meeting_occupied_minutes = 0
 
-    for event in events:
+    for event in _latest_workspace_projection_events(events):
         projection = event.payload if isinstance(event.payload, dict) else {}
         if projection.get("projection_version") != WORKSPACE_COGNITIVE_PROJECTION_VERSION:
             continue
@@ -435,6 +435,22 @@ def _workspace_redacted_fields(raw_payload: dict, allowlist: tuple[str, ...]) ->
     return sorted(str(key) for key in raw_payload.keys() if str(key) not in allowset)
 
 
+def _latest_workspace_projection_events(events: list[WorkEvent] | tuple[WorkEvent, ...]) -> tuple[WorkEvent, ...]:
+    latest: dict[tuple[str, str], WorkEvent] = {}
+    for event in events:
+        projection = event.payload if isinstance(event.payload, dict) else {}
+        if projection.get("projection_version") != WORKSPACE_COGNITIVE_PROJECTION_VERSION:
+            continue
+        object_type = str(projection.get("object_type") or event.object_type or "").strip().lower()
+        key = (object_type, str(event.object_id or "").strip())
+        if not key[0] or not key[1]:
+            continue
+        existing = latest.get(key)
+        if existing is None or event.occurred_at >= existing.occurred_at:
+            latest[key] = event
+    return tuple(latest.values())
+
+
 def _workspace_observation_object_id(object_type: str, raw_item: dict, index: int) -> str:
     if object_type == "task":
         for key in ("task_id", "task_guid", "guid", "id"):
@@ -477,7 +493,10 @@ def _timedelta_days(days: int):
 
 def _is_completed_task(fields: dict) -> bool:
     status = str(fields.get("status") or "").strip().lower()
-    return status in {"done", "completed", "complete", "finished"} or bool(fields.get("completed_at"))
+    if status in {"done", "completed", "complete", "finished"}:
+        return True
+    completed_at = _parse_datetime(fields.get("completed_at"))
+    return bool(completed_at and completed_at.year > 1970)
 
 
 def _meeting_minutes(start_at: datetime | None, end_at: datetime | None) -> int:

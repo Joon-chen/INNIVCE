@@ -27,6 +27,7 @@ from app.services.feishu.approval_advice import approval_attachment_basis, rule_
 from app.services.feishu.approval_attachments import FeishuApprovalAttachmentService
 from app.services.cognitive_foundation import (
     append_cognitive_work_event,
+    append_workspace_cognitive_observations,
     build_workspace_aggregation_from_visible_events,
     get_completed_snapshot,
     get_snapshot,
@@ -1376,6 +1377,7 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 if lowered in str(item.get("title") or "").lower()
                 or lowered in json.dumps(item.get("raw") or {}, ensure_ascii=False).lower()
             )
+        _append_workspace_task_observations_from_items(request, self.db, items)
         return ProviderResult(
             source="task",
             status="success",
@@ -1468,6 +1470,7 @@ class FeishuTaskProvider(FeishuResourceProvider):
                 if lowered in str(item.get("title") or "").lower()
                 or lowered in json.dumps(item.get("raw") or {}, ensure_ascii=False).lower()
             )
+        _append_workspace_task_observations_from_items(request, self.db, items)
         return ProviderResult(
             source="task",
             status="success",
@@ -1822,6 +1825,7 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         data = _feishu_response_data(payload)
         raw_items = _items_from_payload(data)
         items = tuple(_calendar_item(item) for item in raw_items)
+        _append_workspace_calendar_observations_from_items(request, self.db, items)
         return ProviderResult(
             source="calendar",
             status="success",
@@ -1901,6 +1905,7 @@ class FeishuCalendarProvider(FeishuResourceProvider):
         data = _feishu_response_data(payload)
         raw_items = _items_from_payload(data)
         items = tuple(_calendar_item(item) for item in raw_items)
+        _append_workspace_calendar_observations_from_items(request, self.db, items)
         return ProviderResult(
             source="calendar",
             status="success",
@@ -3563,6 +3568,129 @@ def _workspace_aggregation_answer(metrics: dict[str, Any], *, scope: str) -> str
         f"会议占用 {int(metrics.get('meeting_occupied_minutes') or 0)} 分钟，"
         f"负荷分布 {metrics.get('workload_buckets') or {}}。"
     )
+
+
+def _append_workspace_task_observations_from_items(
+    request: ProviderRequest,
+    db: Session | None,
+    items: tuple[dict[str, Any], ...],
+) -> None:
+    if db is None or not items:
+        return
+    company_id = request.context.runtime_scope.active_company_id
+    if company_id is None:
+        return
+    raw_items = [_workspace_task_observation_payload(item) for item in items]
+    append_workspace_cognitive_observations(
+        db,
+        company_id=company_id,
+        object_type="task",
+        raw_items=raw_items,
+        actor=request.context.identity.open_id or request.context.identity.user_id or "system",
+        owner_user_id=request.context.identity.user_id,
+        owner_open_id=request.context.identity.open_id,
+        owner_department_id=request.context.identity.department_id,
+        visibility_scope="self",
+    )
+
+
+def _append_workspace_calendar_observations_from_items(
+    request: ProviderRequest,
+    db: Session | None,
+    items: tuple[dict[str, Any], ...],
+) -> None:
+    if db is None or not items:
+        return
+    company_id = request.context.runtime_scope.active_company_id
+    if company_id is None:
+        return
+    raw_items = [_workspace_calendar_observation_payload(item) for item in items]
+    append_workspace_cognitive_observations(
+        db,
+        company_id=company_id,
+        object_type="calendar",
+        raw_items=raw_items,
+        actor=request.context.identity.open_id or request.context.identity.user_id or "system",
+        owner_user_id=request.context.identity.user_id,
+        owner_open_id=request.context.identity.open_id,
+        owner_department_id=request.context.identity.department_id,
+        visibility_scope="self",
+    )
+
+
+def _workspace_task_observation_payload(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    due_at = _workspace_datetime_from_feishu_value(raw.get("due") or item.get("due") or raw.get("due_time"))
+    completed_at = _workspace_datetime_from_feishu_value(raw.get("completed_at"))
+    payload = {
+        "task_id": raw.get("id") or raw.get("task_id") or item.get("guid"),
+        "task_guid": raw.get("guid") or raw.get("task_guid") or item.get("guid"),
+        "title": item.get("title") or raw.get("summary") or raw.get("title"),
+        "status": item.get("status") or raw.get("status") or raw.get("task_status"),
+        "priority": raw.get("priority"),
+        "due_at": due_at,
+        "completed_at": completed_at,
+        "updated_at": _workspace_datetime_from_feishu_value(raw.get("updated_at") or raw.get("update_time")),
+        "assignee_count": _workspace_list_count(raw.get("assignees") or raw.get("members")),
+        "follower_count": _workspace_list_count(raw.get("followers")),
+    }
+    if due_at:
+        due_dt = _parse_workspace_datetime(due_at)
+        payload["is_overdue"] = bool(due_dt and due_dt < datetime.now(UTC) and not completed_at)
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
+def _workspace_calendar_observation_payload(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    start_at = _workspace_datetime_from_feishu_value(raw.get("start_time") or raw.get("start") or item.get("start"))
+    end_at = _workspace_datetime_from_feishu_value(raw.get("end_time") or raw.get("end") or item.get("end"))
+    payload = {
+        "event_id": item.get("event_id") or raw.get("event_id") or raw.get("id"),
+        "calendar_id": raw.get("calendar_id"),
+        "title": item.get("title") or raw.get("summary") or raw.get("title"),
+        "status": raw.get("status"),
+        "start_at": start_at,
+        "end_at": end_at,
+        "updated_at": _workspace_datetime_from_feishu_value(raw.get("updated_at") or raw.get("update_time")),
+        "attendee_count": _workspace_list_count(raw.get("attendees")),
+        "is_conflict": bool(raw.get("is_conflict")),
+        "is_busy": str(raw.get("free_busy_status") or raw.get("visibility") or "").lower() != "free",
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
+
+
+def _workspace_datetime_from_feishu_value(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("timestamp") or value.get("date") or value.get("datetime") or value.get("time")
+    if value in (None, ""):
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        timestamp = int(text)
+        if timestamp > 9_999_999_999:
+            timestamp = timestamp // 1000
+        return datetime.fromtimestamp(timestamp, UTC).isoformat()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.isoformat()
+
+
+def _parse_workspace_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _workspace_list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
 
 
 def _operational_query_read_path(request: ProviderRequest, *, source: str) -> str:
