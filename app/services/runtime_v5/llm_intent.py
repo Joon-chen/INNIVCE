@@ -50,6 +50,13 @@ class LLMCommandIntentCandidate:
     missing_params: tuple[str, ...] = ()
     clarification: str = ""
     reason: str = ""
+    business_domain: str = ""
+    capability: str = ""
+    objective: str = ""
+    constraints: dict[str, Any] = field(default_factory=dict)
+    time_range: dict[str, Any] = field(default_factory=dict)
+    output_preferences: dict[str, Any] = field(default_factory=dict)
+    semantic_tags: tuple[str, ...] = ()
 
 
 def llm_command_intent(
@@ -104,6 +111,8 @@ def validate_llm_command_intent(
     intent = candidate.intent.strip()
     if intent not in strategy_registry():
         return None
+    if not _can_override_rule_intent(candidate_intent=intent, rule_intent=rule_intent):
+        return None
     data_scope = _normalize_scope(candidate.data_scope)
     if data_scope not in _DATA_SCOPES:
         return None
@@ -112,7 +121,7 @@ def validate_llm_command_intent(
     confidence = max(0.0, min(candidate.confidence, 1.0))
     if guides_clarification and confidence >= 0.6:
         confidence = 0.59
-    entities = dict(candidate.entities)
+    entities = _merged_entities(candidate=candidate, rule_intent=rule_intent)
     if candidate.clarification:
         entities["clarification_prompt"] = candidate.clarification
     return IntentResult(
@@ -129,6 +138,16 @@ def validate_llm_command_intent(
 def _should_try_llm(rule_intent: IntentResult) -> bool:
     if rule_intent.question_type == "action" and rule_intent.confidence >= 0.75:
         return False
+    if rule_intent.intent in {"runtime_status", "governance_view", "action_trace"}:
+        return False
+    if rule_intent.intent in _LLM_OVERRIDEABLE_RULE_INTENTS or rule_intent.confidence < 0.72:
+        return True
+    return rule_intent.question_type in {"query", "analysis", "insight", "decision"}
+
+
+def _can_override_rule_intent(*, candidate_intent: str, rule_intent: IntentResult) -> bool:
+    if candidate_intent == rule_intent.intent:
+        return True
     return rule_intent.intent in _LLM_OVERRIDEABLE_RULE_INTENTS or rule_intent.confidence < 0.72
 
 
@@ -149,7 +168,52 @@ def _candidate_from_payload(data: dict[str, Any], *, fallback_question: str) -> 
         confidence=max(0.0, min(confidence, 1.0)),
         canonical_question=str(data.get("canonical_question") or fallback_question).strip()[:300],
         reason=str(data.get("reason") or "").strip()[:300],
+        business_domain=str(data.get("business_domain") or "").strip()[:80],
+        capability=str(data.get("capability") or "").strip()[:120],
+        objective=str(data.get("objective") or "").strip()[:200],
+        constraints=data.get("constraints") if isinstance(data.get("constraints"), dict) else {},
+        time_range=data.get("time_range") if isinstance(data.get("time_range"), dict) else {},
+        output_preferences=data.get("output_preferences") if isinstance(data.get("output_preferences"), dict) else {},
+        semantic_tags=tuple(str(item).strip()[:80] for item in data.get("semantic_tags", []) if str(item).strip()) if isinstance(data.get("semantic_tags"), list) else (),
     )
+
+
+def _merged_entities(*, candidate: LLMCommandIntentCandidate, rule_intent: IntentResult) -> dict[str, Any]:
+    entities = dict(rule_intent.entities)
+    entities.update(candidate.entities)
+    enrichment = _command_enrichment(candidate)
+    if enrichment:
+        entities["command_enrichment"] = enrichment
+    return entities
+
+
+def _command_enrichment(candidate: LLMCommandIntentCandidate) -> dict[str, Any]:
+    enrichment: dict[str, Any] = {}
+    for key in ("business_domain", "capability", "objective", "reason"):
+        value = str(getattr(candidate, key) or "").strip()
+        if value:
+            enrichment[key] = value
+    if candidate.constraints:
+        enrichment["constraints"] = _safe_dict(candidate.constraints)
+    if candidate.time_range:
+        enrichment["time_range"] = _safe_dict(candidate.time_range)
+    if candidate.output_preferences:
+        enrichment["output_preferences"] = _safe_dict(candidate.output_preferences)
+    if candidate.semantic_tags:
+        enrichment["semantic_tags"] = list(candidate.semantic_tags[:8])
+    return enrichment
+
+
+def _safe_dict(value: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            safe[key[:80]] = item
+        elif isinstance(item, list):
+            safe[key[:80]] = [entry for entry in item if isinstance(entry, (str, int, float, bool))][:12]
+    return safe
 
 
 def _normalize_scope(value: str) -> str:
@@ -197,13 +261,15 @@ def _prompt(*, question: str, context: RuntimeContext, rule_intent: IntentResult
 - domains: {list(context.identity.domains or ())}
 - active_company_id: {context.runtime_scope.active_company_id or ""}
 
-判断原则：
-1. 优先理解用户真实业务意图和查询范围。
-2. 不要把查询改成动作；只有用户明确要求创建、发送、完成、审批等写操作，才输出 action。
-3. 不要输出 Provider、Tool、API、credential 或执行身份字段。
-4. 不确定时降低 confidence，不要编造参数。
+	判断原则：
+	1. 优先理解用户真实业务意图和查询范围。
+	2. 不要把查询改成动作；只有用户明确要求创建、发送、完成、审批等写操作，才输出 action。
+	3. 不要输出 Provider、Tool、API、credential 或执行身份字段。
+	4. 你可以补充业务语义字段：business_domain、capability、objective、constraints、time_range、output_preferences、semantic_tags。
+	5. 规则已经高置信命中具体业务 intent 时，除非用户表达明显不是这个业务，否则保持相同 intent，只做语义补充。
+	6. 不确定时降低 confidence，不要编造参数。
 
 用户问题：{question[:500]}
 
 只返回 JSON：
-{{"question_type":"query","intent":"task_query","data_scope":"company","entities":{{}},"missing_params":[],"clarification":"","canonical_question":"...","confidence":0.0,"reason":"..."}}"""
+	{{"question_type":"query","intent":"task_query","data_scope":"company","entities":{{}},"missing_params":[],"clarification":"","canonical_question":"...","confidence":0.0,"reason":"...","business_domain":"Workspace","capability":"task_query","objective":"查看公司任务负荷","constraints":{{"status":"open"}},"time_range":{{"preset":"this_week"}},"output_preferences":{{"detail_level":"summary","group_by":"owner"}},"semantic_tags":["workload","risk"]}}"""

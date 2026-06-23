@@ -228,6 +228,63 @@ def test_runtime_v5_command_llm_candidate_does_not_override_confident_action(mon
     assert intent.question_type == "action"
 
 
+def test_runtime_v5_command_llm_enriches_confident_business_query(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            entities={"status": "open"},
+            missing_params=(),
+            confidence=0.93,
+            canonical_question="查看公司当前未完成任务负荷",
+            business_domain="Workspace",
+            capability="task_query",
+            objective="查看公司任务负荷和风险",
+            constraints={"status": "open"},
+            time_range={"preset": "current"},
+            output_preferences={"detail_level": "summary", "group_by": "owner"},
+            semantic_tags=("workload", "risk"),
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    intent = recognize_intent("全公司任务", _context("全公司任务"))
+
+    assert called is True
+    assert intent.intent == "task_query"
+    assert intent.data_scope == "company"
+    assert intent.entities["status"] == "open"
+    enrichment = intent.entities["command_enrichment"]
+    assert enrichment["business_domain"] == "Workspace"
+    assert enrichment["objective"] == "查看公司任务负荷和风险"
+    assert enrichment["constraints"] == {"status": "open"}
+    assert enrichment["output_preferences"]["group_by"] == "owner"
+    assert enrichment["semantic_tags"] == ["workload", "risk"]
+
+
+def test_runtime_v5_command_llm_cannot_reroute_confident_business_query(monkeypatch) -> None:
+    def fake_candidate(**kwargs):
+        return LLMCommandIntentCandidate(
+            question_type="query",
+            intent="calendar_query",
+            data_scope="company",
+            confidence=0.95,
+            canonical_question="查看公司日程",
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    intent = recognize_intent("全公司任务", _context("全公司任务"))
+
+    assert intent.intent == "task_query"
+    assert "command_enrichment" not in intent.entities
+
+
 def test_runtime_v5_command_llm_validator_rejects_unknown_or_low_confidence_candidates() -> None:
     rule_intent = IntentResult(
         question_type="query",

@@ -25,6 +25,8 @@ Workspace Cognitive Aggregation V0
 - Profile / Style / Preference 归入 Cognitive Engine。
 - Policy 独立为 Engine，V0 可同仓同进程实现。
 - Command LLM Intent 已定义为结构化候选 + Validator。
+- Command LLM 已从低置信补救扩展为受控语义增强：可补充业务域、能力、目标、约束、时间和输出偏好。
+- 高置信业务规则命中时，LLM 只能 enrich 同一 intent；低置信或通用意图才允许改成更具体 intent。
 - 低置信 LLM 候选已支持引导式 clarification payload。
 - Policy Result Filter 已接入 RuntimeResult。
 - Workspace operational items 已标注 PolicyResource 元数据。
@@ -79,5 +81,5 @@ Workspace Cognitive Query Integration
 
 - 用真实已授权用户的 Task / Calendar 观察数据产生 Projection。
 - 在飞书 Bot 中验证“全公司任务 / 全公司日程”能返回认知聚合。
-- 继续把 LLM Command / Profile 从“局部接入”推进到 RuntimeResult / Composer 的标准合同。
+- 继续把 LLM Command Enrichment / Profile 从“局部接入”推进到 RuntimeResult / Composer 的标准合同。
 - 接入 Workspace Evidence / Snapshot / Insight 前先完成投影验收。
