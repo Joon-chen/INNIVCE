@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from app.services.llm import conversation as conversation_module
 from app.services.llm import presentation as presentation_module
-from app.services.llm.answer_rewriter import rewrite_bot_answer, should_rewrite_answer
+from app.services.llm.answer_rewriter import _get_session_context, rewrite_bot_answer, should_rewrite_answer
 from app.services.llm.conversation import ConversationLLMContext, conversation_llm_reply, conversation_prompt, valid_conversation_reply
 from app.services.llm.presentation import PresentationLLMContext, presentation_llm_rewrite, presentation_prompt, valid_presentation_rewrite
 from app.services.llm.answer_semantics import semantic_intent_for_question
@@ -677,6 +677,32 @@ def test_conversation_prompt_freezes_no_business_data_boundary() -> None:
     assert "改变权限边界" in prompt
 
 
+def test_answer_rewriter_loads_runtime_conversation_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.runtime_v5.context.load_session_context",
+        lambda chat_id: {
+            "conversation_turns": [
+                {
+                    "user": "主营业务",
+                    "assistant": "这听起来像在问公司主营业务。",
+                    "message_type": "text",
+                },
+                {
+                    "user": "",
+                    "assistant": "我在，看到你发的表情了。",
+                    "message_type": "sticker",
+                },
+            ]
+        },
+    )
+
+    context = _get_session_context("oc_1", "这个表情是什么情绪")
+
+    assert "用户：主营业务" in context
+    assert "助手：这听起来像在问公司主营业务。" in context
+    assert "用户：[上一条是 sticker 类型消息]" in context
+
+
 def test_conversation_reply_rejects_execution_claims() -> None:
     assert (
         valid_conversation_reply(
@@ -800,8 +826,6 @@ def test_presentation_rewrite_falls_back_when_invalid(monkeypatch) -> None:
     )
 
     assert answer == "任务企业实时读取能力还没有接入 Bot/Tenant 主路径。"
-
-
 
 
 

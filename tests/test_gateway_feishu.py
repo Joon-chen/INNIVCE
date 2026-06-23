@@ -7,6 +7,7 @@ from app.services.feishu.commands import (
     _agent_runtime_tool_steps,
     _agent_runtime_trace_summary,
     _agent_runtime_workflow_steps,
+    _record_conversation_turn,
     _should_send_thinking_notice,
     _thinking_notice_text,
     handle_feishu_command,
@@ -64,6 +65,34 @@ def test_build_feishu_gateway_message_from_official_nested_event() -> None:
         "receive_id": "oc_1",
     }
     assert should_reply_to_feishu_message(message, app_id="cli_1", bot_names={"大飞哥"})
+
+
+def test_record_conversation_turn_saves_recent_runtime_session(monkeypatch) -> None:
+    saved = {}
+
+    monkeypatch.setattr("app.services.feishu.commands.load_session_context", lambda chat_id: {"portal": {"company_id": "c1"}})
+    monkeypatch.setattr("app.services.feishu.commands.save_session_context", lambda chat_id, payload: saved.update({"chat_id": chat_id, "payload": payload}))
+
+    _record_conversation_turn(
+        chat_id="oc_1",
+        user_text="主营业务",
+        assistant_text="你是想了解公司主营业务吗？",
+        route_path="smalltalk",
+        route_label="闲聊",
+        message_type="text",
+    )
+
+    assert saved["chat_id"] == "oc_1"
+    assert saved["payload"]["portal"] == {"company_id": "c1"}
+    assert saved["payload"]["conversation_turns"] == [
+        {
+            "user": "主营业务",
+            "assistant": "你是想了解公司主营业务吗？",
+            "route_path": "smalltalk",
+            "route_label": "闲聊",
+            "message_type": "text",
+        }
+    ]
 
 
 def test_write_gateway_message_audit_records_safe_message_summary() -> None:

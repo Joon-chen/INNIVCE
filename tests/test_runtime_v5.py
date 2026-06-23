@@ -116,7 +116,7 @@ def _command_plan(
 
 
 def test_runtime_v5_identity_smalltalk_does_not_route_to_people_lookup() -> None:
-    for question in ("你好呀", "你好，现在几点了。", "你是谁", "我是谁", "你知道我吗", "你知道我是谁吗"):
+    for question in ("你好呀", "你好，现在几点了。", "你是谁", "我是谁", "我是谁呀", "你知道我吗", "你知道我是谁吗"):
         intent = recognize_intent(question, _context(question))
 
         assert intent.intent == "smalltalk"

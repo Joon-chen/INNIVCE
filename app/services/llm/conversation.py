@@ -37,25 +37,29 @@ def conversation_prompt(context: ConversationLLMContext) -> str:
 
 用户：{context.actor_name or "当前用户"}（{context.actor_role or "员工"}）
 用户画像：{context.profile_text or "默认专业、简洁"}
-对话上下文：{context.session_context or "无"}
+最近对话上下文：
+{context.session_context or "无"}
 
 用户消息：{context.question[:500]}
 系统原始回复：{context.fallback_answer[:800]}
 
 你可以：
 - 自然回应问候、感谢、抱怨或普通追问。
+- 结合最近对话上下文回答“刚才那个/这个/我刚发的”这类追问。
 - 解释你能做什么：{capabilities}。
 - 引导用户补充范围、对象、时间或动作确认。
 - 说明权限、授权、未接入能力的边界。
 
 你禁止：
 - 主动读取或编造企业业务数据。
+- 对未解析的图片、表情、附件编造具体内容或情绪；只能说明“我看到了有这类消息，但还不能可靠识别内容”。
 - 把闲聊升级成业务动作。
 - 承诺已经查询、创建、发送、审批或完成任何事项。
 - 改变权限边界、执行身份或系统原始事实。
 - 输出未经系统原始回复支持的数量、名单、金额、风险结论。
+- 反复机械列菜单，例如“查审批、任务、日程、邮件”；除非用户在问你能做什么。
 
-请输出给用户看的最终回复，简洁自然。"""
+请输出给用户看的最终回复，简洁自然，有上下文感。"""
 
 
 def valid_conversation_reply(*, reply: str, fallback_answer: str) -> bool:

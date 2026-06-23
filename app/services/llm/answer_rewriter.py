@@ -82,11 +82,12 @@ def _profile_text(open_id: str, actor_style: str) -> str:
 
 
 def _get_session_context(chat_id: str | None, question: str = "") -> str:
-    """Load session context from answer_semantics' session cache.
-    Result context (answer, name_list) only injected when question explicitly
-    references previous answer (pronouns, list-related terms)."""
+    """Load recent V5 conversation context for conversational continuity."""
     if not chat_id:
         return ""
+    runtime_context = _runtime_conversation_context(chat_id)
+    if runtime_context:
+        return runtime_context
     try:
         from app.services.llm.answer_semantics import _load_session
         session = _load_session(chat_id)
@@ -122,6 +123,30 @@ def _get_session_context(chat_id: str | None, question: str = "") -> str:
     return ""
 
 
+def _runtime_conversation_context(chat_id: str) -> str:
+    try:
+        from app.services.runtime_v5.context import load_session_context
+
+        session_context = load_session_context(chat_id)
+    except Exception:
+        return ""
+    turns = session_context.get("conversation_turns") if isinstance(session_context, dict) else None
+    if not isinstance(turns, list):
+        return ""
+    lines = []
+    for item in [entry for entry in turns if isinstance(entry, dict)][-4:]:
+        user_text = str(item.get("user") or "").strip()
+        assistant_text = str(item.get("assistant") or "").strip()
+        message_type = str(item.get("message_type") or "").strip()
+        if message_type and message_type != "text":
+            user_text = user_text or f"[上一条是 {message_type} 类型消息]"
+        if user_text:
+            lines.append(f"用户：{user_text[:240]}")
+        if assistant_text:
+            lines.append(f"助手：{assistant_text[:320]}")
+    return "\n".join(lines[-8:])
+
+
 # ── Main rewrite function ───────────────────────────────────────
 def rewrite_bot_answer(
     *,
@@ -147,7 +172,7 @@ def rewrite_bot_answer(
         _question_lower = question[:100].lower()
         if any(w in _question_lower for w in ["你好", "在吗", "在线", "几点", "日期", "现在", "聊", "没事", "谢谢", "拜拜", "再见", "知道", "你叫", "你是谁"]):
             _is_casual = True
-    session_ctx = _get_session_context(chat_id, question) if not _is_casual else ""
+    session_ctx = _get_session_context(chat_id, question)
 
     if _is_casual:
         actor_name, actor_role = conversation_context_from_actor(actor)

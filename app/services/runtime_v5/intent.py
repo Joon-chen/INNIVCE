@@ -553,6 +553,10 @@ def _is_smalltalk(text: str) -> bool:
     compact = re.sub(r"\s+", "", normalized)
     if any(token in compact for token in ("现在几点", "几点了", "今天几号", "今天日期", "今天星期几")):
         return True
+    if any(token in compact for token in ("我是谁", "你知道我是谁", "你知道我吗", "你认识我吗")):
+        return True
+    if any(token in compact for token in ("你是谁", "你叫什么", "你叫什么名字")):
+        return True
     terms = {
         "在不在",
         "在吗",
