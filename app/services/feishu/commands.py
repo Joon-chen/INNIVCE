@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.entities import FeishuAppConfig
+from app.services.conversation_context import record_conversation_turn
 from app.services.feishu import command_handlers
 from app.services.feishu import command_parser
 from app.services.feishu import identity as feishu_identity
@@ -361,7 +362,7 @@ async def handle_feishu_command_result(
         commit=False,
         extra=_gateway_result_audit_payload(result),
     )
-    _record_conversation_turn(
+    record_conversation_turn(
         chat_id=chat_id,
         user_text=command,
         assistant_text=reply,
@@ -371,34 +372,6 @@ async def handle_feishu_command_result(
     )
     command_handlers.record_command_context(db, app_config, identity, chat_id, command, normalized, reply)
     return result
-
-
-def _record_conversation_turn(
-    *,
-    chat_id: str | None,
-    user_text: str,
-    assistant_text: str,
-    route_path: str | None,
-    route_label: str | None,
-    message_type: str | None,
-) -> None:
-    if not chat_id:
-        return
-    session_context = load_session_context(chat_id)
-    turns = session_context.get("conversation_turns")
-    if not isinstance(turns, list):
-        turns = []
-    turns.append(
-        {
-            "user": str(user_text or "").strip()[:500],
-            "assistant": str(assistant_text or "").strip()[:800],
-            "route_path": str(route_path or ""),
-            "route_label": str(route_label or ""),
-            "message_type": str(message_type or ""),
-        }
-    )
-    session_context["conversation_turns"] = [item for item in turns if isinstance(item, dict)][-8:]
-    save_session_context(chat_id, session_context)
 
 
 def _record_gateway_message(

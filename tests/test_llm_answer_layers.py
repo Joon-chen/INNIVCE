@@ -679,21 +679,8 @@ def test_conversation_prompt_freezes_no_business_data_boundary() -> None:
 
 def test_answer_rewriter_loads_runtime_conversation_context(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.runtime_v5.context.load_session_context",
-        lambda chat_id: {
-            "conversation_turns": [
-                {
-                    "user": "主营业务",
-                    "assistant": "这听起来像在问公司主营业务。",
-                    "message_type": "text",
-                },
-                {
-                    "user": "",
-                    "assistant": "我在，看到你发的表情了。",
-                    "message_type": "sticker",
-                },
-            ]
-        },
+        "app.services.llm.answer_rewriter.conversation_context_text",
+        lambda chat_id: "用户：主营业务\n助手：这听起来像在问公司主营业务。\n用户：[上一条是 sticker 类型消息]",
     )
 
     context = _get_session_context("oc_1", "这个表情是什么情绪")
@@ -826,7 +813,6 @@ def test_presentation_rewrite_falls_back_when_invalid(monkeypatch) -> None:
     )
 
     assert answer == "任务企业实时读取能力还没有接入 Bot/Tenant 主路径。"
-
 
 
 

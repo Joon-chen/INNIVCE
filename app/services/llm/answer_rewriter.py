@@ -4,6 +4,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.db.session import SessionLocal as _SessionLocal
+from app.services.conversation_context import conversation_context_text
 from app.services.llm.conversation import ConversationLLMContext, conversation_context_from_actor, conversation_llm_reply
 from app.services.llm.presentation import PresentationLLMContext, presentation_llm_rewrite, valid_presentation_rewrite
 
@@ -124,27 +125,7 @@ def _get_session_context(chat_id: str | None, question: str = "") -> str:
 
 
 def _runtime_conversation_context(chat_id: str) -> str:
-    try:
-        from app.services.runtime_v5.context import load_session_context
-
-        session_context = load_session_context(chat_id)
-    except Exception:
-        return ""
-    turns = session_context.get("conversation_turns") if isinstance(session_context, dict) else None
-    if not isinstance(turns, list):
-        return ""
-    lines = []
-    for item in [entry for entry in turns if isinstance(entry, dict)][-4:]:
-        user_text = str(item.get("user") or "").strip()
-        assistant_text = str(item.get("assistant") or "").strip()
-        message_type = str(item.get("message_type") or "").strip()
-        if message_type and message_type != "text":
-            user_text = user_text or f"[上一条是 {message_type} 类型消息]"
-        if user_text:
-            lines.append(f"用户：{user_text[:240]}")
-        if assistant_text:
-            lines.append(f"助手：{assistant_text[:320]}")
-    return "\n".join(lines[-8:])
+    return conversation_context_text(chat_id)
 
 
 # ── Main rewrite function ───────────────────────────────────────
