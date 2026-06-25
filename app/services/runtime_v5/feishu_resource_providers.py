@@ -3029,20 +3029,17 @@ def _company_profile_answer(item: dict[str, Any]) -> str:
     name = str(item.get("name") or "当前公司")
     status = str(item.get("status") or "").strip()
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    intro = str(
-        metadata.get("intro")
-        or metadata.get("description")
-        or metadata.get("business")
-        or metadata.get("summary")
-        or ""
-    ).strip()
+    business = str(metadata.get("business") or metadata.get("main_business") or metadata.get("主营业务") or "").strip()
+    intro = str(metadata.get("intro") or metadata.get("description") or metadata.get("summary") or "").strip()
     lines = [f"{name}"]
     if status:
         lines.append(f"状态：{status}")
+    if business:
+        lines.append(f"主营业务：{business}")
     if intro:
         lines.append(f"简介：{intro}")
-    else:
-        lines.append("公司档案里暂时没有维护简介。")
+    if not business and not intro:
+        lines.append("公司档案里暂时还没有沉淀主营业务或公司简介。")
     return "\n".join(lines)
 
 

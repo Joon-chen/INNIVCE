@@ -3318,11 +3318,16 @@ def _format_company_profile_item(item: dict) -> str:
     status = str(item.get("status") or "").strip()
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     intro = str(metadata.get("intro") or metadata.get("description") or metadata.get("summary") or "").strip()
+    business = str(metadata.get("business") or metadata.get("main_business") or metadata.get("主营业务") or "").strip()
     parts = [name]
     if status:
         parts.append(f"状态：{status}")
+    if business:
+        parts.append(f"主营业务：{business}")
     if intro:
         parts.append(f"简介：{intro}")
+    if not business and not intro:
+        parts.append("尚未沉淀主营业务或公司简介")
     return "｜".join(parts)
 
 

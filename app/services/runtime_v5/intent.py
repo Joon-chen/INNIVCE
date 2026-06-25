@@ -706,7 +706,7 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
-    if _has_any(text, ("公司是做什么", "公司介绍", "这家公司", "公司情况", "主营业务", "主要业务", "公司主营", "业务范围", "公司业务", "做什么业务")):
+    if _is_company_intro_query(text):
         return IntentResult(
             question_type="query",
             intent="company_intro",
@@ -722,6 +722,40 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
         confidence=0.55,
         canonical_question=question,
     )
+
+
+def _is_company_intro_query(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact:
+        return False
+    if _has_any(
+        compact,
+        (
+            "公司介绍",
+            "公司情况",
+            "主营业务",
+            "主要业务",
+            "公司主营",
+            "业务范围",
+            "公司业务",
+            "做什么业务",
+            "是什么公司",
+        ),
+    ):
+        return True
+    if "公司" in compact and _has_any(
+        compact,
+        (
+            "做什么",
+            "干什么",
+            "业务是什么",
+            "业务有哪些",
+            "靠什么赚钱",
+            "收入来源",
+        ),
+    ):
+        return True
+    return False
 
 
 def _is_organization_export(text: str) -> bool:

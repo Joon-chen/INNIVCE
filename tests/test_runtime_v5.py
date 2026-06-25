@@ -34,6 +34,7 @@ from app.services.gateway.card_renderer import build_runtime_result_card
 from app.services.runtime_v5.command_layer import build_command_plan
 from app.services.runtime_v5.command_route_observer import observe_command_route
 from app.services.runtime_v5.intent import recognize_intent
+from app.services.runtime_v5.planner import plan_task
 from app.services.runtime_v5.llm_intent import LLMCommandIntentCandidate, _prompt, llm_command_intent_candidate, validate_llm_command_intent
 from app.services.runtime_v5.action_observer import route_observation_summary
 from app.services.runtime_v5.diagnostics import runtime_trace_summary
@@ -170,10 +171,27 @@ def test_runtime_v5_open_ended_company_question_does_not_route_to_people_lookup(
 
 
 def test_runtime_v5_company_intro_understands_business_description() -> None:
-    intent = recognize_intent("主营业务", _context("主营业务"))
+    for question in (
+        "主营业务",
+        "公司的主营业务是什么",
+        "公司是做什么的你知道吗",
+        "能躬行科技公司是做什么的，你知道吗",
+    ):
+        intent = recognize_intent(question, _context(question))
 
-    assert intent.intent == "company_intro"
-    assert intent.data_scope == "company"
+        assert intent.intent == "company_intro"
+        assert intent.data_scope == "company"
+
+
+def test_runtime_v5_company_intro_uses_only_company_profile_source() -> None:
+    intent = recognize_intent("能躬行科技公司是做什么的，你知道吗", _context("能躬行科技公司是做什么的，你知道吗"))
+    plan = plan_task(intent)
+
+    assert plan.strategy == "company_intro"
+    assert plan.sources == ("company_profile",)
+    assert "knowledge" not in plan.sources
+    assert "workevent" not in plan.sources
+    assert "web" not in plan.sources
 
 
 def _assert_runtime_state_company_id(runtime_state: dict, company_id: str = "company_1") -> None:
