@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.services.runtime_v5.models import (
@@ -11,6 +12,8 @@ from app.services.runtime_v5.models import (
     ResultFollowup,
     RuntimeContext,
 )
+from app.services.runtime_v5.response_classification import classify_response_request
+from app.services.runtime_v5.interaction_intent import classify_interaction_intent
 
 
 _LOCAL_TZ = ZoneInfo("Asia/Shanghai")
@@ -28,7 +31,8 @@ def compose_answer(
         return _compose_followup(context=context, followup=followup)
 
     if intent.intent == "smalltalk":
-        return ComposedAnswer(answer=_smalltalk_answer(context))
+        fallback_answer = str(intent.entities.get("fallback_answer") or "").strip()
+        return ComposedAnswer(answer=fallback_answer or _smalltalk_answer(context))
 
     if intent.intent == "action_trace":
         return ComposedAnswer(answer=_action_trace_answer(context))
@@ -135,25 +139,15 @@ def _with_command_enrichment(answer: str, *, intent: IntentResult) -> str:
     if not enrichment:
         return answer
     objective = str(enrichment.get("objective") or "").strip()
-    output_preferences = enrichment.get("output_preferences") if isinstance(enrichment.get("output_preferences"), dict) else {}
-    preference_text = _output_preference_text(output_preferences)
-    tags = enrichment.get("semantic_tags") if isinstance(enrichment.get("semantic_tags"), list) else []
-    tag_text = "、".join(str(item).strip() for item in tags[:3] if str(item).strip())
-    context_parts = []
-    if objective:
-        context_parts.append(f"目标：{objective}")
-    if preference_text:
-        context_parts.append(f"视图：{preference_text}")
-    if tag_text:
-        context_parts.append(f"关注：{tag_text}")
-    if not context_parts:
+    intro = _natural_enrichment_intro(objective)
+    if not intro:
         return answer
     text = str(answer or "").strip()
     if not text:
-        return "；".join(context_parts)
-    if text.startswith("目标："):
+        return intro
+    if _has_user_facing_intro(text):
         return answer
-    return f"{'；'.join(context_parts)}。\n{text}"
+    return f"{intro}\n{text}"
 
 
 def _command_enrichment(intent: IntentResult) -> dict:
@@ -162,30 +156,19 @@ def _command_enrichment(intent: IntentResult) -> dict:
     return enrichment if isinstance(enrichment, dict) else {}
 
 
-def _output_preference_text(preferences: dict) -> str:
-    labels = []
-    detail_level = str(preferences.get("detail_level") or "").strip()
-    if detail_level:
-        labels.append({"summary": "摘要", "detail": "明细", "detailed": "明细"}.get(detail_level, detail_level))
-    group_by = str(preferences.get("group_by") or "").strip()
-    if group_by:
-        labels.append(f"按{_group_by_label(group_by)}分组")
-    sort_by = str(preferences.get("sort_by") or "").strip()
-    if sort_by:
-        labels.append(f"按{_group_by_label(sort_by)}排序")
-    return "，".join(labels)
+def _natural_enrichment_intro(objective: str) -> str:
+    if not objective:
+        return ""
+    clean = objective.strip("。；; ")
+    if not clean:
+        return ""
+    if len(clean) > 80:
+        clean = clean[:80].rstrip()
+    return f"我先按你的问题整理当前可见结果：{clean}。"
 
 
-def _group_by_label(value: str) -> str:
-    return {
-        "owner": "负责人",
-        "assignee": "负责人",
-        "department": "部门",
-        "risk": "风险",
-        "due": "截止时间",
-        "status": "状态",
-        "time": "时间",
-    }.get(value, value)
+def _has_user_facing_intro(text: str) -> bool:
+    return text.startswith(("我先", "这类问题", "实时", "当前", "没有", "已", "任务查询", "待审批"))
 
 
 def _with_followup_hint(answer: str, result_context) -> str:
@@ -218,13 +201,35 @@ def _smalltalk_answer(context: RuntimeContext) -> str:
     if "今天星期几" in compact:
         weekdays = ("一", "二", "三", "四", "五", "六", "日")
         return f"今天是星期{weekdays[now.weekday()]}。"
-    if any(token in compact for token in ("我是谁", "你知道我是谁", "你知道我吗", "你认识我吗")):
-        if display_name:
-            return f"我知道，你是{display_name}。"
-        return "我知道你是当前飞书会话里的用户，但我还没有拿到可展示的姓名。"
-    if any(token in compact for token in ("你是谁", "你叫什么", "你叫什么名字")):
-        return "我是 Digital Advisor，你的企业数字参谋。"
-    return "我在，正在听。"
+    classification = classify_response_request(question=message, intent="smalltalk", result_type="smalltalk")
+    if classification.fact_kind == "assistant_identity":
+        if "大飞哥" in compact:
+            return "对，我就是大飞哥，也就是 Digital Advisor。你可以把我当成企业数字参谋，不是普通聊天机器人。"
+        return "我是大飞哥，Digital Advisor。我的正事是帮你理解企业里的审批、任务、日程、消息和后续接入的数据。"
+    if classification.fact_kind == "emoji":
+        return "我看到了你在问表情或情绪，但目前不能可靠识别具体表情含义。你可以描述一下表情内容或上下文，我再帮你判断。"
+    return _conversation_seed_answer(context=context, display_name=display_name)
+
+
+def _conversation_seed_answer(*, context: RuntimeContext, display_name: str) -> str:
+    message = str(context.current_message or "").strip()
+    compact = message.replace(" ", "")
+    interaction = classify_interaction_intent(message)
+    if interaction.kind == "greeting":
+        return "在的。你直接说要看什么或想聊什么就行。"
+    if interaction.kind == "conversation_feedback":
+        if any(token in compact for token in ("联网", "上网", "实时联网", "外部实时")):
+            return "你说得对，联网应该是我理解外部世界的一种能力，但不该把普通聊天都推成联网查询。后面我会先理解你的意思，需要查外部事实时再明确走联网。"
+        return "收到，这个反馈有用。我会少一点模板感，先理解你真正想表达什么，再决定要不要查数据或调用工具。"
+    if interaction.kind == "user_context":
+        if any(token in compact for token in ("性格", "风格", "习惯")):
+            return "我现在只能根据我们的交流形成初步感觉：你更喜欢直接、系统性、少绕弯子的沟通。随着工作数据和互动变多，我会更了解你的偏好。"
+        return "我能看到一部分账号和上下文信息，但更重要的是在对话和工作处理中逐步了解你。你也可以直接告诉我希望我怎么配合。"
+    if interaction.kind == "emoji_or_reaction":
+        return "我收到了。这个我会当作你的反馈来理解，不急着打断你。"
+    if display_name:
+        return "我在，直接说就行。"
+    return "我在，直接说就行。"
 
 
 def _partial_answer(execution: ExecutionResult) -> str:
@@ -2655,6 +2660,8 @@ def _structured_problem_answer(item) -> str:
         return item.answer or "找到多个可能对象，请补充更明确的名称。"
     if error_type == "provider_not_registered":
         return f"{source} Provider 还没有注册到 V5 Runtime，当前不会回退旧系统。"
+    if error_type == "external_realtime_not_connected":
+        return item.answer or "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。"
     if error_type == "missing_dependency_result":
         missing_source = _source_label(str(metadata.get("missing_source") or ""))
         return item.answer or f"{source}执行缺少上一步结果：{missing_source}。请先完成对应查询或重新发起完整任务。"
@@ -2877,9 +2884,55 @@ def _clarification_text(intent: IntentResult) -> str:
         labels = {"to": "收件邮箱", "subject": "主题", "body": "正文"}
         missing = [labels.get(key, key) for key in intent.missing_params]
         return f"创建邮件草稿还缺少：{', '.join(missing)}。我会先创建草稿，不会直接发送。"
+    if intent.intent == "external_information_query":
+        return "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。等联网能力开启后，可以查天气、新闻、官网资料、市场信息这些公开信息。"
     if intent.missing_params:
-        return f"还缺少这些信息：{', '.join(intent.missing_params)}。"
-    return "这个问题我还不够确定，你可以再补充一点范围或对象。"
+        return "还缺少这些信息：" + "、".join(_missing_param_label(param) for param in intent.missing_params) + "。"
+    if intent.question_type == "action":
+        return "我先不执行动作，避免改错真实数据。你把动作、对象和内容再连起来说一句，我再继续。"
+    if intent.intent in {"task_query", "calendar_query", "approval_query", "mail_query", "message_query"}:
+        return "我还没对准要查的范围。你可以直接说“我的、部门、公司、某个人”，再加上要看的内容。"
+    if intent.intent in {"general_analysis", "risk_analysis", "decision_advice", "general_query"}:
+        return "我可以继续分析，但现在依据还不够聚焦。你可以直接说想看的主题、范围，或者让我先按公司视角概览。"
+    return "我在。你可以继续自然说，我会结合上下文判断；如果要查数据，把对象和范围带上会更准。"
+
+
+def _missing_param_label(param: str) -> str:
+    labels = {
+        "approval_item": "审批单",
+        "transfer_user_id": "转交人",
+        "add_sign_user_ids": "加签人",
+        "cc_user_ids": "抄送人",
+        "node_ids": "退回节点",
+        "target_base_or_create_file": "新建或写入的表格目标",
+        "scope": "范围",
+        "time_range": "时间范围",
+        "time": "时间",
+        "department": "部门",
+        "target_department_id": "部门",
+        "target_user": "人员",
+        "target_user_id": "人员",
+        "person": "人员",
+        "target": "对象",
+        "task_guid": "任务",
+        "document_id": "文档",
+        "start": "开始时间",
+        "end": "结束时间",
+        "to": "收件人",
+        "subject": "主题",
+        "body": "正文",
+        "recipient": "接收人",
+        "message": "消息内容",
+        "target_type": "发送对象",
+        "text": "消息内容",
+        "chat_id": "会话",
+        "task_query_criteria": "要看的任务范围或条件",
+        "calendar_query_criteria": "要看的日程范围或时间",
+        "approval_query_criteria": "要看的审批范围或条件",
+        "query": "查询内容",
+    }
+    clean = str(param or "").strip()
+    return labels.get(clean, "必要信息")
 
 
 def _format_item(item: dict, *, result_type: str = "") -> str:

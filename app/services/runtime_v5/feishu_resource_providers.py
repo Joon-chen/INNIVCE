@@ -35,7 +35,6 @@ from app.services.cognitive_foundation import (
 )
 from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.drive import FeishuDriveService
-from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.meeting import FeishuMeetingService
 from app.services.feishu.okr import FeishuOkrService
 from app.services.feishu.task import FeishuTaskService
@@ -2950,6 +2949,30 @@ class WebProvider(FeishuResourceProvider):
     def execute(self, request: ProviderRequest) -> ProviderResult:
         if request.operation != "search":
             return _unsupported_operation_result("web", request.operation, sorted(self._OPERATIONS))
+        if request.planner.strategy == "external_information_query":
+            query = ""
+            category = "public_realtime"
+            if isinstance(request.intent.entities, dict):
+                query = str(request.intent.entities.get("external_query") or request.intent.entities.get("query") or "").strip()
+                category = str(request.intent.entities.get("external_category") or category).strip() or category
+            answer = _external_realtime_boundary_answer(category)
+            return ProviderResult(
+                source="web",
+                status="error",
+                result_type="external_information_unavailable",
+                count=0,
+                metadata={
+                    "operation": request.operation,
+                    "tool_name": "external_realtime_search",
+                    "error_type": "external_realtime_not_connected",
+                    "provider_boundary": "external_realtime_not_connected",
+                    "mode": "realtime_external_search_not_connected",
+                    "external_query": query,
+                    "recommended_next_step": "接入外部实时检索 Provider 后再回答公开实时信息。",
+                },
+                answer=answer,
+                error="external_realtime_not_connected",
+            )
         company_id = request.context.runtime_scope.active_company_id
         keywords = _knowledge_keywords(request.context.current_message)
         events = _web_events(self.db, company_id=company_id, keywords=keywords, limit=6)
@@ -3021,6 +3044,14 @@ def _company_profile_answer(item: dict[str, Any]) -> str:
     else:
         lines.append("公司档案里暂时没有维护简介。")
     return "\n".join(lines)
+
+
+def _external_realtime_boundary_answer(category: str) -> str:
+    if category == "local_realtime":
+        return "这类问题需要外部实时位置/门店信息能力；当前还没有接入，所以我不能可靠回答。"
+    if category == "weather_realtime":
+        return "这类问题需要外部实时天气能力；当前还没有接入，所以我不能可靠回答。"
+    return "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。"
 
 
 def _workevent_item(event: WorkEvent) -> dict[str, Any]:
@@ -3491,6 +3522,19 @@ def _workspace_cognitive_aggregation_result(
     company_id = request.context.runtime_scope.active_company_id
     if company_id is None:
         return None
+    department_id = str(request.context.runtime_scope.active_department_id or request.context.identity.department_id or "").strip()
+    if scope == "DEPARTMENT" and not department_id:
+        return _workspace_cognitive_gap_result(
+            request=request,
+            source=source,
+            operation=operation,
+            scope=scope,
+            reason="missing_department_context",
+            answer=(
+                "我现在还没有对准要看的部门，所以不能给出部门概览。"
+                "你可以直接说部门名称，或先完成组织/人员上下文绑定。"
+            ),
+        )
 
     query = (
         select(WorkEvent)
@@ -3500,13 +3544,25 @@ def _workspace_cognitive_aggregation_result(
         .order_by(WorkEvent.occurred_at.desc())
         .limit(1000)
     )
-    department_id = str(request.context.runtime_scope.active_department_id or request.context.identity.department_id or "").strip()
     if scope == "DEPARTMENT" and department_id:
         query = query.where(WorkEvent.allowed_departments.has_any([department_id]))
 
-    events = list(db.scalars(query).all())
+    queried_events = list(db.scalars(query).all())
+    events = _visible_workspace_projection_events(request=request, events=queried_events, scope=scope)
     if not events:
-        return None
+        return _workspace_cognitive_gap_result(
+            request=request,
+            source=source,
+            operation=operation,
+            scope=scope,
+            reason="no_visible_workspace_projection",
+            queried_event_count=len(queried_events),
+            answer=(
+                f"我现在还没有足够的{_workspace_scope_label(scope)}已授权观察数据，"
+                "所以不能给出可靠概览。"
+                "等实时读取或认知同步补齐后，我可以继续帮你看任务负荷、逾期和日程冲突。"
+            ),
+        )
 
     summary = build_workspace_aggregation_from_visible_events(events, scope=scope.lower())
     metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
@@ -3529,6 +3585,8 @@ def _workspace_cognitive_aggregation_result(
         "metric_order": summary.get("metric_order") or [],
         "policy_notes": summary.get("policy_notes") or [],
         "source_event_count": summary.get("source_event_count", 0),
+        "queried_event_count": len(queried_events),
+        "visible_event_count": len(events),
     }
     return ProviderResult(
         source=source,
@@ -3548,26 +3606,155 @@ def _workspace_cognitive_aggregation_result(
             "user_fallback_allowed": False,
             "scope": scope,
             "source_event_count": summary.get("source_event_count", 0),
+            "queried_event_count": len(queried_events),
+            "visible_event_count": len(events),
         },
-        answer=(
-            f"{_provider_label(source)}企业实时读取能力还没有接入 Bot/Tenant 主路径。"
-            f"以下是基于已授权观察数据生成的 Workspace 认知聚合：\n"
-            f"{_workspace_aggregation_answer(metrics, scope=scope)}\n"
-            "这不是飞书实时明细，不包含无权限任务或日程详情。"
-        ),
+        answer=_workspace_cognitive_aggregation_answer(metrics, scope=scope),
         error="",
     )
 
 
-def _workspace_aggregation_answer(metrics: dict[str, Any], *, scope: str) -> str:
-    return (
-        f"{scope} 范围：任务 {int(metrics.get('task_total') or 0)} 个，"
-        f"逾期 {int(metrics.get('overdue_task_count') or 0)} 个，"
-        f"7天内到期 {int(metrics.get('due_soon_task_count') or 0)} 个，"
-        f"日程冲突 {int(metrics.get('calendar_conflict_count') or 0)} 个，"
-        f"会议占用 {int(metrics.get('meeting_occupied_minutes') or 0)} 分钟，"
-        f"负荷分布 {metrics.get('workload_buckets') or {}}。"
+def _workspace_cognitive_gap_result(
+    *,
+    request: ProviderRequest,
+    source: str,
+    operation: str,
+    scope: str,
+    reason: str,
+    answer: str,
+    queried_event_count: int = 0,
+) -> ProviderResult:
+    return ProviderResult(
+        source=source,
+        status="denied",
+        result_type="workspace_aggregation_summary",
+        count=0,
+        items=(),
+        metadata={
+            "operation": operation,
+            "provider_boundary": "workspace_cognitive_gap",
+            "realtime_provider_boundary": "enterprise_realtime_not_integrated",
+            "operational_source": "workspace_cognitive_projection",
+            "error_type": reason,
+            "scope": scope,
+            "company_id": str(request.context.runtime_scope.active_company_id or ""),
+            "queried_event_count": queried_event_count,
+            "visible_event_count": 0,
+            "workevent_as_realtime_source": False,
+            "extracted_item_as_realtime_source": False,
+            "legacy_cli_fallback_used": False,
+            "fallback_used": False,
+            "user_fallback_allowed": False,
+        },
+        answer=answer,
+        error=reason,
     )
+
+
+def _visible_workspace_projection_events(
+    *,
+    request: ProviderRequest,
+    events: list[WorkEvent],
+    scope: str,
+) -> list[WorkEvent]:
+    company_id = request.context.runtime_scope.active_company_id
+    role = str(request.context.identity.role or "").strip().lower()
+    domains = {str(item).strip().lower() for item in (request.context.identity.domains or ()) if str(item).strip()}
+    actor_user_id = str(request.context.identity.user_id or "").strip()
+    actor_open_id = str(request.context.identity.open_id or "").strip()
+    department_id = str(request.context.runtime_scope.active_department_id or request.context.identity.department_id or "").strip()
+    visible: list[WorkEvent] = []
+    for event in events:
+        if company_id is not None and event.company_id != company_id:
+            continue
+        if event.data_classification != "workspace_cognitive":
+            continue
+        if event.event_type not in {"workspace_task_observed", "workspace_calendar_observed"}:
+            continue
+        if scope == "COMPANY":
+            if role in {"owner", "admin"} or "workspace" in domains or "all" in domains:
+                visible.append(event)
+            continue
+        if scope in {"DEPARTMENT", "TEAM"}:
+            allowed_departments = {str(item) for item in (event.allowed_departments or []) if str(item).strip()}
+            event_department = _workspace_event_owner_department(event)
+            if department_id and (department_id in allowed_departments or department_id == event_department):
+                visible.append(event)
+            continue
+        if scope == "SELF":
+            allowed_users = {str(item) for item in (event.allowed_user_ids or []) if str(item).strip()}
+            event_owner = _workspace_event_owner_user(event)
+            if actor_user_id and (actor_user_id in allowed_users or actor_user_id == event_owner):
+                visible.append(event)
+            elif actor_open_id and actor_open_id == _workspace_event_owner_open_id(event):
+                visible.append(event)
+    return visible
+
+
+def _workspace_event_owner_department(event: WorkEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    fields = payload.get("cognitive_fields") if isinstance(payload.get("cognitive_fields"), dict) else {}
+    return str(fields.get("owner_department_id") or "").strip()
+
+
+def _workspace_event_owner_user(event: WorkEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    fields = payload.get("cognitive_fields") if isinstance(payload.get("cognitive_fields"), dict) else {}
+    return str(fields.get("owner_user_id") or "").strip()
+
+
+def _workspace_event_owner_open_id(event: WorkEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    fields = payload.get("cognitive_fields") if isinstance(payload.get("cognitive_fields"), dict) else {}
+    return str(fields.get("owner_open_id") or "").strip()
+
+
+def _workspace_aggregation_answer(metrics: dict[str, Any], *, scope: str) -> str:
+    return _workspace_cognitive_aggregation_answer(metrics, scope=scope)
+
+
+def _workspace_cognitive_aggregation_answer(metrics: dict[str, Any], *, scope: str) -> str:
+    workload = _workspace_workload_text(metrics.get("workload_buckets"))
+    parts = [
+        f"{_workspace_scope_label(scope)}目前可见任务 {int(metrics.get('task_total') or 0)} 个",
+        f"逾期 {int(metrics.get('overdue_task_count') or 0)} 个",
+        f"7 天内到期 {int(metrics.get('due_soon_task_count') or 0)} 个",
+        f"日程冲突 {int(metrics.get('calendar_conflict_count') or 0)} 个",
+        f"会议占用 {int(metrics.get('meeting_occupied_minutes') or 0)} 分钟",
+    ]
+    if workload:
+        parts.append(f"负荷{workload}")
+    return (
+        "我先基于已授权的 Workspace 认知数据给你一个概览：\n"
+        + "，".join(parts)
+        + "。\n"
+        "这只是聚合视角，不展开无权限的任务或日程明细。"
+    )
+
+
+def _workspace_scope_label(scope: str) -> str:
+    return {
+        "SELF": "你",
+        "TEAM": "团队",
+        "DEPARTMENT": "部门",
+        "COMPANY": "公司",
+    }.get(str(scope or "").upper(), "当前范围")
+
+
+def _workspace_workload_text(value: Any) -> str:
+    buckets = value if isinstance(value, dict) else {}
+    labels = []
+    mapping = (
+        ("normal", "正常"),
+        ("busy", "偏忙"),
+        ("overloaded", "过载"),
+        ("at_risk", "有风险"),
+    )
+    for key, label in mapping:
+        count = int(buckets.get(key) or 0)
+        if count:
+            labels.append(f"{label} {count}")
+    return "、".join(labels)
 
 
 def _append_workspace_task_observations_from_items(

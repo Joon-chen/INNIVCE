@@ -1,4 +1,6 @@
+from types import SimpleNamespace
 from uuid import uuid4
+import time
 
 import pytest
 
@@ -19,12 +21,22 @@ from app.services.runtime_v5.models import (
     RuntimeScope,
 )
 from app.services.cognitive_foundation import append_workspace_cognitive_event
+from app.services.llm.call_trace import record_llm_call_trace
+from app.services.llm.prompt_audit import prompt_audit_payload
+from app.services.runtime_v5.clarification import build_clarification_guide
+from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuTaskProvider
+from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.composer import compose_answer
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
+from app.services.gateway.card_renderer import build_runtime_result_card
+from app.services.runtime_v5.command_layer import build_command_plan
+from app.services.runtime_v5.command_route_observer import observe_command_route
 from app.services.runtime_v5.intent import recognize_intent
-from app.services.runtime_v5.llm_intent import LLMCommandIntentCandidate, validate_llm_command_intent
+from app.services.runtime_v5.llm_intent import LLMCommandIntentCandidate, _prompt, llm_command_intent_candidate, validate_llm_command_intent
+from app.services.runtime_v5.action_observer import route_observation_summary
+from app.services.runtime_v5.diagnostics import runtime_trace_summary
 from app.services.runtime_v5.permission import check_runtime_permission
 from app.services.runtime_v5.runtime import run_runtime_v5
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload, runtime_action_input_from_payload
@@ -51,13 +63,22 @@ def _context(
     message: str,
     *,
     display_name: str = "",
+    department_names: tuple[str, ...] = (),
+    job_title: str = "",
     result_context: ResultContext | None = None,
     session_context: dict | None = None,
     chat_id: str | None = None,
 ) -> RuntimeContext:
     company_id = uuid4()
     return RuntimeContext(
-        identity=RuntimeIdentity(open_id="ou_test", role="owner", display_name=display_name, domains=("all",)),
+        identity=RuntimeIdentity(
+            open_id="ou_test",
+            role="owner",
+            display_name=display_name,
+            department_names=department_names,
+            job_title=job_title,
+            domains=("all",),
+        ),
         runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
         current_message=message,
         session_context=session_context or {},
@@ -116,11 +137,43 @@ def _command_plan(
 
 
 def test_runtime_v5_identity_smalltalk_does_not_route_to_people_lookup() -> None:
-    for question in ("你好呀", "你好，现在几点了。", "你是谁", "我是谁", "我是谁呀", "你知道我吗", "你知道我是谁吗"):
+    for question in (
+        "你好呀",
+        "你好，现在几点了。",
+        "你是谁",
+        "我是谁",
+        "我是谁呀",
+        "你知道我吗",
+        "你知道我是谁吗",
+        "你知道这个表情是什么情绪吗",
+        "你知道我现在这个公司的职位吗",
+        "我是什么性格",
+        "你太机械了",
+        "你想联网让你变得更强大一点吗",
+        "我跟你聊天，怎么什么都是要联网了呢",
+    ):
         intent = recognize_intent(question, _context(question))
 
         assert intent.intent == "smalltalk"
         assert intent.data_scope == "self"
+
+
+def test_runtime_v5_open_ended_company_question_does_not_route_to_people_lookup() -> None:
+    for question in (
+        "这个公司谁是老板",
+        "这个公司的老板是谁",
+        "我刚才不是告诉你我是老板吗",
+    ):
+        intent = recognize_intent(question, _context(question))
+
+        assert intent.intent != "people_lookup"
+
+
+def test_runtime_v5_company_intro_understands_business_description() -> None:
+    intent = recognize_intent("主营业务", _context("主营业务"))
+
+    assert intent.intent == "company_intro"
+    assert intent.data_scope == "company"
 
 
 def _assert_runtime_state_company_id(runtime_state: dict, company_id: str = "company_1") -> None:
@@ -219,6 +272,285 @@ def test_runtime_v5_command_llm_candidate_can_resolve_generic_company_task_query
     assert intent.canonical_question == "查看公司任务负荷"
 
 
+def test_runtime_v5_external_public_info_does_not_route_to_business_tools(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    intent = recognize_intent("今天苏州的天气怎么样", _context("今天苏州的天气怎么样"))
+
+    assert intent.intent == "external_information_query"
+    assert intent.data_scope == "external"
+    assert intent.entities["requires_realtime"] is True
+    assert intent.entities["external_category"] == "weather_realtime"
+    assert intent.intent != "task_query"
+    assert intent.intent != "calendar_query"
+
+
+def test_runtime_v5_local_realtime_info_does_not_route_to_general_query(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    intent = recognize_intent("附近有打印店吗", _context("附近有打印店吗"))
+
+    assert intent.intent == "external_information_query"
+    assert intent.data_scope == "external"
+    assert intent.entities["external_category"] == "local_realtime"
+    assert intent.intent != "general_query"
+
+
+def test_runtime_v5_confident_company_intro_rule_does_not_call_command_llm(monkeypatch) -> None:
+    called = False
+
+    def fake_llm(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", fake_llm)
+
+    intent = recognize_intent("公司的主营业务是什么", _context("公司的主营业务是什么"))
+
+    assert intent.intent == "company_intro"
+    assert called is False
+
+
+def test_runtime_v5_domainless_conversation_does_not_route_to_general_query(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    result = run_runtime_v5(context=_context("你是故意重复吗"), providers={})
+
+    assert result.intent.intent == "smalltalk"
+    assert result.intent.data_scope == "self"
+    assert "公司视角" not in result.composed.answer
+    assert "任务查询" not in result.composed.answer
+
+
+def test_runtime_v5_external_capability_conversation_does_not_route_to_external_query(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    for question in (
+        "你想联网让你变得更强大一点吗",
+        "我跟你聊天，怎么什么都是要联网了呢",
+    ):
+        intent = recognize_intent(question, _context(question))
+
+        assert intent.intent == "smalltalk"
+        assert intent.data_scope == "self"
+
+
+def test_runtime_v5_external_public_info_reports_boundary_without_generic_fallback(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    result = run_runtime_v5(
+        context=_context("今天苏州的天气怎么样"),
+        providers={},
+    )
+
+    assert result.intent.intent == "external_information_query"
+    assert result.execution is not None
+    assert result.execution.result_context is not None
+    assert result.execution.result_context.result_type == "external_information_unavailable"
+    assert "外部实时" in result.composed.answer
+    assert "你刚才问的是" not in result.composed.answer
+    assert "补充一点范围或对象" not in result.composed.answer
+
+
+def test_runtime_v5_external_public_info_does_not_use_synced_web_provider(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    result = run_runtime_v5(
+        context=_context("请问今天苏州的天气怎么样"),
+        providers={"web": WebProvider(db=None)},
+    )
+
+    assert result.intent.intent == "external_information_query"
+    assert result.execution is not None
+    assert result.execution.provider_results[0].result_type == "external_information_unavailable"
+    assert result.execution.provider_results[0].metadata["provider_boundary"] == "external_realtime_not_connected"
+    assert "已同步的外部网页资料" not in result.composed.answer
+
+
+def test_runtime_v5_external_public_info_followup_keeps_external_context(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+    result_context = ResultContext(
+        result_type="external_information_unavailable",
+        count=0,
+        metadata={
+            "strategy": "external_information_query",
+            "operation": "external_information_query",
+            "external_query": "苏州天气怎么样",
+            "execution_status": "error",
+        },
+    )
+
+    intent = recognize_intent("今天", _context("今天", result_context=result_context))
+
+    assert intent.intent == "external_information_query"
+    assert intent.data_scope == "external"
+    assert intent.entities["external_query"] == "苏州天气怎么样 今天"
+
+
+def test_runtime_v5_self_task_query_scope_wins_over_company_wording(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    intent = recognize_intent("我问的是需要我处理的任务，不是全公司的", _context("我问的是需要我处理的任务，不是全公司的"))
+
+    assert intent.intent == "task_query"
+    assert intent.data_scope == "self"
+
+
+def test_runtime_v5_self_task_query_recognizes_pending_work_for_me(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    intent = recognize_intent("有哪些任务需要我处理的，我感觉有点困了", _context("有哪些任务需要我处理的，我感觉有点困了"))
+
+    assert intent.intent == "task_query"
+    assert intent.data_scope == "self"
+
+
+def test_command_route_observer_flags_conversation_to_business_risk() -> None:
+    observation = observe_command_route(
+        question="你太机械了",
+        intent="task_query",
+        question_type="query",
+        data_scope="self",
+        confidence=0.8,
+        route_source="llm_candidate",
+    )
+
+    assert observation["misroute_risk"] is True
+    assert "conversation_routed_to_business" in observation["risk_reasons"]
+    assert observation["denoise_action"] == "prefer_conversation"
+
+
+def test_runtime_v5_llm_candidate_rejects_conversation_routed_to_business() -> None:
+    validated = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="self",
+            confidence=0.92,
+            canonical_question="你太机械了",
+            reason="mistaken business route",
+        ),
+        rule_intent=IntentResult(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            confidence=0.95,
+            canonical_question="你太机械了",
+        ),
+        force=True,
+    )
+
+    assert validated is None
+
+
+def test_runtime_v5_llm_candidate_keeps_self_scope_for_self_workload() -> None:
+    validated = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            confidence=0.92,
+            canonical_question="有哪些任务需要我处理",
+            reason="workspace task query",
+        ),
+        rule_intent=IntentResult(
+            question_type="query",
+            intent="general_query",
+            data_scope="company",
+            confidence=0.55,
+            canonical_question="有哪些任务需要我处理",
+        ),
+        force=True,
+    )
+
+    assert validated is not None
+    assert validated.intent == "task_query"
+    assert validated.data_scope == "self"
+    assert validated.entities["command_intent_trace"]["route_observation"]["denoise_action"] == "none"
+
+
+def test_runtime_v5_records_route_observation_trace(monkeypatch) -> None:
+    recorded: list[dict] = []
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+    monkeypatch.setattr("app.services.runtime_v5.runtime.record_route_observation_trace", lambda chat_id, entry: recorded.append({"chat_id": chat_id, **entry}))
+
+    result = run_runtime_v5(
+        context=_context("我跟你聊天，怎么什么都是要联网了呢", chat_id="chat-route"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert recorded
+    assert recorded[-1]["chat_id"] == "chat-route"
+    assert recorded[-1]["intent"] == "smalltalk"
+    assert recorded[-1]["route_observation"]["denoise_action"] == "none"
+
+
+def test_runtime_diagnostics_includes_route_observation() -> None:
+    envelope = run_runtime_v5(
+        context=_context("我跟你聊天，怎么什么都是要联网了呢"),
+        providers={},
+    )
+
+    summary = runtime_trace_summary(envelope)
+
+    assert summary["route_observation"]["available"] is True
+    assert summary["route_observation"]["intent"] == "smalltalk"
+    assert summary["route_observation"]["interaction_kind"] == "conversation_feedback"
+
+
+def test_route_observation_summary_counts_misroute_risks() -> None:
+    summary = route_observation_summary(
+        [
+            {"misroute_risk": False, "denoise_action": "none", "risk_reasons": []},
+            {"misroute_risk": True, "denoise_action": "prefer_conversation", "risk_reasons": ["conversation_routed_to_business"]},
+            {"misroute_risk": True, "denoise_action": "prefer_conversation", "risk_reasons": ["conversation_routed_to_business"]},
+        ]
+    )
+
+    assert summary["status"] == "needs_attention"
+    assert summary["total_count"] == 3
+    assert summary["risky_count"] == 2
+    assert summary["risk_reasons"]["conversation_routed_to_business"] == 2
+
+
+def test_runtime_v5_low_confidence_business_query_uses_contextual_clarification() -> None:
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="department",
+        missing_params=(),
+        confidence=0.52,
+        canonical_question="看看情况",
+    )
+
+    guide = build_clarification_guide(context=_context("看看情况"), intent=intent, fallback="")
+
+    assert "我还没对准要查的范围" in guide.prompt
+    assert "这个问题我还不够确定" not in guide.prompt
+    assert "补充一点范围或对象" not in guide.prompt
+
+
+def test_runtime_v5_low_confidence_action_clarification_does_not_use_generic_fallback() -> None:
+    answer = compose_answer(
+        context=_context("帮我处理一下"),
+        intent=IntentResult(
+            question_type="action",
+            intent="message_send",
+            data_scope="self",
+            missing_params=(),
+            confidence=0.5,
+            canonical_question="帮我处理一下",
+        ),
+        permission=PermissionDecision(allowed=True),
+        execution=None,
+    )
+
+    assert "先不执行动作" in answer.answer
+    assert "这个问题我还不够确定" not in answer.answer
+
+
 def test_runtime_v5_command_llm_candidate_does_not_override_confident_action(monkeypatch) -> None:
     called = False
 
@@ -239,10 +571,27 @@ def test_runtime_v5_command_llm_candidate_does_not_override_confident_action(mon
 
     assert called is False
     assert intent.intent == "task_create"
-    assert intent.question_type == "action"
 
 
-def test_runtime_v5_command_llm_enriches_confident_business_query(monkeypatch) -> None:
+def test_runtime_v5_confident_operational_query_does_not_block_on_command_llm(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    intent = recognize_intent("我的任务", _context("我的任务"))
+
+    assert called is False
+    assert intent.intent == "task_query"
+    assert intent.data_scope == "self"
+    assert intent.question_type == "query"
+
+
+def test_runtime_v5_command_llm_understands_precise_business_query(monkeypatch) -> None:
     called = False
 
     def fake_candidate(**kwargs):
@@ -272,31 +621,304 @@ def test_runtime_v5_command_llm_enriches_confident_business_query(monkeypatch) -
     assert called is True
     assert intent.intent == "task_query"
     assert intent.data_scope == "company"
-    assert intent.entities["status"] == "open"
-    enrichment = intent.entities["command_enrichment"]
-    assert enrichment["business_domain"] == "Workspace"
-    assert enrichment["objective"] == "查看公司任务负荷和风险"
-    assert enrichment["constraints"] == {"status": "open"}
-    assert enrichment["output_preferences"]["group_by"] == "owner"
-    assert enrichment["semantic_tags"] == ["workload", "risk"]
+    assert intent.entities["command_enrichment"]["objective"] == "查看公司任务负荷和风险"
 
 
-def test_runtime_v5_command_llm_cannot_reroute_confident_business_query(monkeypatch) -> None:
+def test_command_plan_always_includes_command_frame_for_rule_query() -> None:
+    command_plan = build_command_plan(context=_context("全公司任务"))
+
+    assert command_plan.command_frame is not None
+    assert command_plan.command_frame.intent == "task_query"
+    assert command_plan.command_frame.dialogue_mode == "present"
+    assert command_plan.command_frame.scope == "company"
+    assert command_plan.command_frame.domain == "Workspace"
+    assert command_plan.command_frame.skill_intent == "task_query"
+    assert command_plan.intent_result.entities["command_frame"]["route_path"] == "rule"
+
+
+def test_command_plan_always_includes_command_frame_for_conversation() -> None:
+    command_plan = build_command_plan(context=_context("你好"))
+
+    assert command_plan.command_frame is not None
+    assert command_plan.command_frame.intent == "smalltalk"
+    assert command_plan.command_frame.dialogue_mode == "answer"
+    assert command_plan.command_frame.utterance_type == "conversation"
+    assert command_plan.command_frame.response_intent["intro_intent"] == "natural_reply"
+
+
+def test_runtime_v5_plain_smalltalk_does_not_spend_command_llm(monkeypatch) -> None:
+    called = False
+
     def fake_candidate(**kwargs):
-        return LLMCommandIntentCandidate(
-            question_type="query",
-            intent="calendar_query",
-            data_scope="company",
-            confidence=0.95,
-            canonical_question="查看公司日程",
-        )
+        nonlocal called
+        called = True
+        return None
 
     monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
 
-    intent = recognize_intent("全公司任务", _context("全公司任务"))
+    intent = recognize_intent("你好", _context("你好"))
+
+    assert called is False
+    assert intent.intent == "smalltalk"
+
+
+def test_runtime_v5_contextual_short_followup_keeps_recent_external_context(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "app.services.runtime_v5.intent._load_conversation_context",
+        lambda chat_id: SimpleNamespace(
+            turns=(
+                SimpleNamespace(
+                    user="请问今天苏州的天气怎么样",
+                    assistant="这类问题需要外部实时信息能力。",
+                    route_path="rule",
+                    route_label="external_information_query",
+                ),
+            )
+        ),
+    )
+
+    intent = recognize_intent("今天", _context("今天", chat_id="chat_weather_followup"))
+
+    assert intent.intent == "external_information_query"
+    assert intent.data_scope == "external"
+
+
+def test_runtime_v5_contextual_scope_correction_keeps_task_self_scope(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "app.services.runtime_v5.intent._load_conversation_context",
+        lambda chat_id: SimpleNamespace(
+            turns=(
+                SimpleNamespace(
+                    user="整个公司的任务呢",
+                    assistant="以下是基于已授权观察数据生成的 Workspace 认知聚合。",
+                    route_path="rule",
+                    route_label="task_query",
+                ),
+            )
+        ),
+    )
+
+    intent = recognize_intent("我问的是需要我处理的任务，不是全公司的", _context("我问的是需要我处理的任务，不是全公司的", chat_id="chat_task_scope"))
 
     assert intent.intent == "task_query"
-    assert "command_enrichment" not in intent.entities
+    assert intent.data_scope == "self"
+
+
+def test_runtime_v5_non_work_personal_service_does_not_route_to_task(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    for message in ("有需要我帮忙的吗", "我有点饿了", "帮我订一下吃的"):
+        intent = recognize_intent(message, _context(message))
+        assert intent.intent == "smalltalk"
+        assert intent.data_scope == "self"
+
+
+def test_runtime_v5_contextual_business_rejection_returns_conversation(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+    monkeypatch.setattr(
+        "app.services.runtime_v5.intent._load_conversation_context",
+        lambda chat_id: SimpleNamespace(
+            turns=(
+                SimpleNamespace(
+                    user="我的任务",
+                    assistant="任务查询",
+                    route_path="rule",
+                    route_label="task_query",
+                ),
+            )
+        ),
+    )
+
+    intent = recognize_intent("我说的是别的，不是任务", _context("我说的是别的，不是任务", chat_id="chat_reject_task_context"))
+
+    assert intent.intent == "smalltalk"
+    assert intent.data_scope == "self"
+
+
+def test_runtime_v5_clarification_does_not_leak_internal_param_names() -> None:
+    answer = compose_answer(
+        context=_context("帮你转我一下"),
+        intent=IntentResult(
+            question_type="query",
+            intent="task_query",
+            data_scope="self",
+            missing_params=("task_query_criteria",),
+            confidence=0.5,
+        ),
+        permission=PermissionDecision(allowed=True),
+        execution=None,
+    )
+
+    assert "task_query_criteria" not in answer.answer
+    assert "任务范围或条件" in answer.answer
+
+
+def test_runtime_v5_command_llm_carries_profile_update_candidate() -> None:
+    rule_intent = IntentResult(
+        question_type="query",
+        intent="smalltalk",
+        data_scope="self",
+        confidence=0.4,
+    )
+
+    validated = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            confidence=0.91,
+            canonical_question="以后不要直呼姓名",
+            draft_response_hint="明白，以后我会按你的偏好称呼。",
+            profile_update={
+                "preferred_address": "陈总",
+                "avoid_direct_name": True,
+                "tone_tips": "更直接一点",
+                "role": "owner",
+            },
+        ),
+        rule_intent=rule_intent,
+    )
+
+    assert validated is not None
+    assert validated.entities["profile_update_candidate"] == {
+        "preferred_address": "陈总",
+        "avoid_direct_name": True,
+        "tone_tips": "更直接一点",
+    }
+    assert validated.entities["command_frame"]["profile_update"]["preferred_address"] == "陈总"
+
+
+def test_runtime_v5_told_you_context_question_stays_conversation_when_llm_unavailable(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    intent = recognize_intent("我刚才不是告诉你，你的外号是大飞哥吗", _context("我刚才不是告诉你，你的外号是大飞哥吗"))
+
+    assert called is True
+    assert intent.intent == "smalltalk"
+
+
+def test_runtime_v5_company_owner_question_stays_conversation_without_execution(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    result = run_runtime_v5(
+        context=_context("这个公司的老板是谁", display_name="陈俊"),
+        providers={},
+    )
+
+    assert called is False
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer
+
+
+def test_runtime_v5_owner_correction_stays_conversation_without_execution(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    result = run_runtime_v5(
+        context=_context("我是老板，你忘记了", display_name="陈俊"),
+        providers={},
+    )
+
+    assert called is False
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer
+
+
+def test_runtime_v5_self_role_question_stays_conversation_without_execution(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    result = run_runtime_v5(
+        context=_context("你知道我现在在这个公司的职位吗", display_name="陈俊", department_names=("管理层",), job_title="CEO"),
+        providers={},
+    )
+
+    assert called is False
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer
+
+
+def test_runtime_v5_forced_command_llm_timeout_degrades_without_provider_route(monkeypatch) -> None:
+    def slow_candidate(**kwargs):
+        time.sleep(0.05)
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", slow_candidate)
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_route_for_task", lambda task_type: type("Route", (), {"latency_budget_ms": 1})())
+
+    intent = recognize_intent("这个公司谁是老板", _context("这个公司谁是老板"))
+
+    assert intent.intent == "smalltalk"
+    assert intent.entities == {}
+
+
+def test_runtime_v5_explicit_slash_command_bypasses_natural_language_rules() -> None:
+    intent = recognize_intent("/system diagnostics", _context("/system diagnostics"))
+
+    assert intent.intent == "runtime_status"
+    assert intent.confidence == 1.0
+    assert intent.entities["command_frame"]["route_path"] == "explicit_command"
+    assert intent.entities["explicit_command"]["family"] == "observability"
+
+
+def test_runtime_v5_explicit_command_guard_covers_governance_policy_and_unknown() -> None:
+    governance = recognize_intent("/capability registry", _context("/capability registry"))
+    policy = recognize_intent("/policy identity", _context("/policy identity"))
+    unknown = recognize_intent("/whatever", _context("/whatever"))
+
+    assert governance.intent == "governance_view"
+    assert governance.entities["explicit_command"]["family"] == "governance"
+    assert policy.intent == "runtime_status"
+    assert policy.entities["explicit_command"]["family"] == "policy"
+    assert unknown.intent == "smalltalk"
+    assert unknown.entities["explicit_command"]["family"] == "unknown"
+    assert "可用显式命令" in unknown.entities["fallback_answer"]
+
+
+def test_runtime_v5_smalltalk_composer_answers_job_title_fact_without_provider() -> None:
+    result = run_runtime_v5(
+        context=_context("你知道我在这个公司的职位吗", display_name="陈俊", department_names=("管理层",), job_title="CEO"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert "逐步了解你" in result.composed.answer or "直接告诉我" in result.composed.answer
 
 
 def test_runtime_v5_command_llm_validator_rejects_unknown_or_low_confidence_candidates() -> None:
@@ -331,6 +953,163 @@ def test_runtime_v5_command_llm_validator_rejects_unknown_or_low_confidence_cand
 
     assert unknown is None
     assert low_confidence is None
+
+
+def test_runtime_v5_command_llm_candidate_uses_command_intent_route(monkeypatch) -> None:
+    class FakeGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "command_intent"
+            assert temperature == 0.0
+            return """
+            {
+              "question_type": "query",
+              "intent": "task_query",
+              "data_scope": "company",
+              "confidence": 0.91,
+              "canonical_question": "查看公司任务"
+            }
+            """
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent._running_tests", lambda: False)
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.settings.bot_llm_semantics_enabled", True)
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.LLMGateway", lambda: FakeGateway())
+
+    candidate = llm_command_intent_candidate(
+        question="帮我看看公司任务",
+        context=_context("帮我看看公司任务"),
+        rule_intent=IntentResult(
+            question_type="query",
+            intent="general_query",
+            data_scope="company",
+            confidence=0.5,
+            canonical_question="帮我看看公司任务",
+        ),
+    )
+
+    assert candidate is not None
+    assert candidate.intent == "task_query"
+    assert candidate.data_scope == "company"
+
+
+def test_runtime_v5_command_prompt_includes_context_but_stays_compact() -> None:
+    prompt = _prompt(
+        question="系统为什么这么慢",
+        context=_context("系统为什么这么慢"),
+        rule_intent=IntentResult(
+            question_type="query",
+            intent="general_analysis",
+            data_scope="company",
+            confidence=0.55,
+            canonical_question="系统为什么这么慢",
+        ),
+    )
+    audit = prompt_audit_payload(prompt=prompt, task_type="command_intent", lane="foreground_fast")
+
+    assert audit["prompt_chars"] < 3600
+    assert audit["line_count"] < 80
+    assert audit["has_intent_profile_context"] is True
+    assert audit["has_session_context"] is True
+    assert "prompt_long" not in audit["risks"]
+    assert "command_with_session_context" not in audit["risks"]
+
+
+def test_runtime_v5_command_llm_trace_includes_model_route() -> None:
+    record_llm_call_trace(
+        {
+            "task_type": "command_intent",
+            "provider": "deepseek_api",
+            "model": "deepseek-chat",
+            "duration_ms": 12,
+            "allow_fallback": False,
+            "fallback_used": False,
+            "status": "success",
+        }
+    )
+    validated = validate_llm_command_intent(
+        LLMCommandIntentCandidate(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            confidence=0.91,
+            canonical_question="查看公司任务",
+        ),
+        rule_intent=IntentResult(
+            question_type="query",
+            intent="general_query",
+            data_scope="company",
+            confidence=0.5,
+            canonical_question="查看公司任务",
+        ),
+    )
+
+    assert validated is not None
+    llm_call = validated.entities["command_intent_trace"]["llm_call"]
+    assert llm_call["task_type"] == "command_intent"
+    assert llm_call["provider"] == "deepseek_api"
+    assert llm_call["model"] == "deepseek-chat"
+    assert llm_call["allow_fallback"] is False
+
+
+def test_runtime_diagnostics_includes_llm_trace_summary() -> None:
+    llm_call = record_llm_call_trace(
+        {
+            "task_type": "command_intent",
+            "lane": "foreground_fast",
+            "provider": "deepseek_api",
+            "model": "deepseek-chat",
+            "duration_ms": 23,
+            "latency_budget_ms": 6000,
+            "allow_fallback": False,
+            "fallback_used": False,
+            "status": "success",
+            "prompt_chars": 120,
+            "response_chars": 60,
+            "prompt_audit": {
+                "prompt_chars": 120,
+                "line_count": 12,
+                "has_profile_context": False,
+                "has_session_context": False,
+                "has_original_answer": False,
+                "risk_count": 0,
+                "risks": [],
+            },
+        }
+    )
+    envelope = SimpleNamespace(
+        intent=IntentResult(
+            question_type="query",
+            intent="task_query",
+            data_scope="company",
+            entities={
+                "command_intent_trace": {
+                    "source": "llm",
+                    "llm_call": llm_call,
+                }
+            },
+            confidence=0.91,
+            canonical_question="查看公司任务",
+        ),
+        plan=PlannerResult(strategy="task_query", sources=("task",)),
+        permission=PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot"),
+        execution=ExecutionResult(strategy="task_query", status="skipped", provider_results=()),
+        composed=ComposedAnswer(answer="ok", result_context=ResultContext(result_type="task_list", count=0)),
+        context=_context("查看公司任务"),
+    )
+
+    summary = runtime_trace_summary(envelope)
+
+    llm_summary = summary["llm_trace_summary"]
+    assert llm_summary["available"] is True
+    assert llm_summary["call_count"] == 1
+    assert llm_summary["total_duration_ms"] == 23
+    assert llm_summary["fallback_used"] is False
+    assert llm_summary["providers"] == ["deepseek_api"]
+    assert llm_summary["lanes"] == ["foreground_fast"]
+    assert llm_summary["task_types"] == ["command_intent"]
+    assert llm_summary["latest"]["lane"] == "foreground_fast"
+    assert llm_summary["latest"]["model"] == "deepseek-chat"
+    assert llm_summary["latest"]["prompt_chars"] == 120
+    assert llm_summary["latest"]["prompt_audit"]["line_count"] == 12
 
 
 def test_runtime_v5_command_llm_low_confidence_with_missing_params_guides_clarification() -> None:
@@ -373,7 +1152,138 @@ def test_runtime_v5_smalltalk_composer_answers_identity_without_provider() -> No
     assert result.intent.intent == "smalltalk"
     assert result.execution is not None
     assert result.execution.status == "skipped"
-    assert result.composed.answer == "我知道，你是陈俊。"
+    assert "逐步了解你" in result.composed.answer or "直接告诉我" in result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_answers_name_question_without_llm() -> None:
+    result = run_runtime_v5(
+        context=_context("我叫什么名字", display_name="陈俊"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert "逐步了解你" in result.composed.answer or "直接告诉我" in result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_enriches_identity_with_people_profile() -> None:
+    result = run_runtime_v5(
+        context=_context("我是谁", display_name="王敏", department_names=("销售部",), job_title="销售经理"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert "逐步了解你" in result.composed.answer or "直接告诉我" in result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_answers_owner_identity_without_llm() -> None:
+    result = run_runtime_v5(
+        context=_context("我是老板吗", display_name="陈俊"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert "逐步了解你" in result.composed.answer or "直接告诉我" in result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_answers_assistant_alias_naturally() -> None:
+    result = run_runtime_v5(
+        context=_context("你是大飞哥"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.composed.answer == "对，我就是大飞哥，也就是 Digital Advisor。你可以把我当成企业数字参谋，不是普通聊天机器人。"
+
+
+def test_runtime_v5_smalltalk_composer_answers_preferred_address() -> None:
+    result = run_runtime_v5(
+        context=_context("你应该叫我什么", display_name="陈俊"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert "逐步了解你" in result.composed.answer or "直接告诉我" in result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_answers_owner_address_preference_naturally(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    result = run_runtime_v5(
+        context=_context("可以不直接叫我名字吗，我是你老板呢", display_name="陈俊"),
+        providers={},
+    )
+
+    assert called is False
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_answers_owner_statement_naturally(monkeypatch) -> None:
+    called = False
+
+    def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr("app.services.runtime_v5.llm_intent.llm_command_intent_candidate", fake_candidate)
+
+    result = run_runtime_v5(
+        context=_context("我是这个公司的老板", display_name="陈俊"),
+        providers={},
+    )
+
+    assert called is False
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer
+
+
+def test_runtime_v5_smalltalk_owner_greeting_has_warmth() -> None:
+    result = run_runtime_v5(
+        context=_context("你好", display_name="陈俊"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.composed.answer == "在的。你直接说要看什么或想聊什么就行。"
+
+
+def test_runtime_v5_smalltalk_composer_answers_profile_boundary() -> None:
+    result = run_runtime_v5(
+        context=_context("我是什么性格", display_name="陈俊"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert "直接、系统性、少绕弯子" in result.composed.answer
+
+
+def test_runtime_v5_smalltalk_composer_answers_external_capability_feedback() -> None:
+    result = run_runtime_v5(
+        context=_context("我跟你聊天，怎么什么都是要联网了呢"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert "普通聊天" in result.composed.answer
+    assert "外部事实" in result.composed.answer
 
 
 def test_runtime_v5_smalltalk_composer_answers_assistant_identity_without_provider() -> None:
@@ -385,7 +1295,7 @@ def test_runtime_v5_smalltalk_composer_answers_assistant_identity_without_provid
     assert result.intent.intent == "smalltalk"
     assert result.execution is not None
     assert result.execution.status == "skipped"
-    assert result.composed.answer == "我是 Digital Advisor，你的企业数字参谋。"
+    assert result.composed.answer == "我是大飞哥，Digital Advisor。我的正事是帮你理解企业里的审批、任务、日程、消息和后续接入的数据。"
 
 
 def test_runtime_v5_smalltalk_composer_answers_current_time_without_provider() -> None:
@@ -398,6 +1308,18 @@ def test_runtime_v5_smalltalk_composer_answers_current_time_without_provider() -
     assert result.execution is not None
     assert result.execution.status == "skipped"
     assert result.composed.answer.startswith("现在是北京时间 ")
+
+
+def test_runtime_v5_smalltalk_composer_answers_emoji_without_provider_lookup() -> None:
+    result = run_runtime_v5(
+        context=_context("你知道这个表情是什么情绪吗"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert "不能可靠识别具体表情含义" in result.composed.answer
 
 
 def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypatch) -> None:
@@ -443,6 +1365,85 @@ def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypa
     assert {"self", "department", "company", "today", "this_week", "this_month"}.issubset(option_values)
 
 
+def test_guided_clarification_builder_uses_contextual_department_option() -> None:
+    company_id = uuid4()
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner", department_id="dept-1"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id, active_department_id="dept-1"),
+        current_message="看看部门情况",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="department",
+        missing_params=("department", "time_range"),
+        confidence=0.52,
+    )
+
+    guide = build_clarification_guide(context=context, intent=intent, fallback="")
+
+    payloads = guide.option_payloads()
+    assert guide.reason == "missing_params"
+    assert guide.next_step == "请补充：部门、时间范围"
+    assert {"param": "department", "label": "当前部门", "value": "current_department"} in payloads
+    assert {"param": "time_range", "label": "本周", "value": "this_week"} in payloads
+
+
+def test_clarification_reply_resolves_short_answer_to_command_message() -> None:
+    result_context = ResultContext(
+        result_type="task_query_clarification",
+        count=1,
+        metadata={
+            "execution_status": "clarification",
+            "operation": "task_query",
+            "missing_params": ["scope", "time_range"],
+            "clarification_options": [
+                {"param": "scope", "label": "部门", "value": "department"},
+                {"param": "time_range", "label": "本周", "value": "this_week"},
+            ],
+        },
+    )
+
+    reply = resolve_clarification_reply("部门 本周", result_context)
+
+    assert reply.is_reply is True
+    assert reply.filled_params == {"scope": "department", "time_range": "this_week"}
+    assert reply.resolved_message == "查看部门任务 本周 部门 本周"
+
+
+def test_runtime_v5_clarification_reply_reenters_command_mainline() -> None:
+    clarification_context = ResultContext(
+        result_type="task_query_clarification",
+        count=1,
+        items=({"status": "clarification"},),
+        metadata={
+            "execution_status": "clarification",
+            "operation": "task_query",
+            "missing_params": ["scope", "time_range"],
+            "clarification_options": [
+                {"param": "scope", "label": "部门", "value": "department"},
+                {"param": "time_range", "label": "本周", "value": "this_week"},
+            ],
+        },
+    )
+
+    result = run_runtime_v5(
+        context=_context("部门 本周", result_context=clarification_context),
+        providers={},
+    )
+
+    assert result.intent.intent == "task_query"
+    assert result.intent.data_scope == "department"
+    assert result.execution is not None
+    assert result.execution.status == "error"
+    assert result.execution.provider_results[0].metadata["provider_governance"] is True
+    assert result.context.current_message == "查看部门任务 本周 部门 本周"
+    assert result.context.session_context["runtime_v5_last_clarification_reply"]["filled_params"] == {
+        "scope": "department",
+        "time_range": "this_week",
+    }
+
+
 def test_runtime_v5_command_llm_validator_does_not_escalate_query_to_action() -> None:
     rule_intent = IntentResult(
         question_type="query",
@@ -474,12 +1475,28 @@ def test_runtime_v5_company_task_query_recognizes_company_scope() -> None:
     assert intent.data_scope == "company"
 
 
+def test_runtime_v5_department_task_query_recognizes_department_scope() -> None:
+    intent = recognize_intent("查看部门任务", _context("查看部门任务"))
+
+    assert intent.intent == "task_query"
+    assert intent.question_type == "query"
+    assert intent.data_scope == "department"
+
+
 def test_runtime_v5_company_calendar_query_recognizes_company_scope() -> None:
     intent = recognize_intent("查看全公司日程", _context("查看全公司日程"))
 
     assert intent.intent == "calendar_query"
     assert intent.question_type == "query"
     assert intent.data_scope == "company"
+
+
+def test_runtime_v5_department_calendar_query_recognizes_department_scope() -> None:
+    intent = recognize_intent("查看部门日程", _context("查看部门日程"))
+
+    assert intent.intent == "calendar_query"
+    assert intent.question_type == "query"
+    assert intent.data_scope == "department"
 
 
 def test_runtime_v5_provider_request_carries_execution_identity_contract() -> None:
@@ -570,6 +1587,9 @@ def test_workspace_policy_preflight_outputs_subject_scope_and_identity_metadata(
             open_id="ou_workspace",
             role="owner",
             department_id="dept_1",
+            department_names=("管理层",),
+            display_name="陈俊",
+            job_title="CEO",
             domains=("workspace",),
         ),
         runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
@@ -594,9 +1614,24 @@ def test_workspace_policy_preflight_outputs_subject_scope_and_identity_metadata(
         "company_id": str(company_id),
         "role": "owner",
         "departments": ["dept_1"],
+        "department_names": ["管理层"],
         "managed_departments": [],
         "is_owner": True,
         "is_admin": False,
+        "identity_fact": {
+            "user_id": "user_1",
+            "open_id": "ou_workspace",
+            "display_name": "陈俊",
+            "role": "owner",
+            "department_id": "dept_1",
+            "department_names": ["管理层"],
+            "job_title": "CEO",
+            "email": "",
+            "domains": ["workspace"],
+            "is_owner": True,
+            "is_admin": False,
+            "source": "runtime_identity",
+        },
     }
     assert permission.metadata["policy_scope"] == {
         "requested_scope": "self",
@@ -760,7 +1795,181 @@ def test_workspace_company_task_query_returns_cognitive_aggregation_when_project
     assert item["metrics"]["task_total"] == 1
     assert item["metrics"]["overdue_task_count"] == 1
     assert item["metrics"]["calendar_conflict_count"] == 1
-    assert "这不是飞书实时明细" in result.answer
+    assert "我先基于已授权的 Workspace 认知数据给你一个概览" in result.answer
+    assert "聚合视角" in result.answer
+    assert "负荷分布" not in result.answer
+
+
+def test_workspace_department_task_query_filters_cognitive_projection_by_department() -> None:
+    company_id = uuid4()
+    db = _RuntimeWriteDb()
+    append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-dept-1",
+        source="feishu_user_observation",
+        actor="ou_1",
+        raw_payload={"task_guid": "task-dept-1", "title": "本部门逾期", "status": "todo", "due_at": "2026-06-20T10:00:00+00:00"},
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+    append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-dept-2",
+        source="feishu_user_observation",
+        actor="ou_2",
+        raw_payload={"task_guid": "task-dept-2", "title": "其他部门逾期", "status": "todo", "due_at": "2026-06-20T10:00:00+00:00"},
+        owner_user_id="user-2",
+        owner_open_id="ou_2",
+        owner_department_id="dept-2",
+    )
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner", department_id="dept-1"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id, active_department_id="dept-1"),
+        current_message="查看部门任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="department",
+        confidence=0.9,
+        canonical_question="查看部门任务",
+    )
+    request = ProviderRequest(
+        source="task",
+        operation="list_my_tasks",
+        intent=intent,
+        planner=PlannerResult(strategy="task_query", sources=("task",)),
+        context=context,
+        execution_identity="bot",
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            resource_scope="DEPARTMENT",
+            authorization_status="AUTHORIZED",
+        ),
+    )
+
+    result = FeishuTaskProvider(db=db).execute(request)  # type: ignore[arg-type]
+
+    assert result.status == "success"
+    assert result.result_type == "workspace_aggregation_summary"
+    assert result.metadata["queried_event_count"] == 2
+    assert result.metadata["visible_event_count"] == 1
+    assert result.items[0]["visibility_scope"] == "DEPARTMENT"
+    assert result.items[0]["metrics"]["task_total"] == 1
+    assert result.items[0]["metrics"]["overdue_task_count"] == 1
+
+
+def test_workspace_department_task_query_without_department_context_returns_cognitive_gap() -> None:
+    company_id = uuid4()
+    db = _RuntimeWriteDb()
+    append_workspace_cognitive_event(
+        db,
+        company_id=company_id,
+        object_type="task",
+        object_id="task-dept-1",
+        source="feishu_user_observation",
+        actor="ou_1",
+        raw_payload={"task_guid": "task-dept-1", "title": "部门任务", "status": "todo"},
+        owner_user_id="user-1",
+        owner_open_id="ou_1",
+        owner_department_id="dept-1",
+    )
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看部门任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="department",
+        confidence=0.9,
+        canonical_question="查看部门任务",
+    )
+    request = ProviderRequest(
+        source="task",
+        operation="list_my_tasks",
+        intent=intent,
+        planner=PlannerResult(strategy="task_query", sources=("task",)),
+        context=context,
+        execution_identity="bot",
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            resource_scope="DEPARTMENT",
+            authorization_status="AUTHORIZED",
+        ),
+    )
+
+    result = FeishuTaskProvider(db=db).execute(request)  # type: ignore[arg-type]
+
+    assert result.status == "denied"
+    assert result.result_type == "workspace_aggregation_summary"
+    assert result.error == "missing_department_context"
+    assert result.metadata["provider_boundary"] == "workspace_cognitive_gap"
+    assert result.metadata["realtime_provider_boundary"] == "enterprise_realtime_not_integrated"
+    assert result.metadata["visible_event_count"] == 0
+    assert result.metadata["user_fallback_allowed"] is False
+    assert "还没有对准要看的部门" in result.answer
+    assert "不会改用" not in result.answer
+
+
+def test_workspace_company_task_query_can_aggregate_multiple_departments_for_owner() -> None:
+    company_id = uuid4()
+    db = _RuntimeWriteDb()
+    for dept in ("dept-1", "dept-2"):
+        append_workspace_cognitive_event(
+            db,
+            company_id=company_id,
+            object_type="task",
+            object_id=f"task-{dept}",
+            source="feishu_user_observation",
+            actor=f"ou-{dept}",
+            raw_payload={"task_guid": f"task-{dept}", "title": dept, "status": "todo"},
+            owner_user_id=f"user-{dept}",
+            owner_open_id=f"ou-{dept}",
+            owner_department_id=dept,
+        )
+    context = RuntimeContext(
+        identity=RuntimeIdentity(open_id="ou_owner", role="owner", department_id="dept-1"),
+        runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+        current_message="查看全公司任务",
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        confidence=0.9,
+        canonical_question="查看全公司任务",
+    )
+    request = ProviderRequest(
+        source="task",
+        operation="list_my_tasks",
+        intent=intent,
+        planner=PlannerResult(strategy="task_query", sources=("task",)),
+        context=context,
+        execution_identity="bot",
+        execution_identity_contract=ExecutionIdentityContract(
+            actor_identity="BOT",
+            credential_mode="TENANT_TOKEN",
+            resource_scope="COMPANY",
+            authorization_status="AUTHORIZED",
+        ),
+    )
+
+    result = FeishuTaskProvider(db=db).execute(request)  # type: ignore[arg-type]
+
+    assert result.status == "success"
+    assert result.metadata["queried_event_count"] == 2
+    assert result.metadata["visible_event_count"] == 2
+    assert result.items[0]["visibility_scope"] == "COMPANY"
+    assert result.items[0]["metrics"]["task_total"] == 2
 
 
 def test_workspace_company_calendar_query_returns_enterprise_realtime_provider_gap() -> None:
@@ -2773,6 +3982,13 @@ def test_runtime_result_payload_serializes_builder_output() -> None:
     assert [action["action"] for action in payload["actions"]] == ["approve", "reject"]
     assert payload["metadata"]["company_id"] == "company_1"
     assert payload["metadata"]["strategy"] == "approval_detail"
+    assert payload["metadata"]["response_policy"] == {
+        "response_mode": "instant",
+        "llm_allowed": False,
+        "async_followup_allowed": False,
+        "latency_budget_ms": 800,
+        "reason": "business_result_must_reply_fast",
+    }
 
 
 def test_runtime_result_payload_includes_command_enrichment() -> None:
@@ -2830,6 +4046,125 @@ def test_runtime_result_payload_includes_command_enrichment() -> None:
     }
 
 
+def test_runtime_result_payload_includes_command_frame() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    command_plan = build_command_plan(context=_context("全公司任务"))
+
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(
+            answer="公司任务聚合。",
+            result_context=ResultContext(result_type="task_query", count=1),
+        ),
+    )
+
+    frame = runtime_result_payload(result)["metadata"]["command_frame"]
+
+    assert frame["intent"] == "task_query"
+    assert frame["dialogue_mode"] == "present"
+    assert frame["domain"] == "Workspace"
+    assert frame["skill_intent"] == "task_query"
+
+
+def test_runtime_result_response_policy_allows_llm_for_smalltalk() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    command_plan = _command_plan("smalltalk", result_type="smalltalk", sources=(), data_scope="self")
+    command_plan = CommandPlan(
+        intent=command_plan.intent,
+        steps=command_plan.steps,
+        target_ui=command_plan.target_ui,
+        tool_candidates=command_plan.tool_candidates,
+        context_scope=command_plan.context_scope,
+        intent_result=IntentResult(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            confidence=1.0,
+            canonical_question="你好",
+        ),
+        planner_result=command_plan.planner_result,
+    )
+
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(answer="我在。", result_context=ResultContext(result_type="smalltalk", count=0)),
+    )
+
+    policy = runtime_result_payload(result)["metadata"]["response_policy"]
+
+    assert policy["response_mode"] == "llm_enhanced"
+    assert policy["llm_allowed"] is True
+    assert policy["latency_budget_ms"] == 6000
+    assert policy["reason"] == "smalltalk_can_use_bounded_conversation_llm"
+
+
+def test_runtime_result_response_policy_keeps_operational_query_instant() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    command_plan = _command_plan("people_search", result_type="people_search", sources=("people",), data_scope="self")
+
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(answer="找到 1 个人员。", result_context=ResultContext(result_type="people_search", count=1)),
+    )
+
+    policy = runtime_result_payload(result)["metadata"]["response_policy"]
+
+    assert policy["response_mode"] == "instant"
+    assert policy["llm_allowed"] is False
+    assert policy["reason"] == "business_result_must_reply_fast"
+
+
+def test_runtime_result_response_policy_keeps_permission_boundary_instant_for_any_scope() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    command_plan = _command_plan("calendar_query", result_type="calendar_query", sources=("calendar",), data_scope="self")
+
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(
+            answer="日程实时读取能力还没有接入 Bot/Tenant 主路径。",
+            result_context=ResultContext(result_type="calendar_query", count=0),
+        ),
+    )
+
+    policy = runtime_result_payload(result)["metadata"]["response_policy"]
+
+    assert policy["response_mode"] == "instant"
+    assert policy["llm_allowed"] is False
+    assert policy["reason"] == "scope_or_permission_boundary_must_reply_fast"
+
+
+def test_runtime_result_response_policy_sends_analysis_to_async_followup() -> None:
+    permission = PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot")
+    command_plan = _command_plan(
+        "general_analysis",
+        result_type="general_analysis",
+        question_type="analysis",
+        sources=("workevent",),
+        data_scope="company",
+    )
+
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=permission,
+        execution=None,
+        composed=ComposedAnswer(answer="正在分析公司风险。", result_context=ResultContext(result_type="general_analysis", count=0)),
+    )
+
+    policy = runtime_result_payload(result)["metadata"]["response_policy"]
+
+    assert policy["response_mode"] == "async_followup"
+    assert policy["llm_allowed"] is False
+    assert policy["async_followup_allowed"] is True
+
+
 def test_runtime_v5_composer_uses_command_enrichment_for_query_answer() -> None:
     intent = IntentResult(
         question_type="query",
@@ -2864,7 +4199,7 @@ def test_runtime_v5_composer_uses_command_enrichment_for_query_answer() -> None:
         ),
     )
 
-    assert composed.answer.startswith("目标：查看公司任务负荷和风险；视图：摘要，按负责人分组；关注：workload、risk。")
+    assert composed.answer.startswith("我先按你的问题整理当前可见结果：查看公司任务负荷和风险。")
     assert "任务 1 个。" in composed.answer
     assert "可继续问" in composed.answer
 
@@ -3021,6 +4356,128 @@ def test_runtime_result_filter_uses_resource_plane_for_custom_cognitive_type() -
     ]
 
 
+def test_workspace_cognitive_aggregation_interaction_payload_hides_source_references() -> None:
+    result = build_runtime_result(
+        command_plan=_command_plan("task_query", result_type="task_query", sources=("task",), data_scope="department"),
+        permission=PermissionDecision(
+            allowed=True,
+            requires_confirmation=False,
+            execution_identity="bot",
+            metadata={
+                "policy_scope": {"requested_scope": "department", "resolved_scope": "department"},
+                "identity_decision": {"actor_identity": "BOT", "credential_mode": "TENANT_TOKEN"},
+                "allowed_resource_types": ["task"],
+            },
+        ),
+        execution=None,
+        composed=ComposedAnswer(
+            answer="部门 Workspace 认知聚合。",
+            result_context=ResultContext(
+                result_type="workspace_aggregation_summary",
+                count=1,
+                items=(
+                    {
+                        "resource_plane": "cognitive",
+                        "resource_type": "workspace_aggregation",
+                        "title": "Workspace department 认知聚合",
+                        "summary": "DEPARTMENT 范围：任务 1 个。",
+                        "metrics": {"task_total": 1},
+                        "source_event_ids": ["event_1"],
+                        "source_object_id": "company_1:department",
+                        "source_object_type": "workspace_aggregation",
+                        "source_system": "digital_advisor",
+                        "raw": {"source_object_id": "event_raw_1", "internal_note": "hidden"},
+                    },
+                ),
+            ),
+        ),
+    )
+
+    runtime_payload = runtime_result_payload(result)
+    interaction_payload = interaction_payload_payload(interaction_payload_from_runtime_result(result))
+
+    assert runtime_payload["metadata"]["policy_result_filter"]["aggregation_only"] is True
+    assert runtime_payload["metadata"]["policy_result_filter"]["source_reference_visible"] is False
+    assert runtime_payload["metadata"]["policy_result_filter"]["redaction_applied"] is True
+    assert runtime_payload["items"] == [
+        {
+            "resource_plane": "cognitive",
+            "resource_type": "workspace_aggregation",
+            "title": "Workspace department 认知聚合",
+            "summary": "DEPARTMENT 范围：任务 1 个。",
+            "metrics": {"task_total": 1},
+        }
+    ]
+    assert interaction_payload["payload_type"] == "summary"
+    assert interaction_payload["items"] == runtime_payload["items"]
+    assert "source_event_ids" not in interaction_payload["items"][0]
+    assert "raw" not in interaction_payload["items"][0]
+
+
+def test_runtime_v5_workspace_company_query_filters_cognitive_aggregation_before_interaction_payload() -> None:
+    class WorkspaceAggregationProvider:
+        source = "task"
+        _OPERATIONS = {"list_my_tasks": ("task.list_my_tasks", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            return ProviderResult(
+                source="task",
+                status="success",
+                result_type="workspace_aggregation_summary",
+                count=1,
+                items=(
+                    {
+                        "resource_plane": "cognitive",
+                        "resource_type": "workspace_aggregation",
+                        "title": "Workspace company 认知聚合",
+                        "summary": "COMPANY 范围：任务 2 个。",
+                        "metrics": {"task_total": 2, "overdue_task_count": 1},
+                        "source_event_ids": ["event_1", "event_2"],
+                        "source_object_id": "company_1:company",
+                        "source_object_type": "workspace_aggregation",
+                        "source_system": "digital_advisor",
+                        "raw": {"source_object_id": "raw_event_1", "private_detail": "hidden"},
+                    },
+                ),
+                metadata={"provider_boundary": "workspace_cognitive_aggregation"},
+                answer="COMPANY 范围：任务 2 个，逾期 1 个。",
+            )
+
+    result = run_runtime_v5(
+        context=_context("查看全公司任务"),
+        providers={"task": WorkspaceAggregationProvider()},
+    )
+
+    runtime_payload = result.composed.metadata["runtime_result"]
+    interaction_payload = interaction_payload_payload(
+        interaction_payload_from_runtime_result(runtime_result_from_payload(runtime_payload))
+    )
+
+    assert result.intent.intent == "task_query"
+    assert result.intent.data_scope == "company"
+    assert runtime_payload["result_type"] == "workspace_aggregation_summary"
+    assert runtime_payload["metadata"]["scope_context"]["scope"] == "COMPANY"
+    assert runtime_payload["metadata"]["policy_result_filter"]["aggregation_only"] is True
+    assert runtime_payload["metadata"]["policy_result_filter"]["source_reference_visible"] is False
+    item = runtime_payload["items"][0]
+    assert item["resource_plane"] == "cognitive"
+    assert item["resource_type"] == "workspace_aggregation"
+    assert item["title"] == "Workspace company 认知聚合"
+    assert item["summary"] == "COMPANY 范围：任务 2 个。"
+    assert item["metrics"] == {"task_total": 2, "overdue_task_count": 1}
+    assert item["visibility_scope"] == "COMPANY"
+    assert item["company_id"] == runtime_payload["metadata"]["company_id"]
+    assert "source_event_ids" not in item
+    assert "source_object_id" not in item
+    assert "source_object_type" not in item
+    assert "source_system" not in item
+    assert "raw" not in item
+    assert interaction_payload["payload_type"] == "summary"
+    assert interaction_payload["items"] == runtime_payload["items"]
+    assert "source_event_ids" not in interaction_payload["items"][0]
+    assert "raw" not in interaction_payload["items"][0]
+
+
 def test_runtime_result_filter_removes_denied_mixed_resource_items() -> None:
     result = build_runtime_result(
         command_plan=_command_plan("task_query", result_type="task_query", sources=("task", "insight")),
@@ -3135,6 +4592,83 @@ def test_runtime_v5_interaction_payload_preserves_runtime_result_actions() -> No
     assert payload.metadata["company_id"] == "company_1"
     assert payload.metadata["target_ui"] == "sidepanel"
     assert payload.actions[0]["action"] == "approve"
+
+
+def test_interaction_payload_preserves_contextual_intro() -> None:
+    payload = interaction_payload_from_runtime_result(
+        RuntimeResult(
+            result_type="task_list",
+            status="success",
+            title="任务",
+            summary="你有 2 条任务。",
+            contextual_intro="我先按你当前可见范围整理一下任务。",
+            followup_suggestions=("第一个详情", "按优先级排一下"),
+            target_ui="card",
+            metadata={"company_id": "company_1"},
+        )
+    )
+
+    serialized = interaction_payload_payload(payload)
+
+    assert payload.contextual_intro == "我先按你当前可见范围整理一下任务。"
+    assert payload.followup_suggestions == ("第一个详情", "按优先级排一下")
+    assert serialized["contextual_intro"] == "我先按你当前可见范围整理一下任务。"
+    assert serialized["followup_suggestions"] == ["第一个详情", "按优先级排一下"]
+
+
+def test_runtime_result_uses_command_objective_as_contextual_intro() -> None:
+    command_plan = _command_plan("task_query", result_type="task_list", sources=("task",))
+    command_plan = CommandPlan(
+        **{
+            **command_plan.__dict__,
+            "intent_result": IntentResult(
+                question_type="query",
+                intent="task_query",
+                data_scope="self",
+                confidence=0.9,
+                canonical_question="查看我的任务",
+                entities={"command_enrichment": {"objective": "查看当前任务优先级"}},
+            ),
+        }
+    )
+    result = build_runtime_result(
+        command_plan=command_plan,
+        permission=PermissionDecision(allowed=True, requires_confirmation=False, execution_identity="bot"),
+        execution=ExecutionResult(
+            strategy="task_query",
+            status="success",
+            provider_results=(),
+            result_context=ResultContext(result_type="task_list", count=0, answer="暂无任务。", metadata={"company_id": "company_1"}),
+        ),
+        composed=ComposedAnswer(
+            answer="暂无任务。",
+            result_context=ResultContext(result_type="task_list", count=0, answer="暂无任务。", metadata={"company_id": "company_1"}),
+        ),
+    )
+
+    assert result.contextual_intro == "我先按你的问题整理当前可见结果：查看当前任务优先级。"
+    assert result.followup_suggestions == ("第一个详情", "按优先级排一下", "还有哪些快到期")
+    assert runtime_result_payload(result)["followup_suggestions"] == ["第一个详情", "按优先级排一下", "还有哪些快到期"]
+
+
+def test_runtime_result_card_renders_contextual_intro_before_summary() -> None:
+    card = build_runtime_result_card(
+        {
+            "result_type": "task_list",
+            "title": "任务",
+            "summary": "你有 1 条任务。",
+            "contextual_intro": "我先按你当前可见范围整理一下任务。",
+            "followup_suggestions": ["第一个详情", "按优先级排一下"],
+            "items": [{"title": "跟进客户", "status": "todo"}],
+            "actions": [],
+        },
+        chat_id="oc_1",
+    )
+
+    assert card is not None
+    elements = card["elements"]
+    assert elements[0]["text"]["content"] == "我先按你当前可见范围整理一下任务。"
+    assert elements[-1]["elements"][0]["content"] == "可继续问：第一个详情 / 按优先级排一下"
 
 
 def test_interaction_payload_builder_freezes_payload_types_and_passthrough() -> None:
@@ -3288,3 +4822,54 @@ def test_runtime_v5_result_followup_reads_structured_items_first() -> None:
 
     assert "张三" in result.composed.answer
     assert "上一轮查到两个人" not in result.composed.answer
+
+
+def test_runtime_v5_ambiguous_forward_phrase_stays_conversational() -> None:
+    result = run_runtime_v5(context=_context("帮忙转一下"), providers={})
+
+    assert result.intent.intent == "smalltalk"
+    assert result.intent.missing_params == ()
+    assert "发给谁" in result.composed.answer
+    assert "必要信息" not in result.composed.answer
+    assert "target_type" not in result.composed.answer
+
+
+def test_runtime_v5_non_work_life_request_does_not_inherit_business_context() -> None:
+    result = run_runtime_v5(
+        context=_context(
+            "我要点外卖，不是任务。",
+            result_context=ResultContext(
+                result_type="task_list",
+                count=1,
+                items=({"title": "测试任务", "status": "todo"},),
+                answer="你有 1 条任务。",
+            ),
+        ),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.intent.missing_params == ()
+    assert "生活需求" in result.composed.answer
+    assert "任务查询" not in result.composed.answer
+
+
+def test_runtime_v5_message_send_missing_params_use_human_labels() -> None:
+    answer = compose_answer(
+        context=_context("帮我发消息"),
+        intent=IntentResult(
+            question_type="action",
+            intent="message_send",
+            data_scope="self",
+            missing_params=("target_type", "text"),
+            confidence=0.59,
+            canonical_question="帮我发消息",
+        ),
+        permission=PermissionDecision(allowed=True),
+        execution=None,
+    )
+
+    assert "发送对象" in answer.answer
+    assert "消息内容" in answer.answer
+    assert "必要信息" not in answer.answer
+    assert "target_type" not in answer.answer

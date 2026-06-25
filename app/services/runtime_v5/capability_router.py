@@ -63,6 +63,7 @@ class CapabilityRouter:
                     _missing_provider_result(
                         strategy=plan.strategy,
                         source=source,
+                        intent=intent,
                         operation=_operation_for_source(plan.strategy, source),
                     )
                 )
@@ -154,6 +155,8 @@ def _provider_governance_result(*, snapshot: dict[str, object], request: Provide
     operation_state = provider_snapshot_operation(snapshot, source=request.source, operation=request.operation)
     if operation_state.get("ready"):
         return None
+    if request.planner.strategy == "external_information_query" and request.source == "web":
+        return _external_information_unavailable_result(request)
 
     status = str(operation_state.get("status") or "provider_unavailable")
     label = _provider_label(request.source)
@@ -503,6 +506,7 @@ def _operation_for_source(strategy: str, source: str) -> str:
         ("company_intro", "knowledge"): "search",
         ("company_intro", "workevent"): "summarize",
         ("company_intro", "web"): "search",
+        ("external_information_query", "web"): "search",
         ("risk_analysis", "workevent"): "risk_events",
         ("risk_analysis", "memory"): "related_memory",
         ("risk_analysis", "knowledge"): "risk_policy",
@@ -603,7 +607,14 @@ def _source_for_result_context(result_context: ResultContext) -> str:
     return "result_context"
 
 
-def _missing_provider_result(*, strategy: str, source: str, operation: str = "execute") -> ProviderResult:
+def _missing_provider_result(*, strategy: str, source: str, intent: IntentResult | None = None, operation: str = "execute") -> ProviderResult:
+    if strategy == "external_information_query" and source == "web":
+        query = ""
+        category = "public_realtime"
+        if intent is not None and isinstance(intent.entities, dict):
+            query = str(intent.entities.get("external_query") or intent.entities.get("query") or "").strip()
+            category = str(intent.entities.get("external_category") or category).strip() or category
+        return _external_information_unavailable_result_from_parts(operation=operation, query=query, category=category)
     label = _provider_label(source)
     return ProviderResult(
         source=source,
@@ -654,6 +665,49 @@ def _provider_label(source: str) -> str:
     return labels.get(source, source)
 
 
+def _external_information_unavailable_result(request: ProviderRequest) -> ProviderResult:
+    query = ""
+    category = "public_realtime"
+    if isinstance(request.intent.entities, dict):
+        query = str(request.intent.entities.get("external_query") or request.intent.entities.get("query") or "").strip()
+        category = str(request.intent.entities.get("external_category") or category).strip() or category
+    return _external_information_unavailable_result_from_parts(operation=request.operation, query=query, category=category)
+
+
+def _external_information_unavailable_result_from_parts(*, operation: str, query: str, category: str) -> ProviderResult:
+    answer = _external_realtime_boundary_answer(category)
+    return ProviderResult(
+        source="web",
+        status="error",
+        result_type="external_information_unavailable",
+        count=0,
+        answer=answer,
+        error="external_realtime_not_connected",
+        metadata={
+            "strategy": "external_information_query",
+            "source": "web",
+            "operation": "search",
+            "operation_requested": operation,
+            "error_type": "external_realtime_not_connected",
+            "provider_boundary": "external_realtime_not_connected",
+            "provider_governance": True,
+            "v5_only": True,
+            "legacy_fallback": False,
+            "external_query": query,
+            "external_category": category,
+            "recommended_next_step": "接入外部实时检索 Provider 后再回答公开实时信息。",
+        },
+    )
+
+
+def _external_realtime_boundary_answer(category: str) -> str:
+    if category == "local_realtime":
+        return "这类问题需要外部实时位置/门店信息能力；当前还没有接入，所以我不能可靠回答。"
+    if category == "weather_realtime":
+        return "这类问题需要外部实时天气能力；当前还没有接入，所以我不能可靠回答。"
+    return "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。"
+
+
 def _company_ids_for_execution(context: RuntimeContext) -> tuple[UUID, ...]:
     if context.runtime_scope.scope_type == "single_company":
         return context.runtime_scope.company_ids[:1]
@@ -685,6 +739,10 @@ def _result_context_from_provider_results(
             answer_parts.append(result.answer)
         if result.result_type:
             result_type = result.result_type
+        result_metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        if result_metadata.get("external_query"):
+            metadata["external_query"] = str(result_metadata.get("external_query") or "")
+            metadata["operation"] = "external_information_query"
 
     if not items:
         result_type = _empty_result_type(strategy, provider_results)

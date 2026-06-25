@@ -4,8 +4,11 @@ from datetime import datetime, timedelta
 import re
 from zoneinfo import ZoneInfo
 
+from app.services.runtime_v5.explicit_command import explicit_command_intent
+from app.services.runtime_v5.interaction_intent import classify_interaction_intent
 from app.services.runtime_v5.llm_intent import llm_command_intent
 from app.services.runtime_v5.models import IntentResult, RuntimeContext
+from app.services.runtime_v5.response_classification import classify_response_request
 
 
 _APP_TOKEN_PATTERN = re.compile(r"\b(bascn[-A-Za-z0-9_]+)\b")
@@ -18,18 +21,190 @@ _TASK_GUID_PATTERN = re.compile(r"\b([A-Za-z0-9_-]{8,})\b")
 _EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 _APPROVAL_CURRENT_KEY = "runtime_v5_current_approval_item"
+_LLM_TRIAGE_INTENTS = {
+    "smalltalk",
+    "people_lookup",
+    "message_send",
+    "external_information_query",
+    "general_query",
+    "general_analysis",
+    "decision_advice",
+    "risk_analysis",
+}
 
 
 def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
+    explicit_intent = explicit_command_intent(question, context)
+    if explicit_intent is not None:
+        return explicit_intent
     rule_intent = _recognize_intent_by_rules(question, context)
-    llm_intent = llm_command_intent(question=question, context=context, rule_intent=rule_intent)
-    return llm_intent or rule_intent
+    force_llm = _requires_llm_command_triage(question=question, rule_intent=rule_intent)
+    llm_intent = None
+    if force_llm or _allows_llm_command_fallback(question=question, rule_intent=rule_intent):
+        llm_intent = llm_command_intent(question=question, context=context, rule_intent=rule_intent, force=force_llm)
+    if llm_intent is not None:
+        return llm_intent
+    if force_llm and _should_degrade_on_llm_miss(rule_intent):
+        return _degraded_command_triage_intent(question=question, rule_intent=rule_intent)
+    return rule_intent
+
+
+def _requires_llm_command_triage(*, question: str, rule_intent: IntentResult) -> bool:
+    text = str(question or "").strip()
+    if not text:
+        return False
+    if text.startswith("/"):
+        return False
+    if rule_intent.intent == "smalltalk" and not _smalltalk_needs_command_llm(text):
+        return False
+    if rule_intent.intent in _DETERMINISTIC_RULE_LOCK_INTENTS and rule_intent.confidence >= 0.8 and not rule_intent.missing_params:
+        return False
+    if rule_intent.question_type == "action" and rule_intent.confidence >= 0.75:
+        return False
+    if (
+        rule_intent.intent not in _LLM_TRIAGE_INTENTS
+        and not rule_intent.missing_params
+        and rule_intent.confidence >= 0.8
+        and rule_intent.data_scope == "self"
+    ):
+        return False
+    return True
+
+
+_DETERMINISTIC_RULE_LOCK_INTENTS = {
+    "company_intro",
+    "external_information_query",
+}
+
+
+def _allows_llm_command_fallback(*, question: str, rule_intent: IntentResult) -> bool:
+    text = str(question or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    if rule_intent.intent in _DETERMINISTIC_RULE_LOCK_INTENTS and rule_intent.confidence >= 0.8 and not rule_intent.missing_params:
+        return False
+    if rule_intent.question_type == "action" and rule_intent.confidence >= 0.75:
+        return False
+    if rule_intent.intent == "smalltalk" and not _smalltalk_needs_command_llm(text):
+        return False
+    return True
+
+
+def _smalltalk_needs_command_llm(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return False
+    if len(compact) <= 8 and any(token in compact for token in ("这个", "那个", "这些", "那些", "刚才", "上面", "继续")):
+        return True
+    return any(token in compact for token in ("之前告诉过你", "刚才告诉过你", "不是告诉你"))
+
+
+def _should_degrade_on_llm_miss(rule_intent: IntentResult) -> bool:
+    return rule_intent.intent in {
+        "people_lookup",
+        "message_send",
+    } or bool(rule_intent.missing_params)
+
+
+def _degraded_command_triage_intent(*, question: str, rule_intent: IntentResult) -> IntentResult:
+    if rule_intent.intent == "general_analysis" and _has_any(question, ("慢", "耗时", "卡", "延迟", "为什么这么慢")):
+        intent = "runtime_status"
+        question_type = "query"
+    else:
+        intent = "smalltalk"
+        question_type = "query"
+    return IntentResult(
+        question_type=question_type,  # type: ignore[arg-type]
+        intent=intent,
+        data_scope="self",
+        entities={
+            "fallback_answer": _degraded_command_triage_answer(rule_intent),
+            "command_frame": {
+                "utterance_type": "system_explanation" if intent == "runtime_status" else "conversation",
+                "intent": intent,
+                "question_type": question_type,
+                "scope": "self",
+                "confidence": 0.5,
+                "needs_clarification": True,
+                "route_path": "llm_first_degraded",
+                "route_reason": "command_llm_unavailable_or_timeout",
+                "rule_candidate": {
+                    "intent": rule_intent.intent,
+                    "question_type": rule_intent.question_type,
+                    "scope": rule_intent.data_scope,
+                    "confidence": rule_intent.confidence,
+                },
+            },
+            "command_intent_trace": {
+                "source": "degraded",
+                "mode": "llm_first_degraded",
+                "rule_intent": rule_intent.intent,
+                "final_intent": intent,
+                "reason": "command_llm_unavailable_or_timeout",
+            },
+        },
+        missing_params=(),
+        confidence=0.5,
+        canonical_question=question,
+    )
+
+
+def _degraded_command_triage_answer(rule_intent: IntentResult) -> str:
+    if rule_intent.intent == "people_lookup":
+        return "这句话可能是在问企业上下文，也可能是在查具体人员。为了避免误查通讯录，我先不调用人员查询；请直接说要查哪个人，或换成更明确的问题。"
+    if rule_intent.intent == "message_send":
+        return "这句话可能是在说上下文，不一定是要发送消息。为了避免误发，我先不执行发送；如果要发消息，请明确说“发给谁”和“发什么”。"
+    if rule_intent.intent == "external_information_query":
+        return "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。"
+    if rule_intent.question_type == "action":
+        return "这句话像是要执行动作，但我还没确认清楚要改什么、发给谁或作用在哪个对象上，所以先不动真实数据。你可以直接把动作、对象和内容连在一起说。"
+    if rule_intent.data_scope in {"company", "department", "person", "organization"}:
+        return "我还没把你要看的范围和对象对准，所以先不查业务数据。你可以直接说“查我的/部门/公司”的哪类信息，或者点名对象。"
+    return "我在。你可以继续自然说，我会根据上下文判断；如果是要查数据或执行动作，把对象和范围带上会更准。"
 
 
 def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> IntentResult:
     current_message = context.current_message or ""
     text = question if question.strip() == current_message.strip() else f"{question} {current_message}"
     text = text.strip().lower()
+
+    if _is_external_information_followup(text, context):
+        return IntentResult(
+            question_type="query",
+            intent="external_information_query",
+            data_scope="external",
+            entities=_external_information_entities(question, context),
+            missing_params=(),
+            confidence=0.78,
+            canonical_question=question,
+        )
+
+    contextual_intent = _contextual_followup_intent(question=question, text=text, context=context)
+    if contextual_intent is not None:
+        return contextual_intent
+
+    if _is_non_work_conversation(text):
+        return IntentResult(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            entities={"fallback_answer": _non_work_conversation_answer(text)},
+            missing_params=(),
+            confidence=0.9,
+            canonical_question=question,
+        )
+
+    ambiguous_operation_answer = _ambiguous_operation_conversation_answer(text, context)
+    if ambiguous_operation_answer:
+        return IntentResult(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            entities={"fallback_answer": ambiguous_operation_answer},
+            missing_params=(),
+            confidence=0.86,
+            canonical_question=question,
+        )
 
     if _is_smalltalk(text):
         return IntentResult(
@@ -71,6 +246,16 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
+    if _is_external_information_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="external_information_query",
+            data_scope="external",
+            entities=_external_information_entities(question, context),
+            missing_params=(),
+            confidence=0.82,
+            canonical_question=question,
+        )
     if _is_docs_read(text):
         document_id = _extract_doc_token(question)
         return IntentResult(
@@ -482,7 +667,7 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
-    if _has_any(text, ("电话", "邮箱", "手机号", "职位", "是谁", "谁是", "谁担任")):
+    if _is_people_lookup(text):
         return IntentResult(
             question_type="query",
             intent="people_lookup",
@@ -521,7 +706,7 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
-    if _has_any(text, ("公司是做什么", "公司介绍", "这家公司", "公司情况")):
+    if _has_any(text, ("公司是做什么", "公司介绍", "这家公司", "公司情况", "主营业务", "主要业务", "公司主营", "业务范围", "公司业务", "做什么业务")):
         return IntentResult(
             question_type="query",
             intent="company_intro",
@@ -549,40 +734,9 @@ def _is_organization_export(text: str) -> bool:
 
 
 def _is_smalltalk(text: str) -> bool:
-    normalized = text.strip().lower().strip("。.!！?？ ")
-    compact = re.sub(r"\s+", "", normalized)
-    if any(token in compact for token in ("现在几点", "几点了", "今天几号", "今天日期", "今天星期几")):
+    if classify_response_request(question=text, intent="smalltalk", result_type="smalltalk").response_class == "fact":
         return True
-    if any(token in compact for token in ("我是谁", "你知道我是谁", "你知道我吗", "你认识我吗")):
-        return True
-    if any(token in compact for token in ("你是谁", "你叫什么", "你叫什么名字")):
-        return True
-    terms = {
-        "在不在",
-        "在吗",
-        "在么",
-        "你在吗",
-        "你在不在",
-        "有人吗",
-        "能听到吗",
-        "还在吗",
-        "hello",
-        "hi",
-        "嗨",
-        "你好",
-        "你好呀",
-        "你好啊",
-        "您好",
-        "哈喽",
-        "你是谁",
-        "你叫什么",
-        "你叫什么名字",
-        "你知道我吗",
-        "你认识我吗",
-        "你知道我是谁吗",
-        "我是谁",
-    }
-    return normalized in terms or compact in terms or any(compact == term * 2 for term in terms)
+    return classify_interaction_intent(text).is_smalltalk
 
 
 def _is_action_trace_query(text: str) -> bool:
@@ -625,6 +779,304 @@ def _is_runtime_status_query(text: str) -> bool:
             "运行状态",
         ),
     )
+
+
+def _is_external_information_query(text: str) -> bool:
+    if not text:
+        return False
+    if _is_external_capability_conversation(text):
+        return False
+    if _is_local_public_information_query(text):
+        return True
+    if _has_any(text, ("天气", "气温", "下雨", "降雨", "空气质量", "台风", "新闻", "热搜", "股价", "汇率", "油价", "航班")):
+        return True
+    if _has_any(text, ("官网", "官方网站", "网页", "网站", "公开资料", "网上", "搜索一下", "查一下网上", "外部资料")):
+        return True
+    if _has_any(text, ("今天", "明天", "现在", "最近", "最新")) and _has_any(text, ("政策", "法规", "公告", "市场", "行情", "价格", "新闻")):
+        return True
+    return False
+
+
+def _is_local_public_information_query(text: str) -> bool:
+    compact = text.replace(" ", "")
+    if not _has_any(compact, ("附近", "周边", "附近有", "周围", "这附近")):
+        return False
+    return _has_any(
+        compact,
+        (
+            "有吗",
+            "哪里",
+            "哪家",
+            "推荐",
+            "店",
+            "餐厅",
+            "吃",
+            "喝",
+            "外卖",
+            "烧烤",
+            "火锅",
+            "咖啡",
+            "酒店",
+            "停车",
+            "打印",
+            "药店",
+            "医院",
+            "银行",
+        ),
+    )
+
+
+def _is_external_capability_conversation(text: str) -> bool:
+    return _has_any(text, ("联网", "上网", "外部实时", "实时联网")) and _has_any(
+        text,
+        (
+            "你能",
+            "你可以",
+            "能不能",
+            "可不可以",
+            "要不要",
+            "想不想",
+            "变得",
+            "更强",
+            "聊天",
+            "对话",
+            "推理",
+            "能力",
+            "没能力",
+            "没有推理",
+        ),
+    )
+
+
+def _is_external_information_followup(text: str, context: RuntimeContext) -> bool:
+    metadata = context.result_context.metadata if context.result_context and isinstance(context.result_context.metadata, dict) else {}
+    if metadata.get("operation") != "external_information_query" and metadata.get("strategy") != "external_information_query":
+        return False
+    compact = text.replace(" ", "")
+    if not compact:
+        return False
+    return (
+        len(compact) <= 12
+        or _has_any(compact, ("今天", "明天", "现在", "最近", "最新", "官网", "网站", "苏州", "北京", "上海", "广州", "深圳"))
+    )
+
+
+def _contextual_followup_intent(*, question: str, text: str, context: RuntimeContext) -> IntentResult | None:
+    compact = text.replace(" ", "")
+    if not context.chat_id or not _looks_like_contextual_followup(compact):
+        return None
+    if _rejects_recent_business_context(compact) or _is_non_work_conversation(text):
+        return IntentResult(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            missing_params=(),
+            confidence=0.82,
+            canonical_question=question,
+        )
+    conversation = _load_conversation_context(context.chat_id)
+    if not conversation.turns:
+        return None
+    recent_text = "\n".join(
+        f"{turn.user}\n{turn.assistant}\n{turn.route_path}\n{turn.route_label}"
+        for turn in conversation.turns[-3:]
+    ).lower()
+    if _recent_external_context(recent_text):
+        return IntentResult(
+            question_type="query",
+            intent="external_information_query",
+            data_scope="external",
+            entities={
+                "external_query": _merge_recent_external_query(question=question, recent_text=recent_text),
+                "provider_boundary": "external_realtime_not_connected",
+            },
+            missing_params=(),
+            confidence=0.76,
+            canonical_question=question,
+        )
+    if _recent_task_context(recent_text):
+        return IntentResult(
+            question_type="query",
+            intent="task_query",
+            data_scope=_contextual_scope(compact, fallback="self"),
+            missing_params=(),
+            confidence=0.72,
+            canonical_question=question,
+        )
+    if _recent_calendar_context(recent_text):
+        return IntentResult(
+            question_type="query",
+            intent="calendar_query",
+            data_scope=_contextual_scope(compact, fallback="self"),
+            missing_params=(),
+            confidence=0.72,
+            canonical_question=question,
+        )
+    return None
+
+
+def _looks_like_contextual_followup(compact: str) -> bool:
+    if not compact:
+        return False
+    return _has_any(
+        compact,
+        (
+            "不是公司",
+            "不是部门",
+            "不是任务",
+            "不是待办",
+            "不是审批",
+            "我的呢",
+            "我问的是",
+            "那公司",
+            "那部门",
+            "公司呢",
+            "部门呢",
+            "今天",
+            "明天",
+            "现在",
+            "最近",
+            "最新",
+            "刚才那个",
+            "上面那个",
+            "继续",
+            "展开",
+            "详情",
+            "第一个",
+            "第二个",
+            "第1",
+            "第2",
+            "全部显示",
+        ),
+    )
+
+
+def _rejects_recent_business_context(compact: str) -> bool:
+    return _has_any(compact, ("不是任务", "不是待办", "不是审批", "不是日程", "不是会议", "不是工作"))
+
+
+def _is_non_work_conversation(text: str) -> bool:
+    compact = text.replace(" ", "")
+    if not compact:
+        return False
+    if _has_any(compact, ("外卖", "吃饭", "饿了", "点餐", "奶茶", "咖啡")):
+        return True
+    if _has_any(compact, ("你害怕", "你会害怕", "你累不累", "你饿不饿", "你需要吃饭", "你要吃饭")):
+        return True
+    if _has_any(compact, ("需要我帮忙", "要我帮忙", "我能帮你", "我可以帮你")):
+        return True
+    if _has_any(compact, ("帮我点", "帮我买", "帮我订")) and not _has_any(
+        compact,
+        ("任务", "待办", "日程", "会议", "审批", "邮件", "消息", "文档", "表格"),
+    ):
+        return True
+    return False
+
+
+def _non_work_conversation_answer(text: str) -> str:
+    compact = text.replace(" ", "")
+    if _has_any(compact, ("外卖", "吃饭", "饿了", "点餐", "奶茶", "咖啡")):
+        return "明白，你现在说的是生活需求，不是任务。我可以陪你把想吃什么、预算和偏好理一下；真正查附近店铺或下单，需要后面接入外部实时服务。"
+    if _has_any(compact, ("需要我帮忙", "要我帮忙", "我能帮你", "我可以帮你")):
+        return "我在。你直接说想聊什么或要处理什么就行。"
+    return "我在，听着呢。你可以继续说。"
+
+
+def _ambiguous_operation_conversation_answer(text: str, context: RuntimeContext) -> str:
+    compact = text.replace(" ", "")
+    if not compact:
+        return ""
+    if _has_any(
+        compact,
+        (
+            "任务",
+            "待办",
+            "日程",
+            "会议",
+            "审批",
+            "邮件",
+            "消息",
+            "文档",
+            "表格",
+            "通讯录",
+            "组织架构",
+        ),
+    ):
+        return ""
+    send_or_forward = _has_any(compact, ("转发", "转一下", "发一下", "发我一下", "传一下", "帮我转", "帮你转"))
+    if send_or_forward:
+        has_target = bool(_extract_send_target(text)) or _has_any(compact, ("发给我", "发给自己", "发到这里", "发到当前会话"))
+        has_content = bool(_extract_message_text(text)) or bool(context.result_context)
+        if has_target and has_content:
+            return ""
+        return "我还没对准你想转发或发送什么、发给谁。你可以直接说“发给谁”和“发什么”；如果只是随口聊，也可以继续说。"
+    if _has_any(compact, ("处理一下", "弄一下", "搞一下", "帮忙一下", "帮我一下", "帮你一下")):
+        return "我还没对准要处理的对象。你可以直接说要处理审批、任务、日程、邮件，或者先把情况讲给我听。"
+    return ""
+
+
+def _recent_external_context(text: str) -> bool:
+    return _has_any(text, ("external_information", "天气", "联网", "外部实时", "网页资料", "公开信息"))
+
+
+def _recent_task_context(text: str) -> bool:
+    return _has_any(text, ("task_query", "任务查询", "任务", "workspace"))
+
+
+def _recent_calendar_context(text: str) -> bool:
+    return _has_any(text, ("calendar_query", "日程", "会议", "calendar"))
+
+
+def _contextual_scope(compact: str, *, fallback: str) -> str:
+    if _has_any(compact, ("我的", "我问的是", "不是公司", "不是部门", "我处理", "给我的")):
+        return "self"
+    if _has_any(compact, ("部门", "团队")):
+        return "department"
+    if _has_any(compact, ("公司", "全公司", "整个公司")):
+        return "company"
+    return fallback
+
+
+def _merge_recent_external_query(*, question: str, recent_text: str) -> str:
+    current = str(question or "").strip()
+    if len(current.replace(" ", "")) > 12:
+        return current
+    for marker in ("天气", "气温", "官网", "新闻", "网页", "公开资料"):
+        idx = recent_text.rfind(marker)
+        if idx >= 0:
+            start = max(0, idx - 30)
+            return f"{recent_text[start:idx + len(marker)]} {current}".strip()
+    return current
+
+
+def _load_conversation_context(chat_id: str):
+    from app.services.conversation_context import load_conversation_context
+
+    return load_conversation_context(chat_id)
+
+
+def _external_information_entities(question: str, context: RuntimeContext) -> dict:
+    metadata = context.result_context.metadata if context.result_context and isinstance(context.result_context.metadata, dict) else {}
+    previous_query = str(metadata.get("external_query") or "").strip()
+    query = question.strip()
+    if previous_query and len(query.replace(" ", "")) <= 12:
+        query = f"{previous_query} {query}".strip()
+    return {
+        "query": query,
+        "external_query": query,
+        "external_category": _external_information_category(query),
+        "requires_realtime": True,
+        "provider_boundary": "external_realtime_not_connected",
+    }
+
+
+def _external_information_category(query: str) -> str:
+    compact = str(query or "").replace(" ", "")
+    if _is_local_public_information_query(compact):
+        return "local_realtime"
+    if _has_any(compact, ("天气", "气温", "下雨", "降雨", "空气质量", "台风")):
+        return "weather_realtime"
+    return "public_realtime"
 
 
 def _is_governance_view_query(text: str) -> bool:
@@ -809,8 +1261,27 @@ def _is_task_complete(text: str) -> bool:
 
 def _is_task_query(text: str) -> bool:
     return (
-        _has_any(text, ("我的任务", "我的待办", "待办有哪些", "任务有哪些", "查一下待办", "查一下任务", "查看待办", "查看任务"))
-        or (_has_any(text, ("任务", "待办")) and _has_any(text, ("全公司", "公司", "所有", "全部", "延期", "高风险", "本周到期")))
+        _has_any(
+            text,
+            (
+                "我的任务",
+                "我的待办",
+                "待办有哪些",
+                "任务有哪些",
+                "哪些任务",
+                "哪些待办",
+                "需要我处理",
+                "要我处理",
+                "我处理的任务",
+                "我负责的任务",
+                "分配给我的任务",
+                "查一下待办",
+                "查一下任务",
+                "查看待办",
+                "查看任务",
+            ),
+        )
+        or (_has_any(text, ("任务", "待办")) and _has_any(text, ("全公司", "公司", "所有", "全部", "部门", "团队", "小组", "延期", "高风险", "本周到期")))
     )
 
 
@@ -873,6 +1344,9 @@ def _is_calendar_query(text: str) -> bool:
             "日程安排",
             "查看日程",
             "查一下日程",
+            "部门日程",
+            "团队日程",
+            "小组日程",
             "全公司日程",
             "公司日程",
             "所有日程",
@@ -887,9 +1361,33 @@ def _is_calendar_query(text: str) -> bool:
 
 
 def _query_data_scope(text: str) -> str:
+    if _has_self_scope_signal(text):
+        return "self"
     if _has_any(text, ("全公司", "公司", "所有", "全部")):
         return "company"
+    if _has_any(text, ("部门", "团队", "小组")):
+        return "department"
+    if _has_any(text, ("张三", "李四", "王五", "某人", "指定人", "指定人员")):
+        return "person"
     return "self"
+
+
+def _has_self_scope_signal(text: str) -> bool:
+    return _has_any(
+        text,
+        (
+            "我的",
+            "我自己",
+            "需要我",
+            "要我",
+            "我处理",
+            "我负责",
+            "分配给我",
+            "给我的",
+            "待我",
+            "我问的是",
+        ),
+    )
 
 
 def _is_mail_draft_create(text: str) -> bool:
@@ -927,6 +1425,18 @@ def _is_department_members_query(text: str) -> bool:
         text,
         ("有哪些人", "都有谁", "成员", "人员", "同事", "名单"),
     )
+
+
+def _is_people_lookup(text: str) -> bool:
+    if _has_any(text, ("电话", "邮箱", "手机号")):
+        return True
+    if _has_any(text, ("查通讯录", "通讯录查", "找人", "找一下人", "搜索人员", "人员搜索")):
+        return True
+    if _has_any(text, ("谁担任", "负责人是谁", "谁负责")):
+        return True
+    if _has_any(text, ("职位", "岗位")) and not _has_any(text, ("我", "我的", "你知道我", "我现在", "我在公司", "我在这个公司")):
+        return True
+    return False
 
 
 def _extract_app_token(text: str) -> str | None:
