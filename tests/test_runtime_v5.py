@@ -25,7 +25,7 @@ from app.services.llm.call_trace import record_llm_call_trace
 from app.services.llm.prompt_audit import prompt_audit_payload
 from app.services.runtime_v5.clarification import build_clarification_guide
 from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
-from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuPeopleProvider, FeishuTaskProvider
+from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuPeopleProvider, FeishuTaskProvider, KnowledgeProvider
 from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.composer import compose_answer
@@ -214,6 +214,83 @@ def test_runtime_v5_people_aggregate_questions_route_to_people_not_workspace(mon
         assert intent.data_scope == "organization"
         assert intent.entities["view"] == "people_aggregate"
         assert plan.sources == ("people",)
+
+
+def test_runtime_v5_people_provider_ignores_empty_snapshot_cache(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.runtime_v5.feishu_resource_providers.load_people_snapshot",
+        lambda company_id: {"users": [], "departments": []},
+    )
+    saved: list[dict] = []
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.save_people_snapshot", lambda company_id, payload: saved.append(payload))
+
+    class Provider(FeishuPeopleProvider):
+        def _execute_tool(
+            self,
+            request: ProviderRequest,
+            *,
+            tool_name: str,
+            params: dict | None = None,
+            confirm_write: bool = False,
+        ):
+            return SimpleNamespace(
+                status=ToolExecutionStatus.SUCCESS,
+                error="",
+                answer="",
+                structured_result={
+                    "response_payload": {
+                        "users": [{"name": "张三", "gender": "male"}, {"name": "李四", "gender": "female"}],
+                        "departments": [{"name": "研发部"}],
+                    }
+                },
+            )
+
+    context = _context("公司有多少个人")
+    result = Provider(db=None).execute(
+        ProviderRequest(
+            source="people",
+            operation="get_org_snapshot",
+            intent=IntentResult(question_type="query", intent="organization_snapshot", data_scope="organization", entities={"view": "people_aggregate"}),
+            planner=_command_plan("organization_snapshot", sources=("people",)),
+            context=context,
+            execution_identity="bot",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.count == 2
+    assert result.metadata["cache_hit"] is False
+    assert saved
+    assert "公司共有 2 人" in result.answer
+
+
+def test_runtime_v5_company_profile_query_does_not_render_raw_knowledge_events() -> None:
+    class Db:
+        def get(self, model, company_id):
+            return SimpleNamespace(
+                name="能躬行科技",
+                code="gaustek",
+                status="active",
+                metadata_json={},
+            )
+
+    context = _context("公司是做什么的")
+    result = KnowledgeProvider(db=Db()).execute(
+        ProviderRequest(
+            source="knowledge",
+            operation="search",
+            intent=IntentResult(question_type="query", intent="general_query", data_scope="company", entities={"knowledge_context": "company_profile"}),
+            planner=_command_plan("general_query", sources=("knowledge",)),
+            context=context,
+            execution_identity="bot",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.result_type == "company_profile_knowledge"
+    assert "暂时还没有沉淀主营业务或公司简介" in result.answer
+    assert "mail_address" not in result.answer
+    assert "文档事件" not in result.answer
 
 
 def test_runtime_v5_rejects_llm_workspace_candidate_for_people_aggregate() -> None:

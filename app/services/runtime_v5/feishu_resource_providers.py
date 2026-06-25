@@ -204,7 +204,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
     def _organization_snapshot_payload(self, request: ProviderRequest):
         company_id = request.context.runtime_scope.active_company_id
         cached = load_people_snapshot(company_id)
-        if cached:
+        if _people_snapshot_has_content(cached):
             cached = dict(cached)
             cached["_runtime_v5_cached"] = True
             cached["_runtime_v5_fetch_ms"] = 0
@@ -222,7 +222,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
         )
         payload = _tool_payload(result)
         payload["_runtime_v5_fetch_ms"] = int((perf_counter() - started) * 1000)
-        if _provider_status(result) == "success" and payload:
+        if _provider_status(result) == "success" and _people_snapshot_has_content(payload):
             save_people_snapshot(company_id, payload)
         return result, payload
 
@@ -2916,6 +2916,25 @@ class KnowledgeProvider(FeishuResourceProvider):
             return _unsupported_operation_result("knowledge", request.operation, sorted(self._OPERATIONS))
         company_id = request.context.runtime_scope.active_company_id
         seed_text = request.context.current_message
+        company_profile_mode = _should_include_company_profile_context(seed_text) or request.intent.entities.get("knowledge_context") == "company_profile"
+        if company_profile_mode:
+            company_items = _company_profile_knowledge_items(self.db, company_id=company_id, seed_text=seed_text)
+            return ProviderResult(
+                source="knowledge",
+                status="success",
+                result_type="company_profile_knowledge",
+                count=len(company_items),
+                items=company_items,
+                metadata={
+                    "operation": request.operation,
+                    "tool_name": self._OPERATIONS[request.operation][0],
+                    "knowledge_context": "company_profile",
+                    "company_profile_count": len(company_items),
+                    "fact_count": 0,
+                    "event_count": 0,
+                },
+                answer=_company_profile_knowledge_answer(company_items),
+            )
         if request.operation == "risk_policy":
             seed_text = f"{seed_text} 风险 预警 异常 制度 流程 规范"
         keywords = _knowledge_keywords(seed_text)
@@ -3143,6 +3162,21 @@ def _company_profile_knowledge_items(db: Session, *, company_id: Any, seed_text:
     )
 
 
+def _company_profile_knowledge_answer(items: tuple[dict[str, Any], ...]) -> str:
+    if not items:
+        return "公司档案里暂时还没有可用的企业画像。"
+    item = items[0]
+    title = str(item.get("title") or "当前公司").strip()
+    summary = str(item.get("summary") or "").strip()
+    if summary and "暂时还没有沉淀" not in summary:
+        return f"{title}：{summary}"
+    return (
+        f"{title} 的企业画像里暂时还没有沉淀主营业务或公司简介。"
+        "我不会用邮件、文档同步事件或底层日志来拼凑公司介绍。"
+        "可以先在企业画像里补充主营业务、产品、客户类型、官网或一句话介绍。"
+    )
+
+
 def _should_include_company_profile_context(text: str) -> bool:
     compact = re.sub(r"\s+", "", str(text or "").lower())
     if not compact:
@@ -3259,6 +3293,14 @@ def _knowledge_answer(items: tuple[dict[str, Any], ...], *, risk_policy: bool) -
     return "\n".join(lines)
 
 
+def _people_snapshot_has_content(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    users = payload.get("users")
+    departments = payload.get("departments")
+    return (isinstance(users, list) and bool(users)) or (isinstance(departments, list) and bool(departments))
+
+
 def _is_public_knowledge_fact(fact: MemoryFact) -> bool:
     fact_type = str(fact.fact_type or "").lower()
     if fact_type in _BLOCKED_KNOWLEDGE_FACT_TYPES:
@@ -3272,6 +3314,8 @@ def _is_public_knowledge_event(event: WorkEvent) -> bool:
     if str(event.sensitivity or "normal").lower() in _SENSITIVE_KNOWLEDGE_LEVELS:
         return False
     text = f"{event.event_type or ''} {event.title or ''} {event.content_text or ''}"
+    if _looks_like_raw_synced_event_text(text):
+        return False
     if _contains_blocked_knowledge_terms(text):
         return False
     lowered = text.lower()
@@ -3280,6 +3324,13 @@ def _is_public_knowledge_event(event: WorkEvent) -> bool:
 
 def _contains_blocked_knowledge_terms(text: str) -> bool:
     return any(term in text for term in _BLOCKED_KNOWLEDGE_TERMS)
+
+
+def _looks_like_raw_synced_event_text(text: str) -> bool:
+    value = str(text or "")
+    raw_markers = ("{'", '{"', "mail_address", "bcc", "cc", "from", "to", "subject")
+    marker_count = sum(1 for marker in raw_markers if marker in value)
+    return marker_count >= 3
 
 
 def _knowledge_keywords(text: str) -> list[str]:
