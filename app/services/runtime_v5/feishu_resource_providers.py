@@ -2917,8 +2917,10 @@ class KnowledgeProvider(FeishuResourceProvider):
         keywords = _knowledge_keywords(seed_text)
         facts = _knowledge_facts(self.db, company_id=company_id, keywords=keywords, limit=6)
         events = _knowledge_events(self.db, company_id=company_id, keywords=keywords, limit=6)
+        company_items = _company_profile_knowledge_items(self.db, company_id=company_id, seed_text=seed_text)
         items = tuple(
             [
+                *company_items,
                 *(_knowledge_fact_item(item) for item in facts),
                 *(_knowledge_event_item(item) for item in events),
             ]
@@ -2934,6 +2936,7 @@ class KnowledgeProvider(FeishuResourceProvider):
                 "operation": request.operation,
                 "tool_name": self._OPERATIONS[request.operation][0],
                 "keywords": keywords,
+                "company_profile_count": len(company_items),
                 "fact_count": len(facts),
                 "event_count": len(events),
             },
@@ -3108,6 +3111,43 @@ _SENSITIVE_KNOWLEDGE_LEVELS = {"sensitive", "confidential", "secret", "private"}
 _KNOWLEDGE_EVENT_TERMS = ("wiki", "doc", "docx", "document", "knowledge", "知识", "制度", "流程", "规范", "模板")
 
 
+def _company_profile_knowledge_items(db: Session, *, company_id: Any, seed_text: str) -> tuple[dict[str, Any], ...]:
+    if not company_id or not _should_include_company_profile_context(seed_text):
+        return ()
+    company = db.get(Company, company_id)
+    if company is None:
+        return ()
+    metadata = company.metadata_json if isinstance(company.metadata_json, dict) else {}
+    business = str(metadata.get("business") or metadata.get("main_business") or metadata.get("主营业务") or "").strip()
+    intro = str(metadata.get("intro") or metadata.get("description") or metadata.get("summary") or "").strip()
+    summary_parts = []
+    if business:
+        summary_parts.append(f"主营业务：{business}")
+    if intro:
+        summary_parts.append(f"简介：{intro}")
+    if not summary_parts:
+        summary_parts.append("公司档案里暂时还没有沉淀主营业务或公司简介。")
+    return (
+        {
+            "kind": "company_profile",
+            "title": company.name,
+            "summary": "；".join(summary_parts),
+            "source": "company_profile",
+            "code": company.code,
+            "status": company.status,
+        },
+    )
+
+
+def _should_include_company_profile_context(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact:
+        return False
+    if any(token in compact for token in ("我们公司", "咱们公司", "本公司", "公司介绍", "主营业务", "主要业务", "业务范围", "公司业务")):
+        return True
+    return "公司" in compact and any(token in compact for token in ("做什么", "干什么", "业务", "情况", "介绍", "收入来源"))
+
+
 def _knowledge_facts(
     db: Session,
     *,
@@ -3206,7 +3246,10 @@ def _knowledge_answer(items: tuple[dict[str, Any], ...], *, risk_policy: bool) -
     for index, item in enumerate(items[:8], start=1):
         title = str(item.get("title") or "未命名知识")
         summary = str(item.get("summary") or "").strip()
-        kind = "知识事实" if item.get("kind") == "fact" else "文档事件"
+        if item.get("kind") == "company_profile":
+            kind = "企业画像"
+        else:
+            kind = "知识事实" if item.get("kind") == "fact" else "文档事件"
         lines.append(f"{index}. {kind}｜{title}" + (f"｜{summary}" if summary else ""))
     lines.append("说明：这里只使用已同步的公开知识/流程制度，不读取邮件、财务、客户或私密数据。")
     return "\n".join(lines)

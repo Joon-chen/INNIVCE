@@ -709,8 +709,9 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
     if _is_company_intro_query(text):
         return IntentResult(
             question_type="query",
-            intent="company_intro",
+            intent="general_query",
             data_scope="company",
+            entities={"query": question.strip(), "knowledge_context": "company_profile"},
             confidence=0.82,
             canonical_question=question,
         )

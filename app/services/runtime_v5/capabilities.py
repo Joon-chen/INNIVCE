@@ -111,7 +111,6 @@ RUNTIME_CAPABILITIES: tuple[RuntimeCapability, ...] = (
     RuntimeCapability("whiteboard_write", "whiteboard", "write_whiteboard", "action", "company", "user", True, installed=False, label="编辑飞书画板", route_path="feishu_whiteboard_write"),
     RuntimeCapability("vc_agent_read", "vc_agent", "read_live_events", "query", "company", "bot", installed=False, label="读取会中事件", route_path="feishu_vc_agent_read"),
     RuntimeCapability("vc_agent_join", "vc_agent", "join_meeting", "action", "company", "user", True, installed=False, label="机器人加入会议", route_path="feishu_vc_agent_join"),
-    RuntimeCapability("company_intro", "company_profile", "read_profile", "query", "company", "bot", label="公司档案", route_path="company_profile"),
     RuntimeCapability("risk_analysis", "workevent", "risk_events", "insight", "company", "bot", label="风险事件", route_path="workevent"),
     RuntimeCapability("risk_analysis", "memory", "related_memory", "insight", "company", "bot", label="长期记忆", route_path="memory"),
     RuntimeCapability("risk_analysis", "knowledge", "risk_policy", "insight", "company", "bot", label="风险知识", route_path="knowledge"),

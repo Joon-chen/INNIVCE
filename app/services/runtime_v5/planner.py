@@ -79,7 +79,7 @@ _STRATEGIES: dict[str, tuple[str, tuple[str, ...]]] = {
     "whiteboard_write": ("whiteboard_write", ("whiteboard",)),
     "vc_agent_read": ("vc_agent_read", ("vc_agent",)),
     "vc_agent_join": ("vc_agent_join", ("vc_agent",)),
-    "company_intro": ("company_intro", ("company_profile",)),
+    "company_intro": ("general_query", ("knowledge",)),
     "external_information_query": ("external_information_query", ("web",)),
     "risk_analysis": ("risk_analysis", ("workevent", "memory", "knowledge")),
     "general_analysis": ("general_analysis", ("workevent", "memory", "knowledge")),

@@ -170,7 +170,9 @@ def test_runtime_v5_open_ended_company_question_does_not_route_to_people_lookup(
         assert intent.intent != "people_lookup"
 
 
-def test_runtime_v5_company_intro_understands_business_description() -> None:
+def test_runtime_v5_company_questions_route_to_general_knowledge_query(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
     for question in (
         "主营业务",
         "公司的主营业务是什么",
@@ -179,17 +181,20 @@ def test_runtime_v5_company_intro_understands_business_description() -> None:
     ):
         intent = recognize_intent(question, _context(question))
 
-        assert intent.intent == "company_intro"
+        assert intent.intent == "general_query"
         assert intent.data_scope == "company"
+        assert intent.entities.get("knowledge_context") == "company_profile"
 
 
-def test_runtime_v5_company_intro_uses_only_company_profile_source() -> None:
+def test_runtime_v5_company_questions_use_knowledge_source_not_people_or_workevent(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
     intent = recognize_intent("能躬行科技公司是做什么的，你知道吗", _context("能躬行科技公司是做什么的，你知道吗"))
     plan = plan_task(intent)
 
-    assert plan.strategy == "company_intro"
-    assert plan.sources == ("company_profile",)
-    assert "knowledge" not in plan.sources
+    assert plan.strategy == "general_query"
+    assert plan.sources == ("knowledge",)
+    assert "people" not in plan.sources
     assert "workevent" not in plan.sources
     assert "web" not in plan.sources
 
@@ -314,20 +319,13 @@ def test_runtime_v5_local_realtime_info_does_not_route_to_general_query(monkeypa
     assert intent.intent != "general_query"
 
 
-def test_runtime_v5_confident_company_intro_rule_does_not_call_command_llm(monkeypatch) -> None:
-    called = False
-
-    def fake_llm(**kwargs):
-        nonlocal called
-        called = True
-        return None
-
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", fake_llm)
+def test_runtime_v5_company_profile_query_stays_knowledge_when_command_llm_misses(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("公司的主营业务是什么", _context("公司的主营业务是什么"))
 
-    assert intent.intent == "company_intro"
-    assert called is False
+    assert intent.intent == "general_query"
+    assert intent.entities.get("knowledge_context") == "company_profile"
 
 
 def test_runtime_v5_domainless_conversation_does_not_route_to_general_query(monkeypatch) -> None:
