@@ -1301,22 +1301,28 @@ def _execute_cli_contact_department_users(request: ToolRequest) -> str:
 
 def _execute_cli_contact_scope_list(request: ToolRequest) -> str:
     params = request.params
+    payload = _run_contact_scope_list_payload(params)
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    department_count = len(data.get("department_ids") or [])
+    user_count = len(data.get("user_ids") or [])
+    group_count = len(data.get("group_ids") or [])
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    return f"飞书通讯录授权范围已通过 CLI 读取：部门 {department_count} 个，用户 {user_count} 个，用户组 {group_count} 个。"
+
+
+def _run_contact_scope_list_payload(params: dict[str, Any]) -> Any:
     query = {
         "department_id_type": str(params.get("department_id_type") or "open_department_id"),
         "user_id_type": _cli_user_id_type(params, label="api contact scopes"),
         "page_size": _optional_cli_int(params, "page_size", default=100, minimum=1, maximum=100),
     }
     _maybe_set(query, "page_token", params.get("page_token"))
-    payload = _run_lark_cli_json(
+    return _run_lark_cli_json(
         _contact_api_get_args(params, "/open-apis/contact/v3/scopes", query, label="api contact scopes"),
         action="api contact scopes",
     )
-    data = payload.get("data") if isinstance(payload, dict) else {}
-    data = data if isinstance(data, dict) else {}
-    department_count = len(data.get("department_ids") or [])
-    user_count = len(data.get("user_ids") or [])
-    group_count = len(data.get("group_ids") or [])
-    return f"飞书通讯录授权范围已通过 CLI 读取：部门 {department_count} 个，用户 {user_count} 个，用户组 {group_count} 个。"
 
 
 
@@ -1532,6 +1538,10 @@ def _execute_cli_contact_organization_snapshot(request: ToolRequest) -> str:
                 }
                 if len(users_by_open_id) >= max_users:
                     break
+    if not departments and not users_by_open_id:
+        scoped_departments, scoped_users = _contact_snapshot_from_authorized_scope(params, max_departments=max_departments, max_users=max_users)
+        departments = scoped_departments
+        users_by_open_id = scoped_users
     if _raw_json_response_requested(params):
         return _json_arg(
             {
@@ -1544,6 +1554,46 @@ def _execute_cli_contact_organization_snapshot(request: ToolRequest) -> str:
             }
         )
     return f"飞书通讯录组织快照已通过 CLI 读取：部门 {len(departments)} 个，人员 {len(users_by_open_id)} 人。"
+
+
+def _contact_snapshot_from_authorized_scope(
+    params: dict[str, Any],
+    *,
+    max_departments: int,
+    max_users: int,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    scope_payload = _run_contact_scope_list_payload(params)
+    data = scope_payload.get("data") if isinstance(scope_payload, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    department_ids = [str(item).strip() for item in data.get("department_ids") or [] if str(item).strip()]
+    user_ids = [str(item).strip() for item in data.get("user_ids") or [] if str(item).strip()]
+    departments = [{"open_department_id": item, "department_id": item} for item in department_ids[:max_departments]]
+    users_by_open_id: dict[str, dict[str, Any]] = {item: {"open_id": item} for item in user_ids[:max_users]}
+    if not department_ids or len(users_by_open_id) >= max_users:
+        return departments, users_by_open_id
+
+    scoped_params = {**params, "department_id_type": "open_department_id", "user_id_type": "open_id", "page_size": 50}
+    import concurrent.futures as _cf
+
+    def _department_users(department_id: str) -> list[dict[str, Any]]:
+        try:
+            payload = _run_contact_department_users(scoped_params, department_id=department_id)
+            return _cli_contact_items(payload, keys=("items", "users"))
+        except Exception:
+            return []
+
+    with _cf.ThreadPoolExecutor(max_workers=min(12, max(1, len(department_ids)))) as pool:
+        for users in pool.map(_department_users, department_ids[:max_departments]):
+            if len(users_by_open_id) >= max_users:
+                break
+            for user in users:
+                open_id = str(user.get("open_id") or user.get("user_id") or "").strip()
+                if not open_id:
+                    continue
+                users_by_open_id[open_id] = {**users_by_open_id.get(open_id, {}), **user}
+                if len(users_by_open_id) >= max_users:
+                    break
+    return departments, users_by_open_id
 
 
 def _execute_cli_task_update(request: ToolRequest) -> str:

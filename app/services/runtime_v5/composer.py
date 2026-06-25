@@ -160,11 +160,16 @@ def _natural_enrichment_intro(objective: str) -> str:
     if not objective:
         return ""
     clean = objective.strip("。；; ")
-    if not clean:
+    if not clean or _is_placeholder_objective(clean):
         return ""
     if len(clean) > 80:
         clean = clean[:80].rstrip()
     return f"我先按你的问题整理当前可见结果：{clean}。"
+
+
+def _is_placeholder_objective(value: str) -> bool:
+    compact = str(value or "").strip().lower()
+    return compact in {"query", "search", "lookup", "present", "answer", "查询", "搜索", "了解", "获取"}
 
 
 def _has_user_facing_intro(text: str) -> bool:

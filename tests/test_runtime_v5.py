@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from uuid import uuid4
+import json
 import time
 
 import pytest
@@ -57,7 +58,8 @@ from app.services.runtime_v5.runtime_pending_action import (
 )
 from app.services.runtime_v5.runtime_result import build_runtime_result, runtime_result_from_payload, runtime_result_payload
 from app.services.runtime_v5.runtime_state import pending_action_from_runtime_state, waiting_input_action_from_runtime_state
-from app.services.tools.base import ToolExecutionStatus
+from app.services.tools.base import ToolExecutionStatus, ToolRequest
+from app.services.tools.providers import feishu_mcp
 
 
 def _context(
@@ -291,6 +293,53 @@ def test_runtime_v5_company_profile_query_does_not_render_raw_knowledge_events()
     assert "暂时还没有沉淀主营业务或公司简介" in result.answer
     assert "mail_address" not in result.answer
     assert "文档事件" not in result.answer
+
+
+def test_runtime_v5_placeholder_objective_does_not_render_as_intro() -> None:
+    from app.services.runtime_v5.composer import _natural_enrichment_intro
+
+    assert _natural_enrichment_intro("query") == ""
+    assert _natural_enrichment_intro("查询") == ""
+    assert _natural_enrichment_intro("获取公司主营业务") == "我先按你的问题整理当前可见结果：获取公司主营业务。"
+
+
+def test_feishu_contact_snapshot_uses_authorized_scope_when_root_tree_empty(monkeypatch) -> None:
+    monkeypatch.setattr(feishu_mcp, "_run_contact_department_children", lambda params, *, department_id: {"data": {"items": []}})
+    monkeypatch.setattr(
+        feishu_mcp,
+        "_run_contact_scope_list_payload",
+        lambda params: {"data": {"department_ids": ["od_root"], "user_ids": ["ou_direct"], "group_ids": []}},
+    )
+    monkeypatch.setattr(
+        feishu_mcp,
+        "_run_contact_department_users",
+        lambda params, *, department_id: (
+            {"data": {"items": []}}
+            if department_id == "0"
+            else {
+                "data": {
+                    "items": [
+                        {"open_id": "ou_1", "name": "张三"},
+                        {"open_id": "ou_direct", "name": "李四"},
+                    ]
+                }
+            }
+        ),
+    )
+
+    answer = feishu_mcp._execute_cli_contact_organization_snapshot(
+        ToolRequest(
+            tool_name="feishu_contact_organization_snapshot",
+            question="公司有多少人",
+            normalized_command="公司有多少人",
+            params={"response_format": "raw_json"},
+        )
+    )
+    payload = json.loads(answer)
+
+    assert payload["department_count"] == 1
+    assert payload["user_count"] == 2
+    assert {item["open_id"] for item in payload["users"]} == {"ou_1", "ou_direct"}
 
 
 def test_runtime_v5_rejects_llm_workspace_candidate_for_people_aggregate() -> None:
