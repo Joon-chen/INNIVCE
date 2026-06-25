@@ -25,7 +25,7 @@ from app.services.llm.call_trace import record_llm_call_trace
 from app.services.llm.prompt_audit import prompt_audit_payload
 from app.services.runtime_v5.clarification import build_clarification_guide
 from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
-from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuTaskProvider
+from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuPeopleProvider, FeishuTaskProvider
 from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.composer import compose_answer
@@ -197,6 +197,67 @@ def test_runtime_v5_company_questions_use_knowledge_source_not_people_or_workeve
     assert "people" not in plan.sources
     assert "workevent" not in plan.sources
     assert "web" not in plan.sources
+
+
+def test_runtime_v5_people_aggregate_questions_route_to_people_not_workspace(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
+
+    for question in (
+        "公司有多少个人",
+        "公司有多少个男生",
+        "全公司人员构成怎么样",
+    ):
+        intent = recognize_intent(question, _context(question))
+        plan = plan_task(intent)
+
+        assert intent.intent == "organization_snapshot"
+        assert intent.data_scope == "organization"
+        assert intent.entities["view"] == "people_aggregate"
+        assert plan.sources == ("people",)
+
+
+def test_runtime_v5_rejects_llm_workspace_candidate_for_people_aggregate() -> None:
+    candidate = LLMCommandIntentCandidate(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        entities={},
+        missing_params=(),
+        confidence=0.94,
+        canonical_question="公司有多少个人",
+    )
+    rule_intent = IntentResult(
+        question_type="query",
+        intent="organization_snapshot",
+        data_scope="organization",
+        entities={"view": "people_aggregate"},
+        confidence=0.88,
+        canonical_question="公司有多少个人",
+    )
+
+    assert validate_llm_command_intent(candidate, rule_intent=rule_intent, force=True) is None
+
+
+def test_runtime_v5_rejects_llm_workspace_candidate_for_company_profile() -> None:
+    candidate = LLMCommandIntentCandidate(
+        question_type="query",
+        intent="task_query",
+        data_scope="company",
+        entities={},
+        missing_params=(),
+        confidence=0.94,
+        canonical_question="公司的主营业务是什么",
+    )
+    rule_intent = IntentResult(
+        question_type="query",
+        intent="general_query",
+        data_scope="company",
+        entities={"knowledge_context": "company_profile"},
+        confidence=0.82,
+        canonical_question="公司的主营业务是什么",
+    )
+
+    assert validate_llm_command_intent(candidate, rule_intent=rule_intent, force=True) is None
 
 
 def _assert_runtime_state_company_id(runtime_state: dict, company_id: str = "company_1") -> None:

@@ -556,6 +556,17 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
+    if _is_people_aggregate_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="organization_snapshot",
+            data_scope="organization",
+            entities={"view": "people_aggregate", "query": question.strip()},
+            missing_params=(),
+            confidence=0.88,
+            canonical_question=question,
+        )
+
     if _is_task_query(text):
         return IntentResult(
             question_type="query",
@@ -663,6 +674,7 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             question_type="query",
             intent="organization_snapshot",
             data_scope="organization",
+            entities={"view": "organization_snapshot"},
             confidence=0.88,
             canonical_question=question,
         )
@@ -1295,6 +1307,8 @@ def _is_task_complete(text: str) -> bool:
 
 
 def _is_task_query(text: str) -> bool:
+    if _is_company_intro_query(text) or _is_people_aggregate_query(text):
+        return False
     return (
         _has_any(
             text,
@@ -1367,6 +1381,8 @@ def _is_calendar_create(text: str) -> bool:
 
 
 def _is_calendar_query(text: str) -> bool:
+    if _is_company_intro_query(text) or _is_people_aggregate_query(text):
+        return False
     return _has_any(
         text,
         (
@@ -1460,6 +1476,70 @@ def _is_department_members_query(text: str) -> bool:
         text,
         ("有哪些人", "都有谁", "成员", "人员", "同事", "名单"),
     )
+
+
+def _is_people_aggregate_query(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower()).replace("多少个", "多少")
+    if not compact:
+        return False
+    if _has_any(
+        compact,
+        (
+            "任务",
+            "待办",
+            "日程",
+            "会议",
+            "审批",
+            "邮件",
+            "消息",
+            "文档",
+            "知识",
+            "主营业务",
+            "主要业务",
+            "业务范围",
+            "公司业务",
+            "做什么",
+            "干什么",
+        ),
+    ):
+        return False
+    subject_signal = _has_any(
+        compact,
+        (
+            "公司",
+            "全公司",
+            "企业",
+            "组织",
+            "团队",
+            "员工",
+            "人员",
+            "同事",
+            "男生",
+            "女生",
+            "男性",
+            "女性",
+        ),
+    )
+    metric_signal = _has_any(
+        compact,
+        (
+            "多少人",
+            "多少个人",
+            "几个人",
+            "人数",
+            "员工数",
+            "人员数",
+            "男生",
+            "女生",
+            "男性",
+            "女性",
+            "性别",
+            "构成",
+            "分布",
+            "规模",
+        ),
+    )
+    return subject_signal and metric_signal
 
 
 def _is_people_lookup(text: str) -> bool:

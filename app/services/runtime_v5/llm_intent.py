@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import json
 import logging
 import os
@@ -8,9 +9,17 @@ import re
 from typing import Any
 
 from app.core.config import settings
+from app.services.llm.call_trace import last_llm_call_trace
+from app.services.llm.routing_policy import llm_route_for_task
 from app.services.llm.gateway import LLMGateway
+from app.services.runtime_v5.command_route_observer import (
+    observe_command_route,
+    should_force_self_scope,
+    should_reject_candidate_route,
+)
 from app.services.runtime_v5.models import IntentResult, RuntimeContext
 from app.services.runtime_v5.planner import strategy_registry
+from app.services.user_context_pack import build_user_context_pack
 
 
 _LLM_ACCEPT_THRESHOLD = 0.72
@@ -59,6 +68,8 @@ class LLMCommandIntentCandidate:
     time_range: dict[str, Any] = field(default_factory=dict)
     output_preferences: dict[str, Any] = field(default_factory=dict)
     semantic_tags: tuple[str, ...] = ()
+    draft_response_hint: str = ""
+    profile_update: dict[str, Any] = field(default_factory=dict)
 
 
 def llm_command_intent(
@@ -66,8 +77,9 @@ def llm_command_intent(
     question: str,
     context: RuntimeContext,
     rule_intent: IntentResult,
+    force: bool = False,
 ) -> IntentResult | None:
-    if not _should_try_llm(rule_intent):
+    if not force and not _should_try_llm(rule_intent, question=question, context=context):
         _log_command_route(
             question=question,
             rule_intent=rule_intent,
@@ -86,7 +98,7 @@ def llm_command_intent(
             llm_reason="no_candidate",
         )
         return None
-    validated = validate_llm_command_intent(candidate, rule_intent=rule_intent)
+    validated = validate_llm_command_intent(candidate, rule_intent=rule_intent, force=force)
     if validated is None:
         _log_command_route(
             question=question,
@@ -120,7 +132,7 @@ def llm_command_intent_candidate(
         return None
     prompt = _prompt(question=question, context=context, rule_intent=rule_intent)
     try:
-        raw = LLMGateway().complete_text(prompt, temperature=0.0) or ""
+        raw = _complete_command_intent_with_deadline(prompt) or ""
     except Exception:
         return None
     data = _parse_json_object(raw)
@@ -129,12 +141,26 @@ def llm_command_intent_candidate(
     return _candidate_from_payload(data, fallback_question=question)
 
 
+def _complete_command_intent_with_deadline(prompt: str) -> str | None:
+    timeout_seconds = max(0.5, llm_route_for_task("command_intent").latency_budget_ms / 1000.0)
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="command-intent-llm")
+    future = executor.submit(lambda: LLMGateway().complete_task_text(prompt, task_type="command_intent", temperature=0.0))
+    try:
+        return future.result(timeout=timeout_seconds)
+    except TimeoutError:
+        future.cancel()
+        return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def validate_llm_command_intent(
     candidate: LLMCommandIntentCandidate,
     *,
     rule_intent: IntentResult,
+    force: bool = False,
 ) -> IntentResult | None:
-    if not _should_try_llm(rule_intent):
+    if not force and not _should_try_llm(rule_intent) and not _smalltalk_profile_candidate(candidate, rule_intent):
         return None
     missing_params = tuple(str(item).strip() for item in candidate.missing_params if str(item).strip())
     guides_clarification = bool(missing_params and candidate.confidence >= 0.35)
@@ -146,26 +172,60 @@ def validate_llm_command_intent(
     intent = candidate.intent.strip()
     if intent not in strategy_registry():
         return None
-    if not _can_override_rule_intent(candidate_intent=intent, rule_intent=rule_intent):
+    if not force and not _can_override_rule_intent(candidate_intent=intent, rule_intent=rule_intent):
         return None
     data_scope = _normalize_scope(candidate.data_scope)
     if data_scope not in _DATA_SCOPES:
         return None
+    if should_reject_candidate_route(
+        question=candidate.canonical_question or rule_intent.canonical_question,
+        candidate_intent=intent,
+        candidate_question_type=question_type,
+        candidate_scope=data_scope,
+        rule_intent=rule_intent.intent,
+    ):
+        return None
+    if should_force_self_scope(
+        question=candidate.canonical_question or rule_intent.canonical_question,
+        intent=intent,
+        data_scope=data_scope,
+    ):
+        data_scope = "self"
     if question_type == "action" and rule_intent.question_type != "action":
         return None
     confidence = max(0.0, min(candidate.confidence, 1.0))
     if guides_clarification and confidence >= 0.6:
         confidence = 0.59
     entities = _merged_entities(candidate=candidate, rule_intent=rule_intent)
+    draft_response_hint = _safe_draft_response_hint(candidate)
+    if draft_response_hint:
+        entities["draft_response_hint"] = draft_response_hint
+        if intent == "smalltalk":
+            entities["fallback_answer"] = draft_response_hint
     if candidate.clarification:
         entities["clarification_prompt"] = candidate.clarification
+    command_frame = _command_frame_payload(
+        candidate=candidate,
+        intent=intent,
+        question_type=question_type,
+        data_scope=data_scope,
+        confidence=confidence,
+        missing_params=missing_params,
+        force=force,
+        rule_intent=rule_intent,
+    )
+    entities["command_frame"] = command_frame
     entities["command_intent_trace"] = {
         "source": "llm",
+        "mode": "llm_first" if force else "fallback",
         "rule_intent": rule_intent.intent,
         "llm_intent": intent,
         "final_intent": intent,
         "confidence": confidence,
         "reason": candidate.reason,
+        "command_frame": command_frame,
+        "llm_call": last_llm_call_trace(),
+        "route_observation": command_frame.get("route_observation", {}),
     }
     return IntentResult(
         question_type=question_type,  # type: ignore[arg-type]
@@ -178,14 +238,48 @@ def validate_llm_command_intent(
     )
 
 
-def _should_try_llm(rule_intent: IntentResult) -> bool:
+def _smalltalk_profile_candidate(candidate: LLMCommandIntentCandidate, rule_intent: IntentResult) -> bool:
+    return (
+        rule_intent.intent == "smalltalk"
+        and candidate.intent == "smalltalk"
+        and bool(candidate.profile_update or candidate.draft_response_hint)
+    )
+
+
+def _should_try_llm(
+    rule_intent: IntentResult,
+    *,
+    question: str = "",
+    context: RuntimeContext | None = None,
+) -> bool:
     if rule_intent.question_type == "action" and rule_intent.confidence >= 0.75:
         return False
     if rule_intent.intent in {"runtime_status", "governance_view", "action_trace"}:
         return False
-    if rule_intent.intent in _LLM_OVERRIDEABLE_RULE_INTENTS or rule_intent.confidence < 0.72:
+    if rule_intent.intent == "smalltalk":
+        return _needs_contextual_semantics(question=question, context=context)
+    if rule_intent.missing_params or rule_intent.confidence < 0.72:
         return True
-    return rule_intent.question_type in {"query", "analysis", "insight", "decision"}
+    if rule_intent.intent in _LLM_OVERRIDEABLE_RULE_INTENTS:
+        return True
+    if _needs_contextual_semantics(question=question, context=context):
+        return True
+    return False
+
+
+def _needs_contextual_semantics(*, question: str, context: RuntimeContext | None) -> bool:
+    compact = re.sub(r"\s+", "", str(question or "").strip())
+    if not compact:
+        return False
+    if len(compact) <= 8 and _has_contextual_marker(compact):
+        return True
+    if context is not None and context.result_context is not None and _has_contextual_marker(compact):
+        return True
+    return False
+
+
+def _has_contextual_marker(text: str) -> bool:
+    return any(token in text for token in ("这个", "那个", "这些", "那些", "刚才", "上面", "继续", "展开", "第一个", "第二个"))
 
 
 def _log_command_route(
@@ -248,6 +342,8 @@ def _candidate_from_payload(data: dict[str, Any], *, fallback_question: str) -> 
         time_range=data.get("time_range") if isinstance(data.get("time_range"), dict) else {},
         output_preferences=data.get("output_preferences") if isinstance(data.get("output_preferences"), dict) else {},
         semantic_tags=tuple(str(item).strip()[:80] for item in data.get("semantic_tags", []) if str(item).strip()) if isinstance(data.get("semantic_tags"), list) else (),
+        draft_response_hint=str(data.get("draft_response_hint") or "").strip()[:500],
+        profile_update=data.get("profile_update") if isinstance(data.get("profile_update"), dict) else {},
     )
 
 
@@ -257,6 +353,9 @@ def _merged_entities(*, candidate: LLMCommandIntentCandidate, rule_intent: Inten
     enrichment = _command_enrichment(candidate)
     if enrichment:
         entities["command_enrichment"] = enrichment
+    profile_update = _safe_profile_update(candidate.profile_update)
+    if profile_update:
+        entities["profile_update_candidate"] = profile_update
     return entities
 
 
@@ -277,6 +376,127 @@ def _command_enrichment(candidate: LLMCommandIntentCandidate) -> dict[str, Any]:
     return enrichment
 
 
+def _command_frame_payload(
+    *,
+    candidate: LLMCommandIntentCandidate,
+    intent: str,
+    question_type: str,
+    data_scope: str,
+    confidence: float,
+    missing_params: tuple[str, ...],
+    force: bool,
+    rule_intent: IntentResult,
+) -> dict[str, Any]:
+    route_observation = observe_command_route(
+        question=candidate.canonical_question,
+        intent=intent,
+        question_type=question_type,
+        data_scope=data_scope,
+        confidence=confidence,
+        route_source="llm_first" if force else "llm_fallback",
+    )
+    return {
+        "utterance_type": _utterance_type(question_type=question_type, intent=intent),
+        "dialogue_mode": _dialogue_mode(intent=intent, question_type=question_type, missing_params=missing_params),
+        "user_goal": candidate.objective or candidate.canonical_question,
+        "intent": intent,
+        "question_type": question_type,
+        "domain": candidate.business_domain,
+        "capability": candidate.capability or intent,
+        "skill_intent": intent,
+        "scope": data_scope,
+        "target": _safe_dict(candidate.entities),
+        "params": {
+            "constraints": _safe_dict(candidate.constraints),
+            "time_range": _safe_dict(candidate.time_range),
+            "output_preferences": _safe_dict(candidate.output_preferences),
+        },
+        "missing_slots": list(missing_params),
+        "context_used": {
+            "conversation": bool(_has_contextual_marker(candidate.canonical_question)),
+            "profile": True,
+            "operational": intent not in {"smalltalk", "runtime_status", "action_trace"},
+            "cognitive": question_type in {"analysis", "insight", "decision"},
+        },
+        "response_intent": {
+            "tone": _response_tone(intent=intent, question_type=question_type, missing_params=missing_params),
+            "should_render_card": intent not in {"smalltalk", "runtime_status", "action_trace"},
+            "intro_intent": _intro_intent(intent=intent, question_type=question_type, missing_params=missing_params),
+        },
+        "profile_update": _safe_profile_update(candidate.profile_update),
+        "draft_response_hint": _safe_draft_response_hint(candidate),
+        "confidence": confidence,
+        "needs_clarification": bool(missing_params),
+        "route_reason": candidate.reason,
+        "route_path": "llm_first" if force else "llm_fallback",
+        "route_observation": route_observation,
+        "rule_candidate": {
+            "intent": rule_intent.intent,
+            "question_type": rule_intent.question_type,
+            "scope": rule_intent.data_scope,
+            "confidence": rule_intent.confidence,
+        },
+    }
+
+
+def _utterance_type(*, question_type: str, intent: str) -> str:
+    if intent == "smalltalk":
+        return "conversation"
+    if question_type == "action":
+        return "action_request"
+    if question_type in {"analysis", "insight", "decision"}:
+        return "cognitive_query"
+    return "business_query"
+
+
+def _dialogue_mode(*, intent: str, question_type: str, missing_params: tuple[str, ...]) -> str:
+    if missing_params:
+        return "clarify"
+    if intent in {"smalltalk", "runtime_status", "action_trace", "governance_view"}:
+        return "answer"
+    if question_type == "action":
+        return "execute"
+    return "present"
+
+
+def _response_tone(*, intent: str, question_type: str, missing_params: tuple[str, ...]) -> str:
+    if missing_params:
+        return "guided"
+    if intent == "smalltalk":
+        return "natural"
+    if question_type == "action":
+        return "careful"
+    return "concise"
+
+
+def _intro_intent(*, intent: str, question_type: str, missing_params: tuple[str, ...]) -> str:
+    if missing_params:
+        return "ask_missing_slots"
+    if intent == "smalltalk":
+        return "natural_reply"
+    if question_type == "action":
+        return "confirm_or_report_action"
+    return "summarize_result"
+
+
+def _safe_draft_response_hint(candidate: LLMCommandIntentCandidate) -> str:
+    text = str(candidate.draft_response_hint or "").strip()
+    if not text:
+        return ""
+    forbidden = (
+        "我已查询",
+        "已查询到",
+        "我已创建",
+        "我已发送",
+        "我已审批",
+        "已完成审批",
+        "我已经完成",
+    )
+    if any(item in text for item in forbidden):
+        return ""
+    return text[:500]
+
+
 def _safe_dict(value: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {}
     for key, item in value.items():
@@ -287,6 +507,27 @@ def _safe_dict(value: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(item, list):
             safe[key[:80]] = [entry for entry in item if isinstance(entry, (str, int, float, bool))][:12]
     return safe
+
+
+def _safe_profile_update(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    update: dict[str, Any] = {}
+    preferred_address = str(value.get("preferred_address") or "").strip()
+    if preferred_address and len(preferred_address) <= 30:
+        update["preferred_address"] = preferred_address
+    if "avoid_direct_name" in value:
+        update["avoid_direct_name"] = bool(value.get("avoid_direct_name"))
+    tone_tips = str(value.get("tone_tips") or "").strip()
+    if tone_tips and len(tone_tips) <= 200:
+        update["tone_tips"] = tone_tips
+    style = str(value.get("style") or "").strip()
+    if style in {"professional", "casual", "formal", "direct", "warm"}:
+        update["style"] = style
+    verbosity = str(value.get("verbosity") or "").strip()
+    if verbosity in {"concise", "balanced", "detailed"}:
+        update["verbosity"] = verbosity
+    return update
 
 
 def _normalize_scope(value: str) -> str:
@@ -313,37 +554,72 @@ def _running_tests() -> bool:
 
 
 def _prompt(*, question: str, context: RuntimeContext, rule_intent: IntentResult) -> str:
-    strategies = ", ".join(sorted(strategy_registry().keys()))
-    return f"""你是 Digital Advisor V5 的 Command Engine 意图解析器。
-你只输出结构化 Intent Candidate，不执行工具，不选择 Provider，不做权限判断，不生成用户回复。
+    strategies = _strategy_prompt_summary()
+    user_context = build_user_context_pack(runtime_context=context, question=question, purpose="command")
+    return f"""Role: V5 Command Engine. JSON only.
+Goal: select intent, scope/slots, and safe draft_response_hint.
+Never execute, pick provider/token, decide permission, or claim completed data.
 
-可用 intent 必须严格来自以下列表：
+Capability and skill summary:
 {strategies}
 
-允许 question_type：query, analysis, insight, decision, action
-允许 data_scope：self, person, department, company, project, organization, external
+Types: query, analysis, insight, decision, action
+Scopes: self, person, department, company, project, organization, external
 
-当前规则解析：
-- intent: {rule_intent.intent}
-- question_type: {rule_intent.question_type}
-- data_scope: {rule_intent.data_scope}
-- confidence: {rule_intent.confidence}
+Rule:
+intent={rule_intent.intent}; question_type={rule_intent.question_type}; scope={rule_intent.data_scope}; confidence={rule_intent.confidence}
 
-当前上下文：
-- role: {context.identity.role}
-- domains: {list(context.identity.domains or ())}
-- active_company_id: {context.runtime_scope.active_company_id or ""}
+{user_context.prompt_sections()}
 
-	判断原则：
-	1. 优先理解用户真实业务意图和查询范围。
-	2. 不要把查询改成动作；只有用户明确要求创建、发送、完成、审批等写操作，才输出 action。
-	3. 不要输出 Provider、Tool、API、credential 或执行身份字段。
-	4. 你可以补充业务语义字段：business_domain、capability、objective、constraints、time_range、output_preferences、semantic_tags。
-	5. 规则已经高置信命中具体业务 intent 时，除非用户表达明显不是这个业务，否则保持相同 intent，只做语义补充。
-	6. 寒暄、询问你是谁、询问当前用户是谁、当前时间/日期等非业务对话，输出 intent=smalltalk。
-	7. 不确定时降低 confidence，不要编造参数。
+Routing:
+- Action only for explicit create/send/complete/approve/reject; otherwise keep query/analysis/conversation.
+- Chat/identity/time/preference/feedback/follow-up without concrete business operation => smalltalk + natural draft_response_hint.
+- Preference corrections => profile_update (address/style/tone/verbosity); do not change facts or permissions.
+- Slowness/wrong route/boundary => runtime_status or general_analysis.
+- Weather/news/websites/prices/laws/public current info => external_information_query.
+- Company profile/business => general_query + knowledge_context company_profile; headcount/gender/personnel composition => organization_snapshot; Workspace needs explicit task/calendar/project/workload/deadline/schedule signal.
+- people_lookup only for concrete person lookup. Missing scope/object/time => missing_params; never invent.
 
-用户问题：{question[:500]}
+Question:
+{question[:360]}
 
-只返回 JSON：
-	{{"question_type":"query","intent":"task_query","data_scope":"company","entities":{{}},"missing_params":[],"clarification":"","canonical_question":"...","confidence":0.0,"reason":"...","business_domain":"Workspace","capability":"task_query","objective":"查看公司任务负荷","constraints":{{"status":"open"}},"time_range":{{"preset":"this_week"}},"output_preferences":{{"detail_level":"summary","group_by":"owner"}},"semantic_tags":["workload","risk"]}}"""
+Schema:
+{{"question_type":"query","intent":"task_query","data_scope":"company","entities":{{}},"missing_params":[],"canonical_question":"...","confidence":0.0,"reason":"...","business_domain":"","capability":"","objective":"","draft_response_hint":"","profile_update":{{"preferred_address":"","avoid_direct_name":false,"tone_tips":"","style":"","verbosity":""}}}}"""
+
+
+def _compact_context_quality(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "turns": payload.get("included_turn_count", 0),
+        "result": bool(payload.get("result_included", False)),
+        "signals": payload.get("signal_count", 0),
+        "truncated": bool(payload.get("truncated", False)),
+    }
+
+
+def _conversation_pack_quality(pack: Any) -> dict[str, Any]:
+    quality = getattr(pack, "quality", None)
+    if callable(quality):
+        return _compact_context_quality(quality())
+    return _compact_context_quality({})
+
+
+def _strategy_prompt_summary() -> str:
+    available = set(strategy_registry().keys())
+    groups = {
+        "conversation": ("smalltalk", "runtime_status", "action_trace"),
+        "workspace": ("task_query", "task_create", "task_complete", "calendar_query", "calendar_create"),
+        "process": ("approval_query", "approval_detail", "approval_approve", "approval_reject", "approval_transfer", "approval_add_sign"),
+        "people": ("people_lookup", "department_members", "organization_snapshot"),
+        "communication": ("message_query", "message_send", "mail_query", "mail_search", "mail_draft_create"),
+        "knowledge": ("docs_read", "docs_edit", "wiki_search", "drive_list"),
+        "business_intelligence": ("general_query", "general_analysis", "risk_analysis", "decision_advice"),
+        "external_information": ("external_information_query",),
+    }
+    lines = []
+    for domain, intents in groups.items():
+        visible = [item for item in intents if item in available]
+        if visible:
+            lines.append(f"{domain}: {', '.join(visible)}")
+    return "\n".join(lines)

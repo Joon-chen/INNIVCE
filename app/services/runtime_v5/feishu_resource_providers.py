@@ -182,7 +182,11 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                     "cache_hit": bool(payload.get("_runtime_v5_cached", False)),
                     "raw": payload,
                 },
-                answer=_organization_snapshot_answer(len(departments), items, field_stats),
+                answer=(
+                    _people_aggregate_answer(len(departments), items, field_stats)
+                    if request.intent.entities.get("view") == "people_aggregate"
+                    else _organization_snapshot_answer(len(departments), items, field_stats)
+                ),
                 error=result.error or "",
             )
 
@@ -4591,12 +4595,14 @@ def _items_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def _user_item(user: dict[str, Any]) -> dict[str, Any]:
     department_names = user.get("department_names")
     department_ids = user.get("department_ids")
+    gender = user.get("gender") or user.get("gender_name") or user.get("sex") or ""
     return {
         "name": user.get("name") or user.get("english_name") or user.get("open_id") or "",
         "department": ", ".join(str(item) for item in department_names if item) if isinstance(department_names, list) else "",
         "department_ids": ", ".join(str(item) for item in department_ids if item) if isinstance(department_ids, list) else "",
         "leader": user.get("leader") or user.get("manager") or user.get("leader_name") or user.get("manager_name") or "",
         "title": user.get("title") or user.get("job_title") or "",
+        "gender": str(gender or "").strip(),
         "email": user.get("email") or "",
         "mobile": user.get("mobile") or "",
         "open_id": user.get("open_id") or "",
@@ -5328,12 +5334,17 @@ def _looks_like_internal_identifier(text: str) -> bool:
 
 
 def _field_presence_stats(items: tuple[dict[str, Any], ...]) -> dict[str, int]:
+    gender_stats = _gender_stats(items)
     return {
         "total": len(items),
         "email": sum(1 for item in items if str(item.get("email") or "").strip()),
         "mobile": sum(1 for item in items if str(item.get("mobile") or "").strip()),
         "title": sum(1 for item in items if str(item.get("title") or "").strip()),
         "leader": sum(1 for item in items if str(item.get("leader") or "").strip()),
+        "gender": gender_stats["known"],
+        "male": gender_stats["male"],
+        "female": gender_stats["female"],
+        "gender_other": gender_stats["other"],
     }
 
 
@@ -5353,6 +5364,48 @@ def _organization_snapshot_answer(
             f"直属上级 {field_stats.get('leader', 0)}/{total}。"
         )
     return "\n".join(lines)
+
+
+def _people_aggregate_answer(
+    department_count: int,
+    items: tuple[dict[str, Any], ...],
+    field_stats: dict[str, int],
+) -> str:
+    total = field_stats.get("total", len(items))
+    lines = [f"按当前可读通讯录数据，公司共有 {total} 人，覆盖 {department_count} 个部门。"]
+    if total:
+        title_count = field_stats.get("title", 0)
+        gender_known = field_stats.get("gender", 0)
+        lines.append(f"字段可见度：职位 {title_count}/{total}，性别 {gender_known}/{total}。")
+        if gender_known:
+            gender_parts = [
+                f"男性 {field_stats.get('male', 0)} 人",
+                f"女性 {field_stats.get('female', 0)} 人",
+            ]
+            other = field_stats.get("gender_other", 0)
+            if other:
+                gender_parts.append(f"其他/未标准化 {other} 人")
+            lines.append("性别分布：" + "，".join(gender_parts) + "。")
+        else:
+            lines.append("当前可读字段里没有性别数据，所以不能可靠统计男/女比例。")
+    lines.append("说明：这里只读取通讯录组织事实，不读取任务、日程或审批数据。")
+    return "\n".join(lines)
+
+
+def _gender_stats(items: tuple[dict[str, Any], ...]) -> dict[str, int]:
+    stats = {"known": 0, "male": 0, "female": 0, "other": 0}
+    for item in items:
+        value = str(item.get("gender") or "").strip().lower()
+        if not value:
+            continue
+        stats["known"] += 1
+        if value in {"1", "male", "m", "男", "男性", "男生"}:
+            stats["male"] += 1
+        elif value in {"2", "female", "f", "女", "女性", "女生"}:
+            stats["female"] += 1
+        else:
+            stats["other"] += 1
+    return stats
 
 
 def _organization_base_fields() -> list[dict[str, str]]:
