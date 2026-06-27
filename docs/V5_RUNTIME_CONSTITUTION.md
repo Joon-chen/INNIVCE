@@ -44,13 +44,14 @@ Business Domains
 主链路：
 
 ```text
-Interaction
--> Command Engine
--> Policy Engine
--> Runtime Engine / Cognitive Engine
--> Provider / Tool
--> Policy Result Filter
--> RuntimeResult / InteractionPayload
+User Message
+-> ConversationState
+-> Semantic Understanding
+-> Dialogue Resolver
+-> CommandFrame
+-> Policy
+-> Runtime
+-> Response Orchestrator
 -> Interaction
 ```
 
@@ -58,13 +59,115 @@ Interaction
 
 ```text
 Interaction 只展示和收集输入
-Command 只理解和规划
+Command 只管理对话理解、语义帧、对话裁决和 CommandFrame
 Policy 只管边界、身份、授权、裁剪
 Runtime 只管状态和执行
 Cognitive 只管事实、证据、快照、洞察
 Provider 只做被动外部能力
 Observability 只诊断、审计、观测
 ```
+
+### 2.1 Organization Foundation & Unified Policy Freeze
+
+以下原则冻结为 AI OS V5 Foundation 级架构约束：
+
+```text
+There is only one permission system in AI OS.
+
+Organization Foundation defines organizational truth.
+
+Policy Engine is the only component allowed to make permission decisions.
+
+Operational Filter and Cognitive Filter are both Policy Engine filters.
+
+Runtime, Cognitive Engine and LLM must only consume policy-filtered data.
+
+No component is allowed to bypass Policy.
+```
+
+边界规则：
+
+- Organization Foundation 属于 Foundation Layer，负责组织事实、身份关系、组织范围、管理范围和组织对象解析。
+- Policy Engine 是唯一权限系统，负责 Permission、Scope、Identity、Visibility、Confirmation、Authorization 和 Result Filter。
+- Operational Filter 与 Cognitive Filter 不是两套权限系统，只是 Policy Engine 面向不同资源平面的两个过滤器。
+- Runtime 禁止直接查询飞书通讯录或自行解析组织字符串。
+- Cognitive Engine 只负责认知对象的存储、索引和召回，不负责权限决策。
+- LLM 永远不能读取未经 Policy Filter 的 Operational 或 Cognitive 数据。
+
+### 2.2 Architecture Convergence Phase
+
+从 V5 Freeze 起，AI OS 进入 Architecture Convergence Phase。
+
+目标：
+
+```text
+扩业务，少扩架构。
+```
+
+新增问题必须先回答：
+
+```text
+这个问题属于哪个已有模块？
+```
+
+而不是：
+
+```text
+需要新增什么模块？
+```
+
+当前 V5 Architecture 冻结为：
+
+```text
+Foundation
+- Business Domain Taxonomy
+- Capability Registry
+- Skill Registry
+- Provider Registry
+- Identity & Scope
+- Context Store
+- Organization Foundation
+
+Core Engines
+- Command Engine
+- Policy Engine
+- Runtime Engine
+- Cognitive Engine
+
+Interface
+- Interaction Layer
+- Provider Layer
+
+Observability
+- Diagnostics
+- Audit
+- Telemetry
+```
+
+归类规则：
+
+- People 查询错误属于 Command Engine、ConversationState、SemanticFrame、DialogueResolver、Organization Resolver。
+- 权限问题属于 Policy Engine。
+- 组织关系属于 Organization Foundation。
+- LLM 表达属于 Response Orchestrator。
+- Provider 调用问题属于 Provider Layer。
+
+新增系统模块只有在同时满足以下条件时才允许：
+
+- 已有模块无法承担职责。
+- 职责具有长期稳定性。
+- 至少两个以上业务域都会依赖。
+
+否则必须放回已有模块。
+
+禁止事项：
+
+- 发现一个问题就新增 Engine。
+- 发现一个问题就新增 Foundation。
+- 发现一个问题就新增 Pipeline。
+- 发现一个问题就新增 Contract。
+
+Foundation 保存事实，不保存业务逻辑；Engine 做决策，不保存组织事实；Provider 只调用能力，不理解用户、不判断权限、不生成最终话术；LLM 只负责理解、分析、表达和总结，不负责组织事实、权限、Scope、Provider、Capability 或系统事实。
 
 ## 3. Foundation Layer
 
@@ -76,9 +179,10 @@ Foundation Layer 是系统元数据与上下文底座，不执行业务。
 Business Domain Taxonomy
 Capability Registry
 Skill Registry
-Provider Binding
+Provider Registry
 Identity & Scope Model
-Context Contract
+Context Store
+Organization Foundation
 ```
 
 ### 3.1 Business Domains
@@ -103,7 +207,66 @@ Intelligence
 - Bitable / Base 只是 Business 数据载体，不是 Domain。
 - Domain 是 Capability Registry 的根。
 
-### 3.2 Capability Registry
+### 3.2 Organization Foundation
+
+Organization Foundation 属于 Foundation Layer，是 AI OS 的唯一组织事实来源。
+
+它不是 People Runtime，不是 Business Domain，也不是 Policy。
+
+Organization Foundation 至少包含：
+
+```text
+Organization Directory
+Contact Directory
+Department Tree
+Department Membership
+Organization Graph
+Role Model
+Management Scope
+Alias Dictionary
+Identity Index
+Organization Resolver
+Source Metadata
+```
+
+定位：
+
+- Contact Directory 只是 Organization Foundation 的一个数据集，不能等同于组织模型。
+- Feishu Organization 是官方组织数据来源。
+- Organization Foundation 是标准化、增强后的本地组织主数据。
+- Role Model、Management Scope、Alias Dictionary 可以由本地维护和人工补充。
+
+同步策略：
+
+```text
+Feishu Organization
+-> Organization Sync
+-> Organization Foundation
+```
+
+- Full Sync：组织树、用户、部门、Membership、Leader。
+- Incremental Sync：Webhook 处理组织和人员变化。
+- On-demand Refresh：Resolver 未命中时刷新单个组织对象。
+
+禁止事项：
+
+- Runtime 禁止每次对话直接扫飞书通讯录。
+- Runtime 禁止使用字符串 contains 解析部门、组、事业部或人员。
+- LLM 禁止猜测组织对象。
+- Policy 禁止直接查询通讯录或自行解析组织关系。
+
+Organization Resolver 输出标准对象：
+
+```text
+resolved_user_id
+resolved_department_id
+resolved_scope
+confidence
+candidates
+reason
+```
+
+### 3.3 Capability Registry
 
 统一模型：
 
@@ -111,7 +274,7 @@ Intelligence
 Business Domain
 -> Capability
 -> Skill
--> Provider Binding
+-> Provider Registry
 ```
 
 职责：
@@ -119,7 +282,7 @@ Business Domain
 - Domain 回答：业务世界怎么分类。
 - Capability 回答：业务用户能让数字参谋做什么。
 - Skill 回答：系统内部有哪些可治理、可授权、可测试、可审计的原子能力。
-- Provider Binding 回答：具体由哪个外部或内部能力实现。
+- Provider Registry 回答：具体由哪个外部或内部能力实现。
 
 Capability Registry 不是 Observability，也不是 Runtime。它是 System Metadata Foundation，并被以下模块共同使用：
 
@@ -129,7 +292,7 @@ Capability Registry 不是 Observability，也不是 Runtime。它是 System Met
 - Interaction Layer：展示能力目录、能力清册、治理中心。
 - Observability Layer：做缺口诊断和健康检查。
 
-### 3.3 Identity & Scope
+### 3.4 Identity & Scope
 
 企业级 Scope Model：
 
@@ -142,6 +305,65 @@ COMPANY
 ```
 
 所有 Runtime Context、RuntimeActionInput、RuntimeResult、ResultContext 必须携带 company_id。禁止隐式默认公司。
+
+### 3.5 Context Store
+
+Context Store 不是新的 Engine。它保存对话上下文、状态上下文和跨 Engine 流转所需的上下文事实。
+
+冻结规则：
+
+- 不能因为新增一个 `context` service 文件，就新增架构层。
+- Context 可以由多个 Engine 消费，但必须有明确 owner。
+- Context 只能提供输入或承载结果，不能自己做业务决策、权限判断或执行动作。
+- Profile 可以帮助理解和表达，但不能替代 Policy，也不能扩大查询范围或执行身份。
+
+Context owner / consumer：
+
+| Context | Owner | Consumers | Boundary |
+| --- | --- | --- | --- |
+| Conversation Context | Command Engine | Command / Conversation LLM / Presentation LLM / Follow-up | 最近对话、非文本消息占位、上一轮业务结果摘要 |
+| Profile Context | Cognitive Engine | Command / Policy / Presentation LLM | 用户画像、角色习惯、表达偏好；不得越权 |
+| Scope Context | Policy Engine | Command / Runtime / Result Filter | 查询范围与目标对象 |
+| Runtime Context | Runtime Engine | Runtime / Provider | 执行身份、company_id、session、permission scope |
+| Result Context | Runtime Engine | Command / Conversation LLM / Presentation LLM / Interaction | 上一轮 RuntimeResult 摘要与追问锚点 |
+| Resource Context | Policy Engine | Policy / Result Filter | Operational / Cognitive 资源权限元数据 |
+| Cognitive Context | Cognitive Engine | Policy / Reasoning LLM / Presentation LLM | Evidence / Snapshot / Insight / MemoryCandidate 的可见认知输入 |
+
+Profile Context 三分法：
+
+| Profile Type | Consumer | Allowed Effect | Forbidden Effect |
+| --- | --- | --- | --- |
+| Intent Profile | Command Engine | 帮助理解 intent、scope 倾向、业务简称、常用对象 | 不得授权、不得执行、不得绕过 Policy |
+| Presentation Profile | Presentation LLM / Interaction | 调整语气、详细程度、格式偏好、管理者视角表达 | 不得改变数量、状态、风险等级、权限结论 |
+| Cognitive Profile | Cognitive Engine | 沉淀长期画像和偏好候选 | 不直接参与单次执行，除非被显式提取为 Intent / Presentation Profile |
+
+Profile Update 规则：
+
+- Command LLM 可以输出 `profile_update` 候选，用于记录用户在对话中明确表达出的称呼、语气、详细程度等偏好。
+- Profile Update 只能写表达偏好，例如 `preferred_address`、`avoid_direct_name`、`tone_tips`、`style`、`verbosity`。
+- Profile Update 禁止写入或修改 role、permission、company_id、department、scope、execution identity。
+- 下一轮对话必须同时读取 System Facts 与 Presentation Profile：事实用于准确，画像用于自然表达；表达画像不得覆盖权限事实，权限事实也不得覆盖用户称呼偏好。
+
+UserContextPack 规则：
+
+- `UserContextPack` 不是新 Engine，只是 Command / Presentation 可复用的 LLM 输入包。
+- 它统一装配 Identity Facts、Intent Profile、Presentation Profile、Conversation Context 与 Result Context。
+- Command LLM 必须优先读取 `UserContextPack`，避免身份事实、画像偏好、上一轮结果和最近对话在多个 prompt 中漂移。
+- `UserContextPack` 不做权限判断、不执行动作、不调用 Provider，只提供上下文输入。
+
+标准链路：
+
+```text
+User Message
+-> Command reads Conversation Context + Intent Profile
+-> CommandPlan
+-> Policy reads Scope / Resource / Profile boundary
+-> Runtime / Cognitive Read
+-> Policy Result Filter
+-> RuntimeResult writes Result Context
+-> Presentation reads Result Context + Presentation Profile
+-> InteractionPayload
+```
 
 ## 4. Core Engines
 
@@ -156,27 +378,34 @@ Cognitive Engine
 
 ### 4.1 Command Engine
 
+冻结方向：
+
+这不是 Intent Refactor。这是 Conversation First Command Engine Refactor V1。
+
 职责：
 
-- 理解用户输入。
-- 识别 intent、domain、capability candidate、scope。
-- 提取参数。
-- 判断缺参。
-- 决定 target_ui。
-- 输出结构化 CommandPlan。
+- 先构建 `ConversationState`，统一管理 active_domain、active_topic、active_object、active_collection、last_user_goal、last_assistant_question、pending_confirmation、pending_clarification、previous_result_reference、presentation_preference 和 user_profile。
+- 运行 Semantic Understanding。LLM 只负责理解当前话语，输出 speech_act、topic、target、operation、requested_output、parameters、confidence、ambiguities。
+- 运行 Dialogue Resolver，结合 ConversationState、SemanticFrame、Capability Registry summary 和 deterministic hints 直接输出 `CommandFrame`。
+- 输出结构化 `CommandFrame` 与兼容 `CommandPlan`。
 
-允许使用 LLM，但 LLM 只能输出结构化候选，不能直接执行。
+允许使用 LLM，但 LLM 只能输出 SemanticFrame，不得输出 Capability、Provider、Runtime、权限、Identity 或 Credential。
 
 冻结链路：
 
 ```text
 User Message
--> LLM / Rule Command Parser
--> Structured Intent Candidate
--> Command Validator
--> CommandPlan
--> Policy Engine
+-> ConversationState
+-> Semantic Understanding
+-> Dialogue Resolver
+-> CommandFrame
+-> Policy
+-> Runtime
+-> Response Orchestrator
+-> Interaction
 ```
+
+Command Engine 的默认路线是 Conversation-first。规则只提供 deterministic hints，不直接抢路由；Capability Registry 不参与理解，只在 Dialogue Resolver 之后被 Runtime/能力解析消费。
 
 Command Engine 禁止：
 
@@ -186,15 +415,70 @@ Command Engine 禁止：
 - 生成最终业务 Result。
 - 绕过 Policy 或 Runtime。
 - 让 LLM 直接选择 Provider、Tool、API、credential 或执行身份。
+- 新增 `DialogueDecision`、`IntentFrame` 等与 `CommandFrame` 竞争的中间输出。
+- 让业务域关键词入口绕过 ConversationState / SemanticFrame / DialogueResolver。
 
-Command LLM Intent V0 规则：
+旧对象处理：
 
-- 规则解析优先保护高置信动作，例如创建、发送、审批、完成任务。
-- LLM 只能输出结构化 Intent Candidate，不得执行、不准越过 Validator。
+- `result_context / pending_action / pending_confirmation / clarification` 暂不删除。
+- 它们只能作为 `ConversationStateBuilder` 的输入。
+- 其他入口模块不得直接读取这些对象来抢路由。
+
+V1 范围：
+
+- 接入：People、Knowledge。
+- 不接入：Task 写动作、Approval 写动作、Mail 写动作、全量 Provider 迁移。
+- 后续任何入口 Bug 必须归因到 ConversationState、SemanticFrame、DialogueResolver、Policy 或 Response Orchestrator，不得继续新增业务域关键词入口。
+
+Explicit Command Guard V1：
+
+- 只处理显式 `/...` 控制面命令，不处理普通自然语言。
+- 命令族包括：help、session_control、observability、governance、policy。
+- 典型命令包括：`/help`、`/reset`、`/system status`、`/system diagnostics`、`/runtime trace`、`/capability registry`、`/policy identity`。
+- 未知 `/...` 命令必须返回帮助说明，不进入业务工具、不调用 Provider、不触发 Runtime Action。
+- 未来新增硬规则必须先进入显式命令注册表，并声明 command、family、intent、scope、description。
+
+Command LLM Intent V1 规则：
+
+- 显式控制面命令由 Explicit Command Guard 处理，例如 `/system diagnostics`。
+- 高置信写入动作可以由确定性 parser 保护，避免 LLM 把动作改路由。
+- 其他自然语言默认进入 Command LLM，由 LLM 结合 UserContextPack 和 Capability Summary 判断。
+- LLM 只能输出结构化 Intent Candidate、`CommandFrame`、`draft_response_hint` 和安全 `profile_update` 候选，不得执行、不准越过 Validator。
 - Validator 只能接受已登记 Runtime strategy、合法 question_type、合法 data_scope。
 - 高置信 LLM 候选可补足泛化自然语言查询，例如企业任务负荷、公司日程风险。
 - 低置信 LLM 候选只有在给出 missing_params / clarification 时，才能进入引导式对话。
 - 未知 intent、低置信且不可追问候选、从 query 升级为 action 的候选必须丢弃。
+- 如果 `draft_response_hint` 已通过安全校验，V5 smalltalk 可以直接使用该回复，避免再调用第二次 Conversation LLM 导致延迟和人格漂移。
+
+LLM Routing V1：
+
+- Foreground LLM：`command_intent` / `conversation` / `presentation` 当前走 DeepSeek API，优先保证理解和表达质量。
+- Background LLM：`evidence_analysis` / `snapshot_builder` / `insight_generation` / `long_summary` / `reasoning` 继续走 DeepSeek API，用于较重的分析和认知生成。
+- 本地模型不作为权限依据，不直接调用 Tool，不改变 Policy / Runtime 边界。
+- 当前无 GPU 云服务器上的轻量本地模型不作为前台默认；未来 GPU 推理服务就绪后，可在 Routing Policy 中把前台路由切到本地强模型。
+
+`CommandFrame` 是 Command 输出的统一对话帧，最小字段包括：
+
+```json
+{
+  "utterance_type": "conversation/business_query/cognitive_query/action_request/system_explanation",
+  "dialogue_mode": "answer/present/clarify/execute",
+  "user_goal": "",
+  "intent": "",
+  "domain": "",
+  "capability": "",
+  "skill_intent": "",
+  "scope": "",
+  "target": {},
+  "params": {},
+  "missing_slots": [],
+  "context_used": {},
+  "response_intent": {},
+  "draft_response_hint": "",
+  "confidence": 0.0,
+  "route_path": ""
+}
+```
 
 Command Guided Clarification V0：
 
@@ -225,28 +509,34 @@ Policy Engine 独立于 Runtime，但 V0 可作为同仓同进程 service 模块
 
 职责：
 
-- Operational Data 权限。
-- Cognitive Data 权限。
-- Scope 判断。
-- Identity Decision。
-- USER fallback 允许条件。
-- 高风险确认策略。
-- Policy Preflight。
-- Policy Result Filter。
+- Subject Resolver：从 Organization Foundation 获取 PolicySubject。
+- Scope Resolver：从 Organization Foundation 获取 resolved scope 与 management scope。
+- Permission Decision：判断是否允许访问或执行。
+- Identity Decision：判断 BOT / USER / TENANT 执行身份。
+- Visibility Decision：判断字段、来源、引用和敏感信息可见性。
+- Confirmation / Authorization：判断是否需要确认或授权。
+- Operational Filter：过滤 Task / Approval / Calendar / People / Knowledge / Business 等 operational data。
+- Cognitive Filter：过滤 WorkEvent / Evidence / Snapshot / Insight / Memory 等 cognitive data。
+- Result Filter：输出 Runtime、Interaction、LLM 可消费的最终过滤结果。
 
 统一链路：
 
 ```text
-CommandPlan
--> Policy Preflight
--> Runtime / Cognitive Read
--> Policy Result Filter
+Organization Foundation
+-> PolicySubject / ManagementScope
+-> Policy Engine
+-> Operational Filter
+-> Cognitive Filter
+-> PolicyFilteredData
 -> RuntimeResult
 ```
 
 核心原则：
 
-- 最终结果权限 = 实时数据权限 ∩ 认知数据权限 ∩ 当前查询 scope。
+- AI OS 只有一套权限系统：Policy Engine。
+- Operational Filter 和 Cognitive Filter 都是 Policy Engine 的过滤器，不是独立权限系统。
+- Policy 不负责组织解析，不查询飞书通讯录；组织事实全部来自 Organization Foundation。
+- Runtime、Cognitive Engine、Interaction、LLM 只能消费 Policy Filter 之后的数据。
 - 认知层不能比来源对象更开放。
 - USER_TOKEN 不能成为认知层越权依据。
 - COMPANY / DEPARTMENT / USER 查询不能偷偷使用当前用户 USER_TOKEN 代查。
@@ -365,6 +655,8 @@ User Message
 - 输出 intent、domain、capability、scope、对象、时间、约束、输出偏好。
 - 发现缺参并生成 clarification。
 - 作为 Command Enrichment 进入 RuntimeResult metadata。
+- 读取 Conversation Context 和 Intent Profile，用于理解多轮上下文、常用简称和范围倾向。
+- 读取 Presentation Profile，用于生成自然 `draft_response_hint`，并在用户明确表达偏好时输出 `profile_update` 候选。
 
 禁止：
 
@@ -372,6 +664,8 @@ User Message
 - 选择 Provider / Tool / API。
 - 判断权限。
 - 决定执行身份。
+- 将 Profile 当作授权依据。
+- 把称呼、语气等表达偏好升级成身份事实或权限事实。
 
 #### Reasoning LLM
 
@@ -409,6 +703,7 @@ User Message
 - 输出侧表达优化。
 - 应用用户画像、角色、语气、详细程度、格式偏好。
 - 保持数量、状态、权限边界和业务结论不变。
+- 读取 Result Context 和 Presentation Profile，生成更自然但不改语义的回答。
 
 禁止：
 
@@ -589,7 +884,7 @@ Intelligence
 - Business：客户、商机、订单、合同、供应商、产品、工单、库存。
 - Intelligence：日报、周报、总结、风险分析、经营分析、管理洞察。
 
-飞书功能只能映射为 Provider 或 Provider Binding。
+飞书功能只能映射为 Business Domain Capability、Provider Registry 条目或 Provider Layer 调用。
 
 ## 8. Standard Contracts
 
@@ -659,9 +954,11 @@ created_at
 | Document | Status | Role |
 | --- | --- | --- |
 | `V5_RUNTIME_CONSTITUTION.md` | ACTIVE | 唯一架构总图 |
+| `ARCHITECTURE_INDEX.md` | ACTIVE | 架构文档索引 |
+| `ORGANIZATION_FOUNDATION_V1.md` | ACTIVE | Foundation: 组织事实层 |
+| `UNIFIED_POLICY_ENGINE_V0.md` | ACTIVE | 唯一权限系统 |
 | `CAPABILITY_REGISTRY_MODEL.md` | ACTIVE | Foundation: Domain -> Capability -> Skill -> Provider |
 | `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` | ACTIVE | Cognitive Engine V1 |
-| `UNIFIED_POLICY_ENGINE_V0_DESIGN.md` | ACTIVE | Policy Engine V0 |
 | `CURRENT_MISSION.md` | ACTIVE | 当前任务 |
 
 ### 9.2 Frozen References
@@ -730,10 +1027,13 @@ created_at
 | Memory / WorkEvent / Snapshot scattered docs | Cognitive Engine |
 | Cognitive Foundation | Cognitive Engine |
 | Profile / Style / Preference as separate subsystem | Cognitive Engine |
-| Tool Layer / Provider Layer as architecture layer | Provider / Tool Boundary |
+| Conversation Context as separate Engine / Layer | Context Store consumed by Command Engine |
+| Shared Context Services as architecture layer | Context Store |
+| Profile only loaded at output side | Intent Profile + Presentation Profile + Cognitive Profile |
+| Tool Layer as architecture layer | Provider Layer |
 | Card Policy | Interaction render-only contract |
 | Diagnostics as business governance | Observability Layer |
-| Feishu product modules | Business Domain + Provider Binding |
+| Feishu product modules | Business Domain + Provider Registry + Provider Layer |
 | Approval / Task as top-level module | Process / Workspace capabilities |
 | Capability Catalog / Skill Registry as runtime pages | Capability Registry consumers |
 | LLM agent directly choosing tools | Command LLM Intent Candidate + Validator |
@@ -754,7 +1054,7 @@ created_at
 Business Domain
 -> Capability
 -> Skill
--> Provider Binding
+-> Provider Registry
 ```
 
 新增认知能力必须挂到：

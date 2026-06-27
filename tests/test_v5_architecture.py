@@ -1972,6 +1972,7 @@ def test_feishu_admin_sync_and_discovery_live_outside_route_collection() -> None
     route_text = "\n".join(
         [
             Path("app/api/routes/feishu_admin_sync_information_routes.py").read_text(),
+            Path("app/api/routes/feishu_admin_sync_organization_routes.py").read_text(),
             Path("app/api/routes/feishu_admin_sync_resource_routes.py").read_text(),
         ]
     )
@@ -1992,9 +1993,11 @@ def test_feishu_admin_sync_and_discovery_live_outside_route_collection() -> None
     assert "from app.services.feishu_admin_sync import" not in collection_text
     assert "from app.services.feishu_admin_sync import" not in route_collection_text
     assert "class FeishuInformationSyncRequest(BaseModel):" in request_model_text
+    assert "class FeishuOrganizationSyncRequest(BaseModel):" in request_model_text
     assert "class FeishuResourceDiscoverRequest(BaseModel):" in request_model_text
     assert [token for token in forbidden_route_tokens if token in route_text] == []
     assert "return await sync_app_information_payload(db, app_config, data)" in route_text
+    assert "return await sync_organization_foundation_payload(db, app_config, data)" in route_text
     assert "return await discover_app_resources_payload(db, app_config, data)" in route_text
     assert "sync_feishu_information(" in service_text
     assert "discover_feishu_resources(" in service_text
@@ -2006,6 +2009,7 @@ def test_feishu_admin_sync_route_collection_only_includes_subrouters() -> None:
 
     assert "router.include_router(sync_message_router)" in collection_text
     assert "router.include_router(sync_information_router)" in collection_text
+    assert "router.include_router(sync_organization_router)" in collection_text
     assert "router.include_router(sync_resource_router)" in collection_text
     assert "BaseModel" not in collection_text
     assert "Depends(" not in collection_text

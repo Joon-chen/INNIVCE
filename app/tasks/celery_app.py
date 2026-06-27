@@ -50,6 +50,10 @@ celery_app.conf.beat_schedule = {
         "task": "v5.resources.sync_auto",
         "schedule": settings.auto_v5_resource_sync_interval_seconds,
     },
+    "people-snapshot-prewarm": {
+        "task": "people.snapshot.prewarm",
+        "schedule": 1800,
+    },
     "approval-snapshot-builder-events": {
         "task": "approval.snapshot.build_from_events",
         "schedule": 15,
@@ -308,21 +312,59 @@ def discover_feishu_resources_task(app_config_id: str, payload: dict) -> dict:
         }
     except Exception as exc:
         db.rollback()
-        try:
-            from app.services.feishu import replies as feishu_replies
+        return {"ok": False, "error": str(exc)[:500]}
+    finally:
+        db.close()
 
-            app_config = db.get(FeishuAppConfig, UUID(app_config_id))
-            if app_config:
-                asyncio.run(
-                    feishu_replies.send_text_reply(
-                        app_config=app_config,
-                        reply_target=reply_target,
-                        text=f"操作失败：{str(exc)[:180]}。请重新查询待审批后再试。",
+
+@celery_app.task(name="people.snapshot.prewarm")
+def people_snapshot_prewarm_task() -> dict:
+    db = SessionLocal()
+    try:
+        from app.services.feishu.cli_profile import feishu_app_cli_profile
+        from app.services.runtime_v5.context import build_runtime_context
+        from app.services.runtime_v5.feishu_resource_providers import build_feishu_provider_registry
+        from app.services.runtime_v5.models import IntentResult, PlannerResult, ProviderRequest
+
+        app_configs = _active_feishu_apps(db)
+        results: dict[str, dict[str, Any]] = {}
+        for app_config in app_configs:
+            try:
+                runtime_context = build_runtime_context(
+                    message="系统预热通讯录组织快照",
+                    identity={"open_id": "system", "user_id": "system", "name": "system", "role": "owner", "domains": ["all"]},
+                    company_id=app_config.company_id,
+                )
+                provider = build_feishu_provider_registry(db=db, cli_profile=feishu_app_cli_profile(app_config))["people"]
+                result = provider.execute(
+                    ProviderRequest(
+                        source="people",
+                        operation="get_org_snapshot",
+                        intent=IntentResult(
+                            question_type="query",
+                            intent="organization_snapshot",
+                            data_scope="organization",
+                            entities={"view": "people_aggregate", "people_query_mode": "count"},
+                            confidence=1.0,
+                            canonical_question="系统预热通讯录组织快照",
+                        ),
+                        planner=PlannerResult(strategy="organization_snapshot", sources=("people",)),
+                        context=runtime_context,
+                        execution_identity="bot",
                     )
                 )
-        except Exception:
-            pass
-        return {"ok": False, "error": str(exc)[:500]}
+                results[str(app_config.id)] = {
+                    "status": result.status,
+                    "count": result.count,
+                    "department_count": result.metadata.get("department_count", 0),
+                    "cache_hit": result.metadata.get("cache_hit", False),
+                    "fetch_ms": result.metadata.get("fetch_ms", 0),
+                    "error": result.error,
+                }
+            except Exception as exc:
+                db.rollback()
+                results[str(app_config.id)] = {"status": "error", "error": str(exc)[:500]}
+        return {"enabled": True, "app_count": len(app_configs), "results": results}
     finally:
         db.close()
 
@@ -330,6 +372,7 @@ def discover_feishu_resources_task(app_config_id: str, payload: dict) -> dict:
 _BOT_APPROVALS_RECENT_REPLY_TASK = ".".join(("bot", "approvals", "recent_reply"))
 _BOT_APPROVALS_WORKBENCH_TASK = ".".join(("bot", "approvals", "workbench_reply"))
 _BOT_RUNTIME_CARD_REPLY_TASK = ".".join(("bot", "runtime", "card_reply"))
+_BOT_RUNTIME_ASYNC_FOLLOWUP_TASK = ".".join(("bot", "runtime", "async_followup"))
 _BOT_APPROVALS_BATCH_APPROVE_TASK = ".".join(("bot", "approvals", "batch_approve"))
 _APPROVAL_SNAPSHOT_BUILD_TASK = ".".join(("approval", "snapshot", "build"))
 _APPROVAL_SNAPSHOT_BUILD_FROM_EVENTS_TASK = ".".join(("approval", "snapshot", "build_from_events"))
@@ -391,7 +434,7 @@ def bot_approvals_workbench_reply_task(
         from app.services.feishu import bot_runtime
         from app.services.feishu import replies as feishu_replies
         from app.services.feishu.identity import BotIdentity
-        from app.services.runtime_v5.action_observer import record_action_trace, write_runtime_action_audit
+        from app.services.runtime_v5.action_observer import record_action_trace
         from app.services.runtime_v5.context import clear_result_context, load_session_context
 
         app_config = db.get(FeishuAppConfig, UUID(app_config_id))
@@ -620,6 +663,17 @@ def bot_runtime_card_reply_task(
                     chat_id=chat_id,
                 )
         )
+        followup_payload = _runtime_async_followup_payload(
+            trace=trace,
+            question=command,
+            answer=runtime_answer.answer,
+            chat_id=chat_id,
+        )
+        if followup_payload:
+            bot_runtime_async_followup_task.apply_async(
+                args=[app_config_id, followup_payload, reply_target],
+                countdown=1,
+            )
         db.commit()
         return {"ok": True, "route_path": trace.get("route_path"), "answer_chars": len(runtime_answer.answer)}
     except Exception as exc:
@@ -665,6 +719,71 @@ def bot_runtime_card_reply_task(
         return {"ok": False, "error": str(exc)[:500]}
     finally:
         db.close()
+
+
+@celery_app.task(name=_BOT_RUNTIME_ASYNC_FOLLOWUP_TASK)
+def bot_runtime_async_followup_task(
+    app_config_id: str,
+    payload: dict,
+    reply_target: dict,
+) -> dict:
+    db = SessionLocal()
+    try:
+        from app.services.feishu import replies as feishu_replies
+        from app.services.runtime_v5.async_followup import build_async_followup_text
+
+        app_config = db.get(FeishuAppConfig, UUID(app_config_id))
+        if not app_config:
+            return {"ok": False, "error": "Feishu app config not found"}
+        text = build_async_followup_text(payload)
+        if not text:
+            return {"ok": True, "skipped": True, "reason": "empty_followup"}
+        asyncio.run(
+            feishu_replies.send_smart_reply(
+                app_config=app_config,
+                reply_target=reply_target,
+                reply=text,
+                route_path=str(payload.get("route_path") or "runtime_async_followup"),
+                chat_id=str(payload.get("chat_id") or ""),
+            )
+        )
+        return {"ok": True, "answer_chars": len(text)}
+    finally:
+        db.close()
+
+
+def _runtime_async_followup_payload(
+    *,
+    trace: dict[str, Any],
+    question: str,
+    answer: str,
+    chat_id: str | None,
+) -> dict[str, Any] | None:
+    from app.services.runtime_v5.async_followup import should_schedule_async_followup
+
+    runtime_result = _runtime_result_from_trace(trace)
+    if not should_schedule_async_followup(runtime_result):
+        return None
+    metadata = runtime_result.get("metadata") if isinstance(runtime_result.get("metadata"), dict) else {}
+    return {
+        "question": question,
+        "answer": answer,
+        "chat_id": chat_id,
+        "route_path": str(trace.get("route_path") or "runtime_async_followup"),
+        "strategy": str(metadata.get("strategy") or trace.get("strategy") or ""),
+        "result_type": str(runtime_result.get("result_type") or trace.get("result_type") or ""),
+        "data_scope": str(metadata.get("data_scope") or trace.get("data_scope") or ""),
+        "response_policy": metadata.get("response_policy") if isinstance(metadata.get("response_policy"), dict) else {},
+    }
+
+
+def _runtime_result_from_trace(trace: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(trace, dict):
+        return {}
+    composed = trace.get("composed") if isinstance(trace.get("composed"), dict) else {}
+    metadata = composed.get("metadata") if isinstance(composed.get("metadata"), dict) else {}
+    runtime_result = metadata.get("runtime_result") if isinstance(metadata.get("runtime_result"), dict) else {}
+    return runtime_result
 
 
 def _authorization_actions_from_runtime_result(trace_payload: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -1109,6 +1228,16 @@ def _configured_feishu_apps(db) -> list[FeishuAppConfig]:
     elif settings.feishu_default_app_config_id:
         query = query.where(FeishuAppConfig.id == UUID(settings.feishu_default_app_config_id))
     return list(db.scalars(query.order_by(FeishuAppConfig.created_at.asc())).all())
+
+
+def _active_feishu_apps(db) -> list[FeishuAppConfig]:
+    return list(
+        db.scalars(
+            select(FeishuAppConfig)
+            .where(FeishuAppConfig.is_active.is_(True))
+            .order_by(FeishuAppConfig.created_at.asc())
+        ).all()
+    )
 
 
 def _v5_auto_sync_resources(db, *, company_id: UUID, policy: dict) -> list[Resource]:

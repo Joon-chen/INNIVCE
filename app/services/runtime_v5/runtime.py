@@ -8,11 +8,15 @@ from uuid import uuid4
 
 from app.services.runtime_v5.capabilities import label_for_strategy, route_path_for_strategy
 from app.services.runtime_v5.agent_runtime_core import execute_runtime_task
+from app.services.runtime_v5.action_observer import record_route_observation_trace
 from app.services.runtime_v5.capability_router import ResourceProvider
+from app.services.runtime_v5.clarification import build_clarification_guide
+from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
 from app.services.runtime_v5.composer import compose_answer
 from app.services.runtime_v5.command_layer import build_command_plan
 from app.services.runtime_v5.context import clear_result_context, save_result_context, save_session_context
 from app.services.runtime_v5.intent import recognize_intent
+from app.services.runtime_v5.intent_layers import should_start_new_question_over_result_context
 from app.services.runtime_v5.models import AnswerEnvelope, ComposedAnswer, ExecutionResult, PermissionDecision, ProviderResult, ResultContext, RuntimeContext
 from app.services.runtime_v5.policy_layer import evaluate_policy
 from app.services.runtime_v5.permission import check_runtime_permission
@@ -57,7 +61,7 @@ from app.services.runtime_v5.runtime_state import (
 _PENDING_ACTION_KEY = "runtime_v5_pending_action"
 _WAITING_INPUT_STARTED_KEY = "runtime_v5_waiting_input_started"
 _PENDING_ACTION_TTL_SECONDS = 900
-_CONFIRM_TERMS = ("确认", "确认执行", "可以执行", "继续执行", "执行吧", "同意", "是的")
+_CONFIRM_TERMS = ("确认", "确认执行", "可以执行", "继续执行", "执行吧", "同意", "是", "对", "可以", "好的", "好")
 _CANCEL_TERMS = ("取消", "不要执行", "别执行", "算了")
 
 
@@ -401,18 +405,19 @@ def run_runtime_v5(
                 composed=_with_pipeline_timing(ComposedAnswer(answer=answer, result_context=receipt_context), timer),
             )
         if _confirmation_execution_guard_reason(pending_action):
+            guard_reason = _confirmation_execution_guard_reason(pending_action)
             state = mark_runtime_action_done(
                 chat_id=context.chat_id,
                 session_context=context.session_context,
                 success=False,
-                error=_confirmation_execution_guard_reason(pending_action),
+                error=guard_reason,
             )
             command_plan, intent, plan, permission = _build_command_and_policy(
                 context=context,
                 runtime_provider_snapshot=runtime_provider_snapshot,
                 timer=timer,
             )
-            answer = "该操作目前只支持补齐参数并等待确认，暂不执行。"
+            answer = _confirmation_guard_answer(guard_reason)
             receipt_context = _pending_action_receipt_context(
                 pending_action=pending_action,
                 status="failed",
@@ -427,7 +432,7 @@ def run_runtime_v5(
                         source="runtime",
                         status="error",
                         result_type="runtime_action",
-                        error=_confirmation_execution_guard_reason(pending_action),
+                        error=guard_reason,
                         answer=answer,
                     ),
                 ),
@@ -467,12 +472,28 @@ def run_runtime_v5(
             )
             confirmation_granted = True
 
+    clarification_reply = resolve_clarification_reply(context.current_message, context.result_context)
+    if clarification_reply.is_reply:
+        context = replace(
+            context,
+            current_message=clarification_reply.resolved_message,
+            session_context={
+                **context.session_context,
+                "runtime_v5_last_clarification_reply": {
+                    "original_message": context.current_message,
+                    "resolved_message": clarification_reply.resolved_message,
+                    "filled_params": clarification_reply.filled_params,
+                },
+            },
+        )
+
     followup = detect_result_followup(context.current_message, context.result_context)
     timer.mark("result_followup_detector")
     if (
         _looks_like_new_question(context.current_message, context.result_context, followup)
         or _looks_like_result_action(context.current_message)
         or _looks_like_approval_detail_action(context.current_message, context.result_context)
+        or _conversation_first_should_own_followup(context)
     ):
         followup = replace(followup, is_result_followup=False)
     if followup.is_result_followup:
@@ -503,12 +524,55 @@ def run_runtime_v5(
         context=context,
         runtime_provider_snapshot=runtime_provider_snapshot,
     )
+    _record_command_route_observation(context=context, command_plan=command_plan)
     intent = command_plan.intent_result
     timer.mark("intent_recognition")
     plan = command_plan.planner_result
     timer.mark("task_planner")
     permission = evaluate_policy(context=context, command_plan=command_plan)
     timer.mark("permission_check")
+
+    if _should_wait_for_action_input(context=context, intent=intent, permission=permission):
+        pending_action_id, state = _save_missing_action_input(context=context, intent=intent, plan=plan, permission=permission)
+        pending_action = _pending_action({**context.session_context, "runtime_v5_state": runtime_state_payload(state)})
+        if pending_action is None:
+            pending_action = {
+                "id": pending_action_id,
+                "intent": intent.intent,
+                "strategy": plan.strategy,
+                "message": context.current_message,
+                "missing_params": list(intent.missing_params),
+                "sources": list(plan.sources),
+            }
+        result_context = _waiting_input_result_context(pending_action=pending_action, state=state)
+        _save_runtime_result_context(context, result_context)
+        composed = ComposedAnswer(
+            answer=result_context.answer,
+            result_context=result_context,
+            metadata={
+                "waiting_input": True,
+                "strategy": plan.strategy,
+                "sources": list(plan.sources),
+                "pending_action_id": pending_action_id,
+                "context_kind": "waiting_input",
+            },
+        )
+        timer.mark("answer_composer")
+        composed = _with_pipeline_timing(composed, timer)
+        composed = _with_runtime_result_metadata(
+            command_plan=command_plan,
+            permission=permission,
+            execution=None,
+            composed=composed,
+        )
+        return AnswerEnvelope(
+            context=context,
+            intent=intent,
+            plan=plan,
+            permission=permission,
+            execution=None,
+            composed=composed,
+        )
 
     if _should_request_confirmation(
         context=context,
@@ -631,6 +695,7 @@ def run_runtime_v5(
         _sync_current_approval_item(context, scoped_result_context)
     elif intent.needs_clarification:
         clarification_context = _clarification_result_context(
+            context=context,
             intent=intent,
             plan=plan,
             answer=composed.answer,
@@ -737,6 +802,52 @@ def _build_command_and_policy(
     permission = evaluate_policy(context=context, command_plan=command_plan)
     timer.mark("permission_check")
     return command_plan, intent, plan, permission
+
+
+def _conversation_first_should_own_followup(context: RuntimeContext) -> bool:
+    result_context = context.result_context
+    if result_context is None:
+        return False
+    result_type = str(result_context.result_type or "")
+    return result_type in {"people_search", "department_members", "organization_snapshot", "company_profile_knowledge", "knowledge_search", "docs_read"}
+
+
+def _record_command_route_observation(*, context: RuntimeContext, command_plan) -> None:
+    observation = _command_route_observation(command_plan)
+    if not observation:
+        return
+    record_route_observation_trace(
+        context.chat_id,
+        {
+            "question": context.current_message,
+            "intent": command_plan.intent,
+            "question_type": command_plan.intent_result.question_type,
+            "data_scope": command_plan.intent_result.data_scope,
+            "strategy": command_plan.planner_result.strategy,
+            "sources": list(command_plan.planner_result.sources),
+            "route_observation": observation,
+        },
+    )
+
+
+def _command_route_observation(command_plan) -> dict[str, Any]:
+    intent_result = getattr(command_plan, "intent_result", None)
+    entities = getattr(intent_result, "entities", {}) if intent_result is not None else {}
+    if isinstance(entities, dict):
+        trace = entities.get("command_intent_trace") if isinstance(entities.get("command_intent_trace"), dict) else {}
+        observation = trace.get("route_observation") if isinstance(trace, dict) else None
+        if isinstance(observation, dict):
+            return observation
+    frame = getattr(command_plan, "command_frame", None)
+    if frame is None:
+        return {}
+    rule_candidate = getattr(frame, "rule_candidate", {}) or {}
+    if not isinstance(rule_candidate, dict):
+        rule_candidate = {}
+    observation = rule_candidate.get("route_observation")
+    if isinstance(observation, dict):
+        return observation
+    return {}
 
 
 class _RuntimeTimer:
@@ -871,40 +982,19 @@ def _should_request_confirmation(
     )
 
 
-def _looks_like_new_question(message: str, result_context=None, followup=None) -> bool:
-    if followup is not None and getattr(followup, "is_result_followup", False):
-        return False
-    if _is_short_result_reference(message):
-        return False
-    return any(
-        token in message
-        for token in (
-            "组织架构",
-            "组织结构",
-            "通讯录",
-            "有哪些人",
-            "都有谁",
-            "电话",
-            "邮箱",
-            "手机号",
-            "职位",
-            "日程",
-            "会议",
-            "开会",
-            "邮件",
-            "待办",
-            "任务",
-            "审批",
-        )
+def _should_wait_for_action_input(*, context: RuntimeContext, intent, permission) -> bool:
+    return bool(
+        context.chat_id
+        and intent.question_type == "action"
+        and intent.needs_clarification
+        and intent.missing_params
+        and permission.allowed
+        and any(param in {"text", "target_type", "delivery_mode"} for param in intent.missing_params)
     )
 
 
-def _is_short_result_reference(message: str) -> bool:
-    text = message.strip()
-    if len(text) > 16:
-        return False
-    return any(term in text for term in ("详情", "明细", "展开", "第一个", "第二个", "第三个", "最后一个", "这些", "他们", "她们"))
-
+def _looks_like_new_question(message: str, result_context=None, followup=None) -> bool:
+    return should_start_new_question_over_result_context(message, result_context, followup=followup)
 
 def _pending_action(session_context: dict[str, Any]) -> dict[str, Any] | None:
     state_pending = pending_action_from_runtime_state(session_context)
@@ -918,7 +1008,29 @@ def _confirmation_execution_guard_reason(pending_action: dict[str, Any]) -> str:
     strategy = str(pending_action.get("strategy") or pending_action.get("intent") or "").strip()
     if strategy in {"approval_transfer", "approval_add_sign"}:
         return "guarded_pending_user_resolution"
+    entities = pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {}
+    if strategy == "message_send" and entities.get("target_type") == "people_context":
+        delivery_mode = _normalized_delivery_mode(entities.get("delivery_mode"))
+        if delivery_mode == "bot_multi_notify":
+            return "guarded_people_context_bot_multi_notify"
+        if delivery_mode == "user_multi_private":
+            return "guarded_people_context_user_multi_private"
+        if delivery_mode == "create_group_then_send":
+            return ""
+        return "guarded_people_context_batch_send"
     return ""
+
+
+def _confirmation_guard_answer(reason: str) -> str:
+    if reason == "guarded_people_context_bot_multi_notify":
+        return "已确认用机器人通知这些人的意图，但 Bot 多人通知执行器还没有开放。我不会自动群发；等批量通知执行器接入后再执行。"
+    if reason == "guarded_people_context_user_multi_private":
+        return "已确认以本人身份分别发送的意图，但本人代发多人私信执行器还没有开放。我不会自动逐个私发；等用户授权和批量私信执行器接入后再执行。"
+    if reason == "guarded_people_context_create_group_then_send":
+        return "已确认拉群后发送的意图，但自动建群并发送执行器还没有开放。我不会自动建群；等群聊创建和群内发送执行器接入后再执行。"
+    if reason == "guarded_people_context_batch_send":
+        return "已确认发送意图，但多人目标发送执行器还没有开放。我不会自动逐个私发或用机器人群发；请改为发到一个明确群聊，或等批量发送执行器接入后再执行。"
+    return "该操作目前只支持补齐参数并等待确认，暂不执行。"
 
 
 def _context_from_action_request(context: RuntimeContext) -> RuntimeContext:
@@ -999,13 +1111,11 @@ def _pending_action_from_action_input(action_input, *, message: str) -> dict[str
     return runtime_pending_action_payload(pending_action_from_runtime_action_input(action_input, message=message))
 
 
-def _clarification_result_context(*, intent, plan, answer: str) -> ResultContext:
-    missing_params = list(getattr(intent, "missing_params", ()) or ())
+def _clarification_result_context(*, context: RuntimeContext, intent, plan, answer: str) -> ResultContext:
+    guide = build_clarification_guide(context=context, intent=intent, fallback=answer)
+    missing_params = list(guide.missing_params)
     confidence = float(getattr(intent, "confidence", 0.0) or 0.0)
-    reason = "missing_params" if missing_params else "low_confidence"
-    clarification_prompt = _clarification_prompt(intent=intent, fallback=answer)
-    clarification_options = _clarification_options(missing_params)
-    next_step = "请补充：" + "、".join(_missing_param_label(param) for param in missing_params) if missing_params else "请补充更明确的对象、范围或时间。"
+    clarification_options = guide.option_payloads()
     return ResultContext(
         result_type=f"{plan.strategy}_clarification",
         query_id=f"{plan.strategy}:clarification:{uuid4().hex[:12]}",
@@ -1016,12 +1126,12 @@ def _clarification_result_context(*, intent, plan, answer: str) -> ResultContext
                 "operation": plan.strategy,
                 "status": "clarification",
                 "title": "需要补充信息",
-                "reason": reason,
+                "reason": guide.reason,
                 "missing_params": missing_params,
                 "confidence": confidence,
-                "clarification_prompt": clarification_prompt,
+                "clarification_prompt": guide.prompt,
                 "clarification_options": clarification_options,
-                "summary": clarification_prompt or next_step,
+                "summary": guide.prompt or guide.next_step,
             },
         ),
         metadata={
@@ -1031,71 +1141,20 @@ def _clarification_result_context(*, intent, plan, answer: str) -> ResultContext
             "actionable": False,
             "execution_status": "clarification",
             "empty_result": True,
-            "empty_reason": reason,
-            "recommended_next_step": next_step,
+            "empty_reason": guide.reason,
+            "recommended_next_step": guide.next_step,
             "source": "runtime",
             "operation": plan.strategy,
             "result_sources": list(plan.sources),
             "missing_params": missing_params,
-            "clarification_prompt": clarification_prompt,
+            "clarification_prompt": guide.prompt,
             "clarification_options": clarification_options,
             "confidence": confidence,
             "item_count": 1,
             "display_count": 1,
         },
-        answer=clarification_prompt or next_step,
+        answer=guide.prompt or guide.next_step,
     )
-
-
-def _clarification_prompt(*, intent, fallback: str) -> str:
-    entities = getattr(intent, "entities", {}) if isinstance(getattr(intent, "entities", {}), dict) else {}
-    prompt = entities.get("clarification_prompt")
-    if isinstance(prompt, str) and prompt.strip():
-        return prompt.strip()
-    return str(fallback or "").strip()
-
-
-def _clarification_options(missing_params: list[str]) -> list[dict[str, str]]:
-    options: list[dict[str, str]] = []
-    for param in missing_params:
-        options.extend(_clarification_options_for_param(str(param)))
-    return options
-
-
-def _clarification_options_for_param(param: str) -> list[dict[str, str]]:
-    if param == "scope":
-        return [
-            {"param": "scope", "label": "我的", "value": "self"},
-            {"param": "scope", "label": "部门", "value": "department"},
-            {"param": "scope", "label": "公司", "value": "company"},
-        ]
-    if param in {"time", "time_range", "start", "end"}:
-        return [
-            {"param": param, "label": "今天", "value": "today"},
-            {"param": param, "label": "本周", "value": "this_week"},
-            {"param": param, "label": "本月", "value": "this_month"},
-        ]
-    if param in {"person", "target", "recipient", "transfer_user_id", "add_sign_user_ids", "cc_user_ids"}:
-        return [{"param": param, "label": "指定人员", "value": "user"}]
-    return []
-
-
-def _missing_param_label(param: str) -> str:
-    return {
-        "person": "人员",
-        "target": "对象",
-        "department": "部门",
-        "time": "时间",
-        "time_range": "时间范围",
-        "start": "开始时间",
-        "end": "结束时间",
-        "summary": "标题/内容",
-        "approval_item": "审批单",
-        "message": "消息内容",
-        "recipient": "接收人",
-        "scope": "范围",
-    }.get(str(param), str(param))
-
 
 def _permission_denied_result_context(*, intent, plan, permission, answer: str) -> ResultContext:
     is_action = intent.question_type == "action"
@@ -1222,6 +1281,7 @@ def _runtime_action_receipt_context(
                 "summary": summary[:240],
                 "error": result.error,
                 "count": result.count,
+                **_runtime_action_receipt_metadata(metadata),
             }
         )
     if not provider_items:
@@ -1280,6 +1340,21 @@ def _runtime_action_result_type(strategy: str) -> str:
     return "runtime_action"
 
 
+def _runtime_action_receipt_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "target",
+        "target_type",
+        "target_query",
+        "resolved_user_id",
+        "resolved_chat_id",
+        "resolved_target_name",
+        "error_type",
+        "provider_boundary",
+        "recommended_next_step",
+    )
+    return {field: metadata.get(field) for field in fields if metadata.get(field) not in (None, "", [], {})}
+
+
 def _pending_action_receipt_context(*, pending_action: dict[str, Any], status: str, answer: str) -> ResultContext:
     strategy = str(pending_action.get("strategy") or pending_action.get("intent") or "runtime_action").strip()
     label = str(pending_action.get("intent_label") or label_for_strategy(strategy) or strategy).strip()
@@ -1292,6 +1367,11 @@ def _pending_action_receipt_context(*, pending_action: dict[str, Any], status: s
         "error": "执行失败",
         "success": "已完成",
     }.get(status, status or "已处理")
+    entities = pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {}
+    people_targets = entities.get("people_targets") if isinstance(entities.get("people_targets"), list) else []
+    delivery_mode = _normalized_delivery_mode(entities.get("delivery_mode"))
+    target_type = str(entities.get("target_type") or "").strip()
+    people_target_count = _safe_int(entities.get("people_target_count"), fallback=len(people_targets))
     summary = "｜".join(part for part in (label, status_label, message[:120]) if part)
     status_group = _runtime_action_status_group(status)
     return ResultContext(
@@ -1311,6 +1391,9 @@ def _pending_action_receipt_context(*, pending_action: dict[str, Any], status: s
                 "title": label,
                 "message": message,
                 "summary": summary,
+                "target_type": target_type,
+                "delivery_mode": delivery_mode,
+                "people_target_count": people_target_count,
             },
         ),
         metadata={
@@ -1323,6 +1406,9 @@ def _pending_action_receipt_context(*, pending_action: dict[str, Any], status: s
             "operation": strategy,
             "result_sources": sources,
             "action_id": action_id,
+            "target_type": target_type,
+            "delivery_mode": delivery_mode,
+            "people_target_count": people_target_count,
             "action_status_group": status_group,
             "is_terminal_action": status_group == "terminal",
             "is_pending_action": status_group == "pending",
@@ -1399,6 +1485,12 @@ def _waiting_input_result_context(*, pending_action: dict[str, Any], state) -> R
 
 
 def _waiting_input_prompt(missing_params: list[str]) -> str:
+    if "text" in missing_params:
+        return "要发送什么内容？你可以直接回复消息正文。"
+    if "target_type" in missing_params or "target" in missing_params:
+        return "要发给谁？你可以直接回复人名、群名，或说「发到当前会话」。"
+    if "delivery_mode" in missing_params:
+        return "你想怎么发给这些人？可以说「用机器人通知这些人」「替我分别发给这些人」，或「拉群后发到群里」。"
     if "comment" in missing_params:
         return "请补充拒绝原因。你可以直接回复：原因：资料不完整。"
     if "target_user" in missing_params:
@@ -1465,12 +1557,62 @@ def _runtime_action_status_group(status: str) -> str:
     return "unknown"
 
 
+def _safe_int(value: Any, *, fallback: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _normalized_delivery_mode(value: Any) -> str:
+    text = str(value or "").strip()
+    compact = "".join(text.split()).lower()
+    if compact in {"bot_multi_notify", "user_multi_private", "create_group_then_send"}:
+        return compact
+    if any(token in compact for token in ("机器人通知", "用机器人", "机器人发", "系统通知", "自动通知", "大飞哥通知")):
+        return "bot_multi_notify"
+    if any(token in compact for token in ("替我发", "用我", "以我的名义", "我发给", "分别发", "单独发", "单独发送", "私聊发")):
+        return "user_multi_private"
+    if any(token in compact for token in ("拉群", "建群", "建个群", "创建群", "群里发", "发到群")):
+        return "create_group_then_send"
+    return text
+
+
 def _save_pending_action(*, context: RuntimeContext, intent, plan, permission) -> tuple[str, Any]:
+    pending_action = _pending_action_payload(context=context, intent=intent, plan=plan, permission=permission)
+    state = save_waiting_confirmation_state(
+        chat_id=context.chat_id,
+        session_context=context.session_context,
+        pending_action=pending_action,
+        ttl_seconds=_PENDING_ACTION_TTL_SECONDS,
+    )
+    return str(pending_action.get("id") or ""), state
+
+
+def _save_missing_action_input(*, context: RuntimeContext, intent, plan, permission) -> tuple[str, Any]:
+    pending_action = {
+        **_pending_action_payload(context=context, intent=intent, plan=plan, permission=permission),
+        "missing_params": list(intent.missing_params),
+        "input_contract": {
+            "status": "waiting_input",
+            "missing_params": list(intent.missing_params),
+        },
+    }
+    state = save_waiting_input_state(
+        chat_id=context.chat_id,
+        session_context=context.session_context,
+        pending_action=pending_action,
+        ttl_seconds=_PENDING_ACTION_TTL_SECONDS,
+    )
+    return str(pending_action.get("id") or ""), state
+
+
+def _pending_action_payload(*, context: RuntimeContext, intent, plan, permission) -> dict[str, Any]:
     action_id = uuid4().hex[:12]
     task_id = uuid4().hex
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=_PENDING_ACTION_TTL_SECONDS)
-    pending_action = {
+    return {
             "id": action_id,
             "task_id": task_id,
             "created_at": now.isoformat(),
@@ -1497,13 +1639,6 @@ def _save_pending_action(*, context: RuntimeContext, intent, plan, permission) -
                 else []
             ),
     }
-    state = save_waiting_confirmation_state(
-        chat_id=context.chat_id,
-        session_context=context.session_context,
-        pending_action=pending_action,
-        ttl_seconds=_PENDING_ACTION_TTL_SECONDS,
-    )
-    return action_id, state
 
 
 def _pending_action_summary(*, intent, plan) -> str:
@@ -1512,6 +1647,7 @@ def _pending_action_summary(*, intent, plan) -> str:
         for part in (
             label_for_strategy(plan.strategy),
             _confirmation_impact_text(intent, plan).removeprefix("影响：").strip(),
+            _people_targets_summary(intent),
         )
         if part
     )
@@ -1537,6 +1673,10 @@ def _pending_confirmation_result_context(*, context: RuntimeContext, intent, pla
         "execution_identity": permission.execution_identity,
         "requires_confirmation": permission.requires_confirmation,
     }
+    people_target_payload = _people_targets_payload(intent)
+    if people_target_payload:
+        item["people_targets"] = people_target_payload
+        item["people_target_count"] = len(people_target_payload)
     return ResultContext(
         result_type="runtime_pending_confirmation",
         query_id=f"{plan.strategy}:pending_confirmation:{pending_action_id}",
@@ -1559,6 +1699,8 @@ def _pending_confirmation_result_context(*, context: RuntimeContext, intent, pla
             "is_terminal_action": False,
             "is_pending_action": True,
             "requires_confirmation": permission.requires_confirmation,
+            "people_targets": people_target_payload,
+            "people_target_count": len(people_target_payload),
             "execution_identity": permission.execution_identity,
             "confirmation_reasons": (
                 permission.metadata.get("confirmation_reasons", [])
@@ -1652,11 +1794,16 @@ def _looks_like_result_action(message: str) -> bool:
             "驳回",
             "审批详情",
             "发给",
+            "发消息",
+            "发邮件",
             "发送",
             "转发",
             "创建",
             "新建",
             "安排",
+            "开会",
+            "写封邮件",
+            "写一封邮件",
             "写入",
             "导出",
             "放进去",
@@ -1756,6 +1903,12 @@ def _source_label(source: str) -> str:
 def _confirmation_target_text(intent) -> str:
     entities = getattr(intent, "entities", {}) or {}
     lines = []
+    people_summary = _people_targets_summary(intent)
+    if people_summary:
+        lines.append(people_summary)
+    delivery_mode = str(entities.get("delivery_mode") or "").strip()
+    if delivery_mode:
+        lines.append(f"发送方式：{_delivery_mode_label(delivery_mode)}")
     if intent.intent in {"message_send", "organization_export"}:
         target_type = str(entities.get("target_type") or "").strip()
         target = str(entities.get("target") or "").strip()
@@ -1806,5 +1959,51 @@ def _intent_label(intent: str) -> str:
 
 
 def _message_target_type_label(target_type: str) -> str:
-    labels = {"person": "人员", "chat": "群聊", "self": "本人", "current_chat": "当前会话"}
+    labels = {"person": "人员", "chat": "群聊", "self": "本人", "current_chat": "当前会话", "people_context": "上一轮人员结果"}
     return labels.get(target_type, target_type)
+
+
+def _delivery_mode_label(mode: str) -> str:
+    return {
+        "bot_multi_notify": "用机器人通知多人",
+        "user_multi_private": "以本人身份分别发送",
+        "create_group_then_send": "建群后在群里发送",
+    }.get(str(mode), str(mode))
+
+
+def _people_targets_payload(intent) -> list[dict[str, Any]]:
+    entities = getattr(intent, "entities", {}) or {}
+    targets = entities.get("people_targets") if isinstance(entities, dict) else None
+    if not isinstance(targets, list):
+        return []
+    payload: list[dict[str, Any]] = []
+    for item in targets:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        open_id = str(item.get("open_id") or item.get("user_id") or "").strip()
+        email = str(item.get("email") or "").strip()
+        if not (name or open_id or email):
+            continue
+        payload.append(
+            {
+                "name": name,
+                "open_id": open_id,
+                "email": email,
+                "department": str(item.get("department") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+            }
+        )
+    return payload
+
+
+def _people_targets_summary(intent) -> str:
+    targets = _people_targets_payload(intent)
+    if not targets:
+        return ""
+    names = [str(item.get("name") or item.get("email") or item.get("open_id") or "").strip() for item in targets[:5]]
+    names = [item for item in names if item]
+    suffix = f"：{'、'.join(names)}" if names else ""
+    if len(targets) > 5:
+        suffix += f"等 {len(targets)} 人"
+    return f"人员目标：{len(targets)} 人{suffix}"

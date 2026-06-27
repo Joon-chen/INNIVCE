@@ -1,37 +1,19 @@
 import os
-import time as _time
+from types import SimpleNamespace
 from typing import Any
 
 from app.core.config import settings
-from app.db.session import SessionLocal as _SessionLocal
-from app.services.conversation_context import conversation_context_text
+from app.services.conversation_context import conversation_context_pack, conversation_context_text
 from app.services.llm.conversation import ConversationLLMContext, conversation_context_from_actor, conversation_llm_reply
 from app.services.llm.presentation import PresentationLLMContext, presentation_llm_rewrite, valid_presentation_rewrite
+from app.services.profile_context import (
+    apply_profile_update,
+    load_profile_context,
+    load_profile_payload,
+    presentation_profile_text,
+)
 
 # ── User personality profiles ───────────────────────────────────
-import json as _json
-import redis as _redis
-from sqlalchemy import text as _sql
-
-# Ensure profiles table exists on first import
-try:
-    _db = _SessionLocal()
-    _db.execute(_sql("CREATE TABLE IF NOT EXISTS user_profiles (open_id VARCHAR PRIMARY KEY, profile_json TEXT DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW())"))
-    _db.commit()
-    _db.close()
-except Exception:
-    pass
-_redis_profiles = _redis.Redis.from_url(settings.redis_url, decode_responses=True)
-_PROFILE_DEFAULTS = {
-    "style": "professional",
-    "verbosity": "balanced",
-    "use_emoji": False,
-    "use_formatting": True,
-    "tone_tips": "",
-    "interactions": 0,
-    "last_updated": 0.0,
-}
-_PROFILE_TTL = 86400  # 24 hours
 
 
 def _profile_key(open_id: str) -> str:
@@ -39,47 +21,18 @@ def _profile_key(open_id: str) -> str:
 
 
 def _get_user_profile(open_id: str) -> dict:
-    # 1. Try Redis cache
-    try:
-        raw = _redis_profiles.get(_profile_key(open_id))
-        if raw:
-            return _json.loads(raw)
-    except Exception:
-        pass
-    # 2. Try PostgreSQL
-    try:
-        db = _SessionLocal()
-        try:
-            row = db.execute(_sql("SELECT profile_json FROM user_profiles WHERE open_id = :o"), {"o": open_id}).fetchone()
-            if row and row[0]:
-                data = _json.loads(row[0])
-                # Cache in Redis
-                try:
-                    _redis_profiles.setex(_profile_key(open_id), _PROFILE_TTL, _json.dumps(data, ensure_ascii=False))
-                except Exception:
-                    pass
-                return data
-        finally:
-            db.close()
-    except Exception:
-        pass
-    return dict(_PROFILE_DEFAULTS)
+    return load_profile_payload(open_id)
 
 
-def _profile_text(open_id: str, actor_style: str) -> str:
+def _profile_text(open_id: str, actor_style: str, actor: Any | None = None) -> str:
     """Return a short profile description for the LLM prompt."""
-    p = _get_user_profile(open_id)
-    verbosity = p.get("verbosity", "balanced")
-    use_emoji = p.get("use_emoji", False)
-    style = p.get("style", "professional")
-    parts = [f"说话风格：{style}", f"详细程度：{verbosity}"]
-    if use_emoji:
-        parts.append("可以适当使用emoji")
-    if p.get("tone_tips"):
-        parts.append(f"额外提示：{p['tone_tips']}")
-    if actor_style:
-        parts.append(f"角色提示：{actor_style}")
-    return "；".join(parts)
+    runtime_context = SimpleNamespace(identity=actor) if actor is not None else None
+    profile_context = load_profile_context(open_id=open_id, actor_style=actor_style, runtime_context=runtime_context)
+    lines = [presentation_profile_text(profile_context)]
+    fact_hint = _profile_fact_hint(actor)
+    if fact_hint:
+        lines.append(f"事实上下文：{fact_hint}；仅用于称呼和表达贴合，不作为权限依据")
+    return "\n".join(lines)
 
 
 def _get_session_context(chat_id: str | None, question: str = "") -> str:
@@ -128,6 +81,12 @@ def _runtime_conversation_context(chat_id: str) -> str:
     return conversation_context_text(chat_id)
 
 
+def _runtime_context_pack_text(chat_id: str | None, question: str, *, purpose: str) -> str:
+    if not chat_id:
+        return ""
+    return conversation_context_pack(chat_id, question=question, purpose=purpose).text
+
+
 # ── Main rewrite function ───────────────────────────────────────
 def rewrite_bot_answer(
     *,
@@ -145,7 +104,7 @@ def rewrite_bot_answer(
 
     style = style_override or _style_for_actor(actor)
     open_id = getattr(actor, "open_id", "") or ""
-    profile = _profile_text(open_id, style)
+    profile = _profile_text(open_id, style, actor=actor)
 
     # Detect casual vs business from route_path or answer content
     _is_casual = is_casual
@@ -153,9 +112,8 @@ def rewrite_bot_answer(
         _question_lower = question[:100].lower()
         if any(w in _question_lower for w in ["你好", "在吗", "在线", "几点", "日期", "现在", "聊", "没事", "谢谢", "拜拜", "再见", "知道", "你叫", "你是谁"]):
             _is_casual = True
-    session_ctx = _get_session_context(chat_id, question)
-
     if _is_casual:
+        session_ctx = _runtime_context_pack_text(chat_id, question, purpose="conversation") or _get_session_context(chat_id, question)
         actor_name, actor_role = conversation_context_from_actor(actor)
         return conversation_llm_reply(
             ConversationLLMContext(
@@ -167,6 +125,7 @@ def rewrite_bot_answer(
                 session_context=session_ctx,
             )
         )
+    session_ctx = _runtime_context_pack_text(chat_id, question, purpose="presentation") or _get_session_context(chat_id, question)
     return presentation_llm_rewrite(
         PresentationLLMContext(
             question=question,
@@ -179,12 +138,14 @@ def rewrite_bot_answer(
 
 
 def should_rewrite_answer(*, answer: str, route_label: str, route_path: str | None = None) -> bool:
-    """Decide whether to rewrite. Always try for all routes — LLM + validation filter bad results."""
+    """Decide whether legacy non-V5 answers may use presentation rewrite."""
     if not settings.bot_llm_answer_rewrite_enabled or _running_tests():
         return False
     if not answer.strip():
         return False
     if len(answer) > settings.bot_llm_answer_rewrite_max_chars:
+        return False
+    if any(text in answer for text in ("未接入", "没有接入", "没有权限", "不能生成", "不会改用", "权限拦截", "需要授权")):
         return False
     if any(text in answer for text in ("请回复‘确认’", "已提交", "提交失败", "权限拦截")):
         return False
@@ -202,35 +163,7 @@ def get_user_profile(open_id: str) -> dict:
 
 def update_user_profile(open_id: str, **kwargs) -> None:
     """Update profile fields. Persists to both PostgreSQL and Redis."""
-    profile = _get_user_profile(open_id)
-    allowed = {"style", "verbosity", "use_emoji", "tone_tips"}
-    for k, v in kwargs.items():
-        if k in allowed:
-            profile[k] = v
-    profile["interactions"] = profile.get("interactions", 0) + 1
-    profile["last_updated"] = _time.time()
-    # Save to Redis
-    try:
-        _redis_profiles.setex(_profile_key(open_id), _PROFILE_TTL, _json.dumps(profile, ensure_ascii=False))
-    except Exception:
-        pass
-    # Save to PostgreSQL
-    try:
-        db = _SessionLocal()
-        try:
-            _json_str = _json.dumps(profile, ensure_ascii=False)
-            existing = db.execute(_sql("SELECT 1 FROM user_profiles WHERE open_id = :o"), {"o": open_id}).fetchone()
-            if existing:
-                db.execute(_sql("UPDATE user_profiles SET profile_json = :j, updated_at = NOW() WHERE open_id = :o"),
-                          {"j": _json_str, "o": open_id})
-            else:
-                db.execute(_sql("INSERT INTO user_profiles (open_id, profile_json, created_at, updated_at) VALUES (:o, :j, NOW(), NOW())"),
-                          {"o": open_id, "j": _json_str})
-            db.commit()
-        finally:
-            db.close()
-    except Exception:
-        pass
+    apply_profile_update(open_id, kwargs)
 
 
 def profile_summary(open_id: str) -> str:
@@ -258,6 +191,28 @@ def _style_for_actor(actor: Any) -> str:
     if "rd" in domains or "研发" in domains:
         return "研发风格：项目、问题、负责人、里程碑优先"
     return "员工风格：简明扼要，只说授权范围内的内容"
+
+
+def _profile_fact_hint(actor: Any | None) -> str:
+    if actor is None:
+        return ""
+    parts: list[str] = []
+    display_name = str(getattr(actor, "display_name", "") or "").strip()
+    role = str(getattr(actor, "role", "") or "").strip()
+    job_title = str(getattr(actor, "job_title", "") or "").strip()
+    email = str(getattr(actor, "email", "") or "").strip()
+    department_names = tuple(str(item) for item in getattr(actor, "department_names", ()) or () if str(item).strip())
+    if display_name:
+        parts.append(f"姓名/称呼={display_name}")
+    if role:
+        parts.append(f"系统角色={role}")
+    if job_title:
+        parts.append(f"职位={job_title}")
+    if department_names:
+        parts.append(f"部门={','.join(department_names[:2])}")
+    if email:
+        parts.append(f"邮箱={email}")
+    return "；".join(parts)
 
 
 def _valid_rewrite(*, original: str, rewritten: str) -> bool:

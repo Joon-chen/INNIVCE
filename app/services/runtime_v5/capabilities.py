@@ -44,6 +44,7 @@ RUNTIME_CAPABILITIES: tuple[RuntimeCapability, ...] = (
     RuntimeCapability("approval_cancel", "approval", "cancel", "action", "self", "user", True, label="审批撤回", route_path="feishu_approval_instance_cancel"),
     RuntimeCapability("approval_cc", "approval", "cc", "action", "self", "user", True, label="审批抄送", route_path="feishu_approval_instance_cc"),
     RuntimeCapability("approval_initiated", "approval", "list_initiated", "query", "self", "bot", label="我发起的审批", route_path="feishu_approval_instance_initiated"),
+    RuntimeCapability("people_resolve", "people", "resolve_identity", "query", "person", "bot", label="人员身份解析", route_path="feishu_contact_user_search"),
     RuntimeCapability("people_lookup", "people", "search_person", "query", "person", "bot", label="人员查询", route_path="feishu_contact_organization_snapshot"),
     RuntimeCapability("department_members", "people", "list_department_members", "query", "department", "bot", label="部门成员", route_path="feishu_contact_organization_snapshot"),
     RuntimeCapability("organization_snapshot", "people", "get_org_snapshot", "query", "organization", "bot", label="组织架构", route_path="feishu_contact_organization_snapshot"),
@@ -111,6 +112,7 @@ RUNTIME_CAPABILITIES: tuple[RuntimeCapability, ...] = (
     RuntimeCapability("whiteboard_write", "whiteboard", "write_whiteboard", "action", "company", "user", True, installed=False, label="编辑飞书画板", route_path="feishu_whiteboard_write"),
     RuntimeCapability("vc_agent_read", "vc_agent", "read_live_events", "query", "company", "bot", installed=False, label="读取会中事件", route_path="feishu_vc_agent_read"),
     RuntimeCapability("vc_agent_join", "vc_agent", "join_meeting", "action", "company", "user", True, installed=False, label="机器人加入会议", route_path="feishu_vc_agent_join"),
+    RuntimeCapability("external_information_query", "web", "search", "query", "external", "bot", label="外部公开信息", route_path="external_research"),
     RuntimeCapability("risk_analysis", "workevent", "risk_events", "insight", "company", "bot", label="风险事件", route_path="workevent"),
     RuntimeCapability("risk_analysis", "memory", "related_memory", "insight", "company", "bot", label="长期记忆", route_path="memory"),
     RuntimeCapability("risk_analysis", "knowledge", "risk_policy", "insight", "company", "bot", label="风险知识", route_path="knowledge"),
@@ -135,6 +137,8 @@ SKILL_ATOMIC_CAPABILITIES: tuple[SkillAtomicCapability, ...] = (
     SkillAtomicCapability("approval", "remind", "lark-approval", "action", "user", "medium", exposed=True, requires_confirmation=True, label="审批催办"),
     SkillAtomicCapability("approval", "cancel", "lark-approval", "action", "user", "high", exposed=True, requires_confirmation=True, label="审批撤回"),
     SkillAtomicCapability("approval", "cc", "lark-approval", "action", "user", "medium", exposed=True, requires_confirmation=True, label="审批抄送"),
+    SkillAtomicCapability("approval", "list_initiated", "lark-approval", "query", "bot", "low", exposed=True, label="查询我发起的审批"),
+    SkillAtomicCapability("people", "resolve_identity", "lark-contact", "query", "bot", "low", exposed=True, label="人员身份解析"),
     SkillAtomicCapability("people", "search_person", "lark-contact", "query", "bot", "low", exposed=True, label="人员查询"),
     SkillAtomicCapability("people", "list_department_members", "lark-contact/openapi", "query", "bot", "low", exposed=True, label="部门成员"),
     SkillAtomicCapability("people", "get_org_snapshot", "lark-contact/openapi", "query", "bot", "low", exposed=True, label="组织架构"),
@@ -145,7 +149,25 @@ SKILL_ATOMIC_CAPABILITIES: tuple[SkillAtomicCapability, ...] = (
     SkillAtomicCapability("task", "create_task", "lark-task", "action", "user", "medium", exposed=True, requires_confirmation=True, label="创建任务"),
     SkillAtomicCapability("task", "complete_task", "lark-task", "action", "user", "medium", exposed=True, requires_confirmation=True, label="完成任务"),
     SkillAtomicCapability("task", "update_task", "lark-task", "action", "user", "medium", exposed=True, requires_confirmation=True, label="更新任务"),
+    SkillAtomicCapability("task", "reopen_task", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="重新打开任务", reason="已登记，待作为 Task 样板验证后开放"),
     SkillAtomicCapability("task", "delete_task", "lark-task", "action", "user", "high", exposed=True, requires_confirmation=True, label="删除任务"),
+    SkillAtomicCapability("task", "create_subtask", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="创建子任务", reason="已登记，待 Task 样板验证多对象输入"),
+    SkillAtomicCapability("task", "comment_task", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="评论任务", reason="已登记，待 RuntimeActionInput 文本参数复用验证"),
+    SkillAtomicCapability("task", "assign_members", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="分配任务成员", reason="已登记，待 USER 参数解析后开放"),
+    SkillAtomicCapability("task", "update_followers", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="更新任务关注人", reason="已登记，待 USER 参数解析后开放"),
+    SkillAtomicCapability("task", "update_reminders", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="更新任务提醒", reason="已登记，待 DATE/TIME 参数解析后开放"),
+    SkillAtomicCapability("task", "upload_attachment", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="上传任务附件", reason="已登记，待文件上传和权限边界验证"),
+    SkillAtomicCapability("task", "add_to_tasklist", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="加入任务清单", reason="已登记，待 Task 样板验证清单对象输入"),
+    SkillAtomicCapability("task", "set_ancestor", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="设置父任务", reason="已登记，待任务层级对象输入验证"),
+    SkillAtomicCapability("task", "clear_ancestor", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="清除父任务", reason="已登记，待任务层级对象输入验证"),
+    SkillAtomicCapability("task", "tasklist_create", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="创建任务清单", reason="已登记，待 Task 样板验证清单管理"),
+    SkillAtomicCapability("task", "tasklist_update", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="更新任务清单", reason="已登记，待 Task 样板验证清单管理"),
+    SkillAtomicCapability("task", "tasklist_delete", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="删除任务清单", reason="已登记，待 Task 样板验证清单管理"),
+    SkillAtomicCapability("task", "tasklist_update_members", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="更新任务清单成员", reason="已登记，待 USER 参数解析后开放"),
+    SkillAtomicCapability("task", "tasklist_set_members", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="设置任务清单成员", reason="已登记，待 USER 参数解析后开放"),
+    SkillAtomicCapability("task", "section_create", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="创建任务分组", reason="已登记，待 Task 样板验证分组管理"),
+    SkillAtomicCapability("task", "section_update", "lark-task", "action", "user", "medium", exposed=False, requires_confirmation=True, label="更新任务分组", reason="已登记，待 Task 样板验证分组管理"),
+    SkillAtomicCapability("task", "section_delete", "lark-task", "action", "user", "high", exposed=False, requires_confirmation=True, label="删除任务分组", reason="已登记，待 Task 样板验证分组管理"),
     SkillAtomicCapability("mail", "list_recent", "lark-mail", "query", "bot", "low", exposed=True, label="最近邮件"),
     SkillAtomicCapability("mail", "search_messages", "lark-mail", "query", "bot", "low", exposed=True, label="搜索邮件"),
     SkillAtomicCapability("mail", "get_message", "lark-mail", "query", "bot", "low", exposed=True, label="邮件详情"),
@@ -155,6 +177,7 @@ SKILL_ATOMIC_CAPABILITIES: tuple[SkillAtomicCapability, ...] = (
     SkillAtomicCapability("im", "search_chats", "lark-im", "query", "bot", "low", exposed=True, label="搜索群聊"),
     SkillAtomicCapability("im", "list_messages", "lark-im", "query", "bot", "low", exposed=True, label="查询消息"),
     SkillAtomicCapability("im", "create_chat", "lark-im", "action", "user", "high", exposed=True, requires_confirmation=True, label="创建群聊"),
+    SkillAtomicCapability("im", "auto_join_public_chats", "lark-im", "action", "user", "high", exposed=False, requires_confirmation=True, label="自动加入公开群", reason="已登记，保留为治理/管理员能力，暂不开放普通对话执行"),
     SkillAtomicCapability("base", "write_records", "lark-base", "action", "user", "high", exposed=True, requires_confirmation=True, label="写入多维表格"),
     SkillAtomicCapability("base", "query_records", "lark-base", "query", "bot", "low", exposed=False, label="查询多维表格", reason="已登记，待接入查询 Provider"),
     SkillAtomicCapability("base", "create_table", "lark-base", "action", "user", "high", exposed=False, requires_confirmation=True, label="创建多维表格", reason="已登记，待接入 dry-run 和确认闭环"),
@@ -182,6 +205,13 @@ SKILL_ATOMIC_CAPABILITIES: tuple[SkillAtomicCapability, ...] = (
     SkillAtomicCapability("whiteboard", "write_whiteboard", "lark-whiteboard", "action", "user", "high", exposed=False, requires_confirmation=True, label="编辑画板", reason="已登记，待接入 dry-run 和确认闭环"),
     SkillAtomicCapability("vc_agent", "read_live_events", "lark-vc-agent", "query", "bot", "medium", exposed=False, label="读取会中事件", reason="会中能力高敏，待接权限和提示"),
     SkillAtomicCapability("vc_agent", "join_meeting", "lark-vc-agent", "action", "user", "high", exposed=False, requires_confirmation=True, label="机器人加入会议", reason="高风险动作，待接入确认闭环"),
+    SkillAtomicCapability("company_profile", "read_profile", "internal-ai", "query", "bot", "low", exposed=True, label="读取公司档案"),
+    SkillAtomicCapability("knowledge", "search", "internal-ai", "query", "bot", "low", exposed=True, label="搜索企业知识"),
+    SkillAtomicCapability("knowledge", "risk_policy", "internal-ai", "insight", "bot", "medium", exposed=True, label="读取风险政策"),
+    SkillAtomicCapability("workevent", "summarize", "internal-ai", "analysis", "bot", "low", exposed=True, label="总结工作事件"),
+    SkillAtomicCapability("workevent", "risk_events", "internal-ai", "insight", "bot", "medium", exposed=True, label="识别风险事件"),
+    SkillAtomicCapability("memory", "related_memory", "internal-ai", "analysis", "bot", "medium", exposed=True, label="读取相关记忆"),
+    SkillAtomicCapability("web", "search", "web-search", "query", "bot", "medium", exposed=True, label="搜索公开网页"),
 )
 
 
@@ -246,7 +276,7 @@ def route_path_for_result(strategy: str, result_type: str) -> str:
         return "feishu_im_chat_search"
     if result_type == "im_message_list":
         return "feishu_im_message_list"
-    if result_type in {"knowledge_list", "risk_policy_list"}:
+    if result_type in {"knowledge_list", "risk_policy_list", "company_profile_knowledge"}:
         return "knowledge"
     if result_type == "web_search_list":
         return "web_search"

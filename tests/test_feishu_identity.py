@@ -95,6 +95,35 @@ def test_sender_identity_uses_database_access() -> None:
     assert identity.email == "owner@example.com"
 
 
+def test_sender_identity_enriches_people_profile_from_contact_settings() -> None:
+    class FakeDb:
+        def __init__(self):
+            self.added = []
+
+        def scalar(self, query):
+            return SimpleNamespace(
+                role="manager",
+                access_scope="department",
+                display_name="王敏",
+                settings={
+                    "department_ids": ["od_sales"],
+                    "department_names": ["销售部"],
+                    "job_title": "销售经理",
+                    "email": "wangmin@example.com",
+                },
+            )
+
+    payload = {"event": {"sender": {"sender_id": {"open_id": "ou_sales"}}}}
+
+    identity = feishu_identity.get_sender_identity(FakeDb(), SimpleNamespace(company_id=uuid4()), payload)
+
+    assert identity.display_name == "王敏"
+    assert identity.department_ids == ("od_sales",)
+    assert identity.department_names == ("销售部",)
+    assert identity.job_title == "销售经理"
+    assert identity.email == "wangmin@example.com"
+
+
 def test_identity_payload_round_trip() -> None:
     original = feishu_identity.BotIdentity(
         open_id="ou_1",

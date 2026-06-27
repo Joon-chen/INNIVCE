@@ -53,15 +53,6 @@ class CardPayload:
     status: str = ""
 
 ROUTE_CARD_HINTS: dict[str, str] = {
-    "feishu_contact_organization_snapshot": "contact",
-    "feishu_contact_user_search": "contact",
-    "people_lookup": "contact",
-    "organization_snapshot": "contact",
-    "company_qa": "contact",
-    "people": "contact",
-    "mail_qa": "mail",
-    "mail_list": "mail",
-    "recent_mail": "mail",
     "mail_qa": "mail",
     "mail_list": "mail",
     "recent_mail": "mail",
@@ -186,6 +177,11 @@ def build_runtime_result_card(runtime_result: dict[str, Any], *, chat_id: str | 
     """Render a RuntimeResult that already carries Interaction-safe actions."""
 
     result_type = str(runtime_result.get("result_type") or "").strip()
+    if runtime_result.get("target_ui") == "none":
+        return None
+    open_sidepanel_card = _render_open_sidepanel_result_card(runtime_result, chat_id=chat_id)
+    if open_sidepanel_card is not None:
+        return open_sidepanel_card
     if result_type != "task_list":
         return None
     elements = _render_task_list_result_card(runtime_result, chat_id=chat_id)
@@ -245,6 +241,10 @@ def _render_task_list_result_card(
             actions_by_index[index] = action
 
     elements: list[dict[str, Any]] = []
+    contextual_intro = str(runtime_result.get("contextual_intro") or "").strip()
+    if contextual_intro:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": contextual_intro}})
+        elements.append({"tag": "hr"})
     summary = str(runtime_result.get("summary") or "").strip()
     if summary:
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
@@ -291,7 +291,61 @@ def _render_task_list_result_card(
                 "elements": [{"tag": "plain_text", "content": f"还有 {len(items) - 8} 个任务未展示。"}],
             }
         )
+    followup_text = _followup_suggestions_text(runtime_result)
+    if followup_text:
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": followup_text}]})
     return elements
+
+
+def _render_open_sidepanel_result_card(runtime_result: dict[str, Any], *, chat_id: str | None = None) -> dict[str, Any] | None:
+    actions = runtime_result.get("actions") if isinstance(runtime_result.get("actions"), list) else []
+    sidepanel_action = next((action for action in actions if isinstance(action, dict) and action.get("action") == "open_sidepanel"), None)
+    if not sidepanel_action:
+        return None
+    metadata = runtime_result.get("metadata") if isinstance(runtime_result.get("metadata"), dict) else {}
+    sidepanel_context = metadata.get("sidepanel_context") if isinstance(metadata.get("sidepanel_context"), dict) else {}
+    title = str(sidepanel_context.get("title") or runtime_result.get("title") or "结果明细").strip()
+    item_count = int(sidepanel_context.get("item_count") or runtime_result.get("item_count") or 0)
+    summary = str(runtime_result.get("summary") or "").strip()
+    if not summary and item_count:
+        summary = f"共有 {item_count} 条结构化结果，可在侧边栏查看完整字段。"
+    url = _portal_sidebar_url(chat_id=chat_id, path=str(sidepanel_action.get("route") or "/sidepanel"), autoload=True, view="result_context")
+    elements: list[dict[str, Any]] = []
+    if summary:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": summary}})
+    elements.append(
+        {
+            "tag": "action",
+            "layout": "flow",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": str(sidepanel_action.get("label") or "打开侧边栏")},
+                    "type": "primary",
+                    "multi_url": _portal_url_map(url),
+                }
+            ],
+        }
+    )
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": False},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+
+
+def _followup_suggestions_text(runtime_result: dict[str, Any]) -> str:
+    raw = runtime_result.get("followup_suggestions")
+    if not isinstance(raw, list):
+        return ""
+    suggestions = [str(item).strip() for item in raw if str(item).strip()]
+    if not suggestions:
+        return ""
+    return "可继续问：" + " / ".join(suggestions[:4])
 
 
 def _task_item_title(item: dict[str, Any]) -> str:
@@ -394,11 +448,15 @@ def _render_org_tree_card(data: dict[str, Any]) -> list[dict[str, Any]]:
                 ustatus = u.get("status", {})
                 u_indent = indent + "    "
                 uline = f"{u_indent}👤 {uname}"
-                if utitle: uline += f" — {utitle}"
+                if utitle:
+                    uline += f" — {utitle}"
                 extras = []
-                if ueno: extras.append(f"#{ueno}")
-                if uemail and '@' in uemail: extras.append(f"{uemail[:20]}")
-                if isinstance(ustatus, dict) and ustatus.get("is_resigned"): extras.append("已离职")
+                if ueno:
+                    extras.append(f"#{ueno}")
+                if uemail and "@" in uemail:
+                    extras.append(f"{uemail[:20]}")
+                if isinstance(ustatus, dict) and ustatus.get("is_resigned"):
+                    extras.append("已离职")
                 if extras:
                     card_lines.append(f"{u_indent}   `{' '.join(extras)}`")
                 else:
@@ -809,6 +867,7 @@ def _portal_direct_url(
     autoload: bool = False,
     item_index: int | None = None,
     risk: str | None = None,
+    view: str | None = None,
 ) -> str:
     query: list[str] = []
     if chat_id:
@@ -817,9 +876,12 @@ def _portal_direct_url(
         query.append("autoload=1")
     if risk:
         query.append(f"risk={quote(risk, safe='')}")
+    if view:
+        query.append(f"view={quote(view, safe='')}")
     if item_index is not None and item_index > 0:
         query.append(f"item={item_index}")
-        query.append("view=detail")
+        if not view:
+            query.append("view=detail")
     page_path = f"{path}?{'&'.join(query)}" if query else path
     return f"{settings.api_base_url.rstrip('/')}{page_path}"
 
@@ -831,8 +893,9 @@ def _portal_sidebar_url(
     autoload: bool = False,
     item_index: int | None = None,
     risk: str | None = None,
+    view: str | None = None,
 ) -> str:
-    target_url = _portal_direct_url(chat_id=chat_id, path=path, autoload=autoload, item_index=item_index, risk=risk)
+    target_url = _portal_direct_url(chat_id=chat_id, path=path, autoload=autoload, item_index=item_index, risk=risk, view=view)
     return (
         "https://applink.feishu.cn/client/web_url/open"
         f"?mode=sidebar-semi&max_width=800&reload=false&url={quote(target_url, safe='')}"
@@ -875,7 +938,7 @@ def _render_approval_workbench_items_card(
     payload = CardPayload(
         type="summary",
         title=f"待审批 {len(items)} 条",
-        summary="",
+        summary="我先把待处理审批按 AI 判断分组，你可以直接看高风险、需关注或可通过项。",
         recommendation="",
         actions=(
             _approval_workbench_filter_card_action(chat_id=chat_id, group="hold", label="查看高风险项", count=len(grouped["hold"])),

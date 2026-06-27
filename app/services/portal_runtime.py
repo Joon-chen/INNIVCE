@@ -147,6 +147,198 @@ def portal_bootstrap_payload(chat_id: str | None = None) -> dict[str, Any]:
     }
 
 
+def portal_result_context_payload(chat_id: str | None) -> dict[str, Any]:
+    result_context = load_result_context(chat_id)
+    if result_context is None or not result_context.items:
+        return {"available": False, "items": [], "answer": "", "metadata": {}}
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    entity_domain = str(metadata.get("entity_domain") or _portal_entity_domain(result_context.result_type))
+    canonical_items = tuple(_canonical_result_context_item(item, entity_domain=entity_domain) for item in result_context.items)
+    sidepanel_context = _result_context_sidepanel_context(result_context)
+    visible_fields = tuple(sidepanel_context.get("visible_fields") or _visible_result_context_fields(canonical_items))
+    items = [_portal_result_context_item(item, visible_fields=visible_fields) for item in canonical_items]
+    return {
+        "available": True,
+        "items": items,
+        "answer": result_context.answer,
+        "metadata": {
+            "runtime_version": "v5",
+            "result_type": result_context.result_type,
+            "query_id": result_context.query_id,
+            "context_kind": metadata.get("context_kind") or "query_result",
+            "sidepanel_context": sidepanel_context,
+            "item_count": len(items),
+            "field_projection": metadata.get("field_projection") or "",
+            "display_offset": metadata.get("display_offset", 0),
+            "display_end": metadata.get("display_end", min(len(items), 20)),
+            "display_limit": metadata.get("display_limit", 20),
+            "has_more": bool(metadata.get("has_more")),
+        },
+    }
+
+
+def _result_context_sidepanel_context(result_context: ResultContext) -> dict[str, Any]:
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    result_type = str(result_context.result_type or "")
+    entity_domain = str(metadata.get("entity_domain") or _portal_entity_domain(result_type))
+    canonical_items = tuple(_canonical_result_context_item(item, entity_domain=entity_domain) for item in result_context.items)
+    visible_fields = _visible_result_context_fields(canonical_items)
+    total = len(result_context.items)
+    display_limit = _positive_int(metadata.get("display_limit"), default=20)
+    display_offset = _non_negative_int(metadata.get("display_offset"), default=0)
+    display_end = _non_negative_int(metadata.get("display_end"), default=min(total, display_limit))
+    display_end = min(max(display_end, display_offset), total)
+    return {
+        "available": True,
+        "kind": "result_context",
+        "route": "/sidepanel",
+        "presentation": "table_detail",
+        "result_type": result_type,
+        "entity_domain": entity_domain,
+        "item_count": total,
+        "display_offset": display_offset,
+        "display_end": display_end,
+        "display_limit": display_limit,
+        "has_more": bool(metadata.get("has_more")) or display_end < total,
+        "field_projection": str(metadata.get("field_projection") or ""),
+        "visible_fields": list(visible_fields),
+        "title": _portal_result_context_title(result_type=result_type, entity_domain=entity_domain),
+    }
+
+
+def _portal_result_context_item(item: dict[str, Any], *, visible_fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: _display_value(item.get(field)) for field in visible_fields if not _empty_display_value(item.get(field))}
+
+
+def _canonical_result_context_item(item: dict[str, Any], *, entity_domain: str) -> dict[str, Any]:
+    if entity_domain != "people":
+        return item
+    canonical: dict[str, Any] = {}
+    name = item.get("name")
+    title = item.get("title") or item.get("job_title")
+    department = item.get("department") or item.get("department_names") or item.get("departments")
+    mobile = item.get("mobile") or item.get("phone")
+    email = item.get("email")
+    gender = item.get("gender")
+    if "gender_source" in item and str(item.get("gender_source") or "").strip() != "source":
+        gender = ""
+    for key, value in (
+        ("name", name),
+        ("title", title),
+        ("department", department),
+        ("mobile", mobile),
+        ("email", email),
+        ("gender", gender),
+    ):
+        if not _empty_display_value(value):
+            canonical[key] = _display_value(value)
+    return canonical
+
+
+def _visible_result_context_fields(items: tuple[dict[str, Any], ...]) -> tuple[str, ...]:
+    fields: list[str] = []
+    for item in items[:20]:
+        for key, value in item.items():
+            field = str(key)
+            if field in fields or _internal_result_context_field(field) or _empty_display_value(value):
+                continue
+            fields.append(field)
+    return tuple(fields[:12])
+
+
+def _internal_result_context_field(field: str) -> bool:
+    normalized = field.strip().lower()
+    return (
+        normalized == "raw"
+        or normalized.startswith("_")
+        or normalized
+        in {
+            "open_id",
+            "union_id",
+            "user_id",
+            "company_id",
+            "allowed_user_ids",
+            "source_object_id",
+            "source_event_ids",
+            "department_id",
+            "department_ids",
+            "department_id_list",
+            "gender_source",
+            "title_source",
+            "source_system",
+            "resource_plane",
+            "resource_type",
+            "index",
+        }
+        or normalized.endswith("_open_id")
+        or normalized.endswith("_user_id")
+        or normalized.endswith("_company_id")
+        or normalized.endswith("_source")
+    )
+
+
+def _display_value(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        values: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if not text or text in values:
+                continue
+            values.append(text)
+            if len(values) >= 5:
+                break
+        return "、".join(values)
+    if isinstance(value, dict):
+        return "、".join(f"{key}: {val}" for key, val in list(value.items())[:5] if val not in (None, ""))
+    return str(value)
+
+
+def _empty_display_value(value: Any) -> bool:
+    return value is None or value == "" or value == () or value == [] or value == {}
+
+
+def _portal_entity_domain(result_type: str) -> str:
+    if result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return "people"
+    if result_type in {"task_list", "task_query"}:
+        return "workspace"
+    if result_type.startswith("mail"):
+        return "communication"
+    if result_type.startswith("knowledge"):
+        return "knowledge"
+    return ""
+
+
+def _portal_result_context_title(*, result_type: str, entity_domain: str) -> str:
+    if entity_domain == "people":
+        return "人员明细"
+    if entity_domain == "workspace":
+        return "任务明细"
+    if entity_domain == "communication":
+        return "消息/邮件明细"
+    if entity_domain == "knowledge":
+        return "知识资料"
+    return "结果明细"
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _non_negative_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(parsed, 0)
+
+
 def portal_approval_action_payload(
     db: Session,
     data: PortalApprovalActionRequest,

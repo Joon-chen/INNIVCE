@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import FeishuAppConfig
 from app.services.audit import write_audit_log
-from app.services.feishu import FeishuClient, discover_feishu_resources, ingest_feishu_message, sync_feishu_information
+from app.services.feishu import FeishuClient, FeishuContactService, discover_feishu_resources, ingest_feishu_message, sync_feishu_information
+from app.services.organization_foundation import upsert_organization_snapshot
 
 
 async def sync_chat_messages_payload(
@@ -107,6 +108,47 @@ async def sync_app_information_payload(
     )
     db.commit()
     return {"results": result}
+
+
+async def sync_organization_foundation_payload(
+    db: Session,
+    app_config: FeishuAppConfig,
+    data: Any,
+) -> dict[str, Any]:
+    service = FeishuContactService(app_config)
+    payload = await service.snapshot_organization(
+        max_departments=data.max_departments,
+        max_users=data.max_users,
+    )
+    run = upsert_organization_snapshot(
+        db,
+        company_id=app_config.company_id,
+        payload=payload,
+        source_system="feishu",
+        sync_type=data.sync_type,
+    )
+    write_audit_log(
+        db,
+        action="organization.foundation.sync",
+        company_id=app_config.company_id,
+        target_type="feishu_app",
+        target_id=str(app_config.id),
+        payload={
+            "sync_run_id": str(run.id),
+            "sync_type": data.sync_type,
+            "department_count": run.department_count,
+            "user_count": run.user_count,
+            "membership_count": run.membership_count,
+        },
+    )
+    db.commit()
+    return {
+        "sync_run_id": str(run.id),
+        "status": run.status,
+        "department_count": run.department_count,
+        "user_count": run.user_count,
+        "membership_count": run.membership_count,
+    }
 
 
 async def discover_app_resources_payload(

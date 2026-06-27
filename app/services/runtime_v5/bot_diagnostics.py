@@ -17,6 +17,8 @@ def runtime_v5_diagnostics_snapshot_base(
     runtime_provider_snapshot: dict[str, Any],
     action_trace: list[dict[str, Any]],
     decision_trace: list[dict[str, Any]],
+    route_observation_trace: list[dict[str, Any]] | None = None,
+    route_observation_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "diagnostics_version": runtime_summary.get("diagnostics_version") if isinstance(runtime_summary, dict) else "",
@@ -51,6 +53,7 @@ def runtime_v5_diagnostics_snapshot_base(
         "router_health": runtime_summary.get("router_health") if isinstance(runtime_summary, dict) else {},
         "execution_health": runtime_summary.get("execution_health") if isinstance(runtime_summary, dict) else {},
         "answer_health": runtime_summary.get("answer_health") if isinstance(runtime_summary, dict) else {},
+        "llm_trace_summary": runtime_summary.get("llm_trace_summary") if isinstance(runtime_summary, dict) else {},
         "decision_summary": runtime_summary.get("decision_summary") if isinstance(runtime_summary, dict) else {},
         "answer_metadata": runtime_summary.get("answer_metadata") if isinstance(runtime_summary, dict) else {},
         "pending_action": pending_action,
@@ -73,4 +76,6 @@ def runtime_v5_diagnostics_snapshot_base(
         "action_timeline": runtime_summary.get("action_timeline") if isinstance(runtime_summary, dict) else {},
         "action_closure": runtime_summary.get("action_closure") if isinstance(runtime_summary, dict) else {},
         "decision_trace": decision_trace,
+        "route_observation_trace": route_observation_trace or [],
+        "route_observation_summary": route_observation_summary or {},
     }

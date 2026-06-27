@@ -6,8 +6,11 @@ from urllib.parse import urlencode
 
 from app.core.config import settings
 from app.services.runtime_v5.capabilities import label_for_strategy
+from app.services.runtime_v5.command_frame import command_frame_payload
 from app.services.runtime_v5.models import CommandPlan, ComposedAnswer, ExecutionResult, IntentResult, PermissionDecision, PlannerResult, ResultContext, RuntimeResult, TargetUI
 from app.services.runtime_v5.policy_result_filter import apply_policy_result_filter, build_policy_result_filter_payload
+from app.services.runtime_v5.response_experience import build_response_experience
+from app.services.runtime_v5.response_orchestration import build_response_policy
 from app.services.runtime_v5.runtime_action_input import build_runtime_action_input_payload
 
 
@@ -52,12 +55,33 @@ def build_runtime_result(
         filter_payload=policy_result_filter,
     )
     filtered_result_context = replace(result_context, items=filtered_items) if result_context is not None else None
+    sidepanel_context = _sidepanel_context_for_result(
+        result_type=result_type,
+        result_context=filtered_result_context,
+        command_plan=command_plan,
+    )
     title = label_for_strategy(command_plan.planner_result.strategy) or command_plan.intent
+    response_policy = build_response_policy(
+        intent=command_plan.intent,
+        result_type=result_type,
+        data_scope=str(command_plan.intent_result.data_scope or ""),
+        answer=_summary_from_composed(composed),
+        question_type=str(command_plan.intent_result.question_type or ""),
+        requires_confirmation=permission.requires_confirmation or bool(composed.metadata.get("requires_confirmation")),
+    )
+    response_experience = build_response_experience(
+        command_plan=command_plan,
+        result_type=result_type,
+        result_metadata=result_metadata,
+        composed=composed,
+    )
     return RuntimeResult(
         result_type=result_type,
         status="waiting_authorization" if authorization else str(execution_status),
         title=title,
         summary=_summary_from_composed(composed),
+        contextual_intro=response_experience.contextual_intro,
+        followup_suggestions=response_experience.followup_suggestions,
         items=filtered_items,
         actions=_actions_for_result(
             result_type=result_type,
@@ -65,14 +89,22 @@ def build_runtime_result(
             company_id=company_id,
             scope_context=scope_context,
             authorization=authorization,
+            sidepanel_context=sidepanel_context,
         ),
-        target_ui=_target_ui_for_result(result_type=result_type, fallback=command_plan.target_ui),
+        target_ui=_target_ui_for_result(
+            result_type=result_type,
+            result_context=filtered_result_context,
+            fallback=command_plan.target_ui,
+            command_plan=command_plan,
+            sidepanel_context=sidepanel_context,
+        ),
         metadata={
             "company_id": company_id,
             "strategy": command_plan.planner_result.strategy,
             "intent": command_plan.intent,
             "question_type": command_plan.intent_result.question_type,
             "data_scope": command_plan.intent_result.data_scope,
+            "command_frame": command_frame_payload(command_plan.command_frame),
             "command_enrichment": _command_enrichment_metadata(command_plan.intent_result),
             "scope_context": scope_context,
             "sources": list(command_plan.planner_result.sources),
@@ -82,6 +114,12 @@ def build_runtime_result(
             "result_context": result_metadata,
             "authorization": authorization,
             "policy_result_filter": policy_result_filter,
+            "sidepanel_context": sidepanel_context or {},
+            "response_policy": response_policy,
+            "response_experience": {
+                "display_mode": response_experience.display_mode,
+                "followup_suggestions": list(response_experience.followup_suggestions),
+            },
         },
     )
 
@@ -141,6 +179,8 @@ def runtime_result_from_payload(payload: dict[str, Any]) -> RuntimeResult:
         status=str(payload.get("status") or ""),
         title=str(payload.get("title") or ""),
         summary=str(payload.get("summary") or ""),
+        contextual_intro=str(payload.get("contextual_intro") or ""),
+        followup_suggestions=_payload_suggestions(payload.get("followup_suggestions")),
         items=tuple(item for item in items if isinstance(item, dict)),
         actions=tuple(action for action in actions if isinstance(action, dict)),
         target_ui=target_ui,
@@ -181,6 +221,8 @@ def runtime_result_payload(result: RuntimeResult) -> dict[str, Any]:
         "status": result.status,
         "title": result.title,
         "summary": result.summary,
+        "contextual_intro": result.contextual_intro,
+        "followup_suggestions": list(result.followup_suggestions),
         "items": list(result.items),
         "actions": list(result.actions),
         "target_ui": result.target_ui,
@@ -189,13 +231,39 @@ def runtime_result_payload(result: RuntimeResult) -> dict[str, Any]:
     }
 
 
-def _target_ui_for_result(*, result_type: str, fallback: TargetUI) -> TargetUI:
+def _payload_suggestions(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        candidates = [part.strip() for part in value.replace(" / ", "/").split("/")]
+    elif isinstance(value, (list, tuple)):
+        candidates = [str(item).strip() for item in value]
+    else:
+        return ()
+    return tuple(item for item in candidates if item)[:4]
+
+
+def _target_ui_for_result(
+    *,
+    result_type: str,
+    result_context: ResultContext | None = None,
+    fallback: TargetUI,
+    command_plan: CommandPlan | None = None,
+    sidepanel_context: dict[str, Any] | None = None,
+) -> TargetUI:
     if result_type in {"runtime_action", "runtime_pending_confirmation", "runtime_waiting_input", "waiting_authorization"}:
         return "card"
     if result_type == "approval_detail":
         return "sidepanel"
     if result_type in {"approval_list", "approval_query"}:
         return "card"
+    if result_type in {"people_search", "department_members", "organization_snapshot"}:
+        if sidepanel_context and _command_output_surface(command_plan) == "sidepanel":
+            return "card"
+        metadata = result_context.metadata if result_context is not None and isinstance(result_context.metadata, dict) else {}
+        if metadata.get("result_context_presentation") == "detail":
+            return "card"
+        return "none"
+    if result_type == "company_profile_knowledge":
+        return "none"
     return fallback
 
 
@@ -206,6 +274,7 @@ def _actions_for_result(
     company_id: str = "",
     scope_context: dict[str, Any] | None = None,
     authorization: dict[str, Any] | None = None,
+    sidepanel_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     if result_context is None:
         return ()
@@ -244,7 +313,204 @@ def _actions_for_result(
                 "requires_confirmation": False,
             },
         )
+    if sidepanel_context and _should_expose_generic_sidepanel_action(result_type):
+        return (_open_sidepanel_action(sidepanel_context),)
     return ()
+
+
+def _should_expose_generic_sidepanel_action(result_type: str) -> bool:
+    return result_type not in {
+        "approval_list",
+        "approval_query",
+        "approval_detail",
+        "runtime_action",
+        "runtime_pending_confirmation",
+        "runtime_waiting_input",
+        "waiting_authorization",
+    }
+
+
+def _sidepanel_context_for_result(*, result_type: str, result_context: ResultContext | None, command_plan: CommandPlan | None = None) -> dict[str, Any] | None:
+    if result_context is None or not result_context.items:
+        return None
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    output_surface = _command_output_surface(command_plan)
+    if metadata.get("result_context_presentation") == "summary" and output_surface != "sidepanel":
+        return None
+    if output_surface == "text":
+        return None
+    if metadata.get("result_context_presentation") != "detail" and output_surface != "sidepanel" and _command_prefers_text_presentation(command_plan):
+        return None
+    total = len(result_context.items)
+    display_limit = _positive_int(metadata.get("display_limit"), default=_default_sidepanel_display_limit(result_type))
+    display_offset = _non_negative_int(metadata.get("display_offset"), default=0)
+    display_end = _non_negative_int(metadata.get("display_end"), default=min(display_limit, total))
+    display_end = min(max(display_end, display_offset), total)
+    has_more = bool(metadata.get("has_more")) or display_end < total or total > display_limit
+    field_names = _sidepanel_field_names(result_context.items)
+    if output_surface != "sidepanel" and not has_more and total <= 5 and len(field_names) <= 3:
+        return None
+    entity_domain = str(metadata.get("entity_domain") or _entity_domain_for_result_type(result_type))
+    return {
+        "available": True,
+        "kind": "result_context",
+        "route": "/sidepanel",
+        "presentation": "table_detail",
+        "result_type": result_type,
+        "entity_domain": entity_domain,
+        "item_count": total,
+        "display_offset": display_offset,
+        "display_end": display_end,
+        "display_limit": display_limit,
+        "has_more": has_more,
+        "field_projection": str(metadata.get("field_projection") or ""),
+        "visible_fields": field_names[:12],
+        "title": _sidepanel_title(result_type=result_type, entity_domain=entity_domain),
+    }
+
+
+def _command_prefers_text_presentation(command_plan: CommandPlan | None) -> bool:
+    if command_plan is None or command_plan.command_frame is None:
+        return False
+    params = command_plan.command_frame.params if isinstance(command_plan.command_frame.params, dict) else {}
+    domain_query = params.get("domain_query") if isinstance(params.get("domain_query"), dict) else {}
+    if domain_query.get("presentation_hint") == "text":
+        return True
+    response_intent = command_plan.command_frame.response_intent if isinstance(command_plan.command_frame.response_intent, dict) else {}
+    return response_intent.get("should_render_card") is False
+
+
+def _command_output_surface(command_plan: CommandPlan | None) -> str:
+    if command_plan is None or command_plan.command_frame is None:
+        return ""
+    params = command_plan.command_frame.params if isinstance(command_plan.command_frame.params, dict) else {}
+    contract = params.get("output_contract") if isinstance(params.get("output_contract"), dict) else {}
+    return str(contract.get("surface") or "")
+
+
+def _open_sidepanel_action(sidepanel_context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action": "open_sidepanel",
+        "label": "打开侧边栏",
+        "target_ui": "sidepanel",
+        "route": str(sidepanel_context.get("route") or "/sidepanel"),
+        "result_type": str(sidepanel_context.get("result_type") or ""),
+        "entity_domain": str(sidepanel_context.get("entity_domain") or ""),
+        "requires_confirmation": False,
+    }
+
+
+def _default_sidepanel_display_limit(result_type: str) -> int:
+    if result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return 20
+    return 20
+
+
+def _sidepanel_field_names(items: tuple[dict[str, Any], ...]) -> list[str]:
+    people_fields = _people_sidepanel_fields(items)
+    if people_fields:
+        return people_fields
+    names: list[str] = []
+    for item in items[:10]:
+        for key, value in item.items():
+            if key in names or _is_internal_sidepanel_field(str(key)):
+                continue
+            if _empty_sidepanel_value(value):
+                continue
+            names.append(str(key))
+    return names
+
+
+def _is_internal_sidepanel_field(key: str) -> bool:
+    normalized = key.strip().lower()
+    return (
+        normalized == "raw"
+        or normalized.startswith("_")
+        or normalized
+        in {
+            "open_id",
+            "union_id",
+            "user_id",
+            "company_id",
+            "allowed_user_ids",
+            "source_object_id",
+            "source_event_ids",
+            "department_id",
+            "department_ids",
+            "department_id_list",
+            "gender_source",
+            "title_source",
+            "source_system",
+            "resource_plane",
+            "resource_type",
+            "index",
+        }
+        or normalized.endswith("_open_id")
+        or normalized.endswith("_user_id")
+        or normalized.endswith("_company_id")
+        or normalized.endswith("_source")
+    )
+
+
+def _people_sidepanel_fields(items: tuple[dict[str, Any], ...]) -> list[str]:
+    if not any(isinstance(item, dict) and (item.get("resource_type") == "people" or item.get("source_system") == "feishu" or item.get("mobile")) for item in items[:10]):
+        return []
+    canonical_fields = ("name", "title", "department", "mobile", "email", "gender")
+    return [field for field in canonical_fields if any(not _empty_sidepanel_value(_people_sidepanel_value(item, field)) for item in items[:10] if isinstance(item, dict))]
+
+
+def _people_sidepanel_value(item: dict[str, Any], field: str) -> Any:
+    if field == "title":
+        return item.get("title") or item.get("job_title")
+    if field == "department":
+        return item.get("department") or item.get("department_names")
+    if field == "gender" and "gender_source" in item and str(item.get("gender_source") or "").strip() != "source":
+        return ""
+    return item.get(field)
+
+
+def _empty_sidepanel_value(value: Any) -> bool:
+    return value is None or value == "" or value == () or value == [] or value == {}
+
+
+def _sidepanel_title(*, result_type: str, entity_domain: str) -> str:
+    if entity_domain == "people" or result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return "人员明细"
+    if result_type in {"task_list", "task_query"}:
+        return "任务明细"
+    if result_type in {"mail_list", "mail_search"}:
+        return "邮件明细"
+    if result_type in {"knowledge_search", "knowledge"}:
+        return "知识资料"
+    return "结果明细"
+
+
+def _entity_domain_for_result_type(result_type: str) -> str:
+    if result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return "people"
+    if result_type in {"task_list", "task_query"}:
+        return "workspace"
+    if result_type.startswith("mail"):
+        return "communication"
+    if result_type.startswith("knowledge"):
+        return "knowledge"
+    return ""
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _non_negative_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(parsed, 0)
 
 
 def _authorization_metadata(

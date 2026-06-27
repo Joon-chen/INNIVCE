@@ -472,6 +472,122 @@ def test_calendar_qa_realtime_read_is_bound_to_mcp_cli() -> None:
     assert "task_qa" in feishu_mcp_bound_tool_names()
 
 
+def test_feishu_mcp_contact_reads_use_active_app_tenant_token_with_context(monkeypatch) -> None:
+    company_id = uuid4()
+    app_config = SimpleNamespace(
+        id=uuid4(),
+        company_id=company_id,
+        app_id="cli_a_test",
+        app_secret="secret",
+        is_active=True,
+    )
+
+    class FakeDb:
+        def scalar(self, query):
+            return app_config
+
+    calls: list[dict[str, object]] = []
+
+    def fake_http_request(method, url, params=None, json=None, headers=None, timeout=None):
+        calls.append(
+            {
+                "method": method,
+                "url": url,
+                "params": params or {},
+                "json": json,
+                "headers": headers or {},
+            }
+        )
+        if url.endswith("/open-apis/auth/v3/tenant_access_token/internal"):
+            return SimpleNamespace(status_code=200, json=lambda: {"code": 0, "tenant_access_token": "t-token"})
+        if url.endswith("/open-apis/contact/v3/departments/0/children"):
+            assert headers == {"Authorization": "Bearer t-token"}
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"code": 0, "data": {"items": [{"department_id": "od_1", "name": "研发部"}]}},
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fail_cli(*args, **kwargs):
+        raise AssertionError("contact read should use tenant token, not lark-cli")
+
+    monkeypatch.setattr("app.services.tools.providers.feishu_mcp.httpx.request", fake_http_request)
+    monkeypatch.setattr("app.services.tools.providers.lark_cli.subprocess.run", fail_cli)
+
+    context = ToolContext(
+        db=FakeDb(),
+        company_id=company_id,
+        actor=BotActor(role="owner", access_scope="company", open_id="ou_owner"),
+    )
+    answer = execute_feishu_mcp_tool(
+        context,
+        _tool_request("feishu_contact_department_children", department_id="0"),
+    )
+
+    assert answer == "飞书通讯录子部门已通过 Tenant Token 读取 1 条：研发部"
+    assert [call["method"] for call in calls] == ["POST", "GET"]
+    assert calls[0]["json"] == {"app_id": "cli_a_test", "app_secret": "secret"}
+
+
+def test_feishu_mcp_im_chat_list_uses_active_app_tenant_token_with_context(monkeypatch) -> None:
+    company_id = uuid4()
+    app_config = SimpleNamespace(
+        id=uuid4(),
+        company_id=company_id,
+        app_id="cli_im_test",
+        app_secret="secret",
+        is_active=True,
+    )
+
+    class FakeDb:
+        def scalar(self, query):
+            return app_config
+
+    calls: list[dict[str, object]] = []
+
+    def fake_http_request(method, url, params=None, json=None, headers=None, timeout=None):
+        calls.append(
+            {
+                "method": method,
+                "url": url,
+                "params": params or {},
+                "json": json,
+                "headers": headers or {},
+            }
+        )
+        if url.endswith("/open-apis/auth/v3/tenant_access_token/internal"):
+            return SimpleNamespace(status_code=200, json=lambda: {"code": 0, "tenant_access_token": "im-token"})
+        if url.endswith("/open-apis/im/v1/chats"):
+            assert headers == {"Authorization": "Bearer im-token"}
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"code": 0, "data": {"items": [{"chat_id": "oc_1", "name": "固势科技"}], "has_more": False}},
+            )
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fail_cli(*args, **kwargs):
+        raise AssertionError("im chat list should use tenant token, not lark-cli")
+
+    monkeypatch.setattr("app.services.tools.providers.feishu_mcp.httpx.request", fake_http_request)
+    monkeypatch.setattr("app.services.tools.providers.lark_cli.subprocess.run", fail_cli)
+
+    context = ToolContext(
+        db=FakeDb(),
+        company_id=company_id,
+        actor=BotActor(role="owner", access_scope="company", open_id="ou_owner"),
+    )
+    answer = execute_feishu_mcp_tool(
+        context,
+        _tool_request("feishu_im_chat_search", query="", view="count", response_format="raw_json"),
+    )
+    payload = json.loads(answer)
+
+    assert payload["items"][0]["name"] == "固势科技"
+    assert payload["source"] == "Tenant Token"
+    assert [call["method"] for call in calls] == ["POST", "GET"]
+    assert calls[1]["params"] == {"page_size": 20}
+
+
 def test_all_feishu_confirmed_realtime_writes_delegate_to_mcp_without_client(monkeypatch) -> None:
     write_tools = sorted(
         tool_name

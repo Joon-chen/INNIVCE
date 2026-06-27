@@ -221,16 +221,81 @@ def _execute_provider_request(*, provider: ResourceProvider, request: ProviderRe
     result = provider.execute(request)
     result = _policy_user_fallback_result(request=request, result=result)
     duration_ms = int((perf_counter() - started) * 1000)
+    foundation_metadata = _foundation_data_source_metadata(request=request, result=result)
     return replace(
         result,
         items=tuple(_item_with_resource_metadata(item=item, request=request, result=result) for item in result.items),
         metadata={
             **result.metadata,
+            **foundation_metadata,
             "source": request.source,
             "operation": result.metadata.get("operation") if isinstance(result.metadata, dict) and result.metadata.get("operation") else request.operation,
             "duration_ms": duration_ms,
         },
     )
+
+
+def _foundation_data_source_metadata(*, request: ProviderRequest, result: ProviderResult) -> dict[str, object]:
+    contract = request.execution_identity_contract.payload()
+    result_metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    actor_identity = result_metadata.get("actor_identity") or contract.get("actor_identity") or ""
+    credential_mode = result_metadata.get("credential_mode") or contract.get("credential_mode") or ""
+    authorization_status = result_metadata.get("authorization_status") or contract.get("authorization_status") or ""
+    return {
+        "foundation_data_source": {
+            "domain": _domain_for_source(request.source),
+            "source": request.source,
+            "operation": request.operation,
+            "strategy": request.planner.strategy,
+            "result_type": result.result_type,
+            "status": result.status,
+            "actor_identity": actor_identity,
+            "credential_mode": credential_mode,
+            "resource_scope": contract.get("resource_scope") or "",
+            "authorization_status": authorization_status,
+            "provider_runtime": _provider_runtime_for_source(request.source),
+            "standard_contract": "Runtime ProviderRequest -> ProviderResult",
+        },
+        "actor_identity": actor_identity,
+        "credential_mode": credential_mode,
+        "authorization_status": authorization_status,
+        "execution_identity_contract": result_metadata.get("execution_identity_contract") or contract,
+    }
+
+
+def _domain_for_source(source: str) -> str:
+    domains = {
+        "people": "people",
+        "im": "communication",
+        "mail": "communication",
+        "docs": "knowledge",
+        "wiki": "knowledge",
+        "drive": "knowledge",
+        "approval": "process",
+        "task": "workspace",
+        "calendar": "workspace",
+        "okr": "workspace",
+        "vc": "workspace",
+        "minutes": "workspace",
+        "base": "business",
+        "knowledge": "knowledge",
+        "workevent": "intelligence",
+        "memory": "intelligence",
+        "web": "intelligence",
+    }
+    return domains.get(source, source)
+
+
+def _provider_runtime_for_source(source: str) -> str:
+    if source in {"docs", "wiki", "drive"}:
+        return "feishu_service_tenant_token"
+    if source in {"people", "im", "mail", "approval", "task", "calendar", "okr", "vc", "base"}:
+        return "tool_router"
+    if source == "knowledge":
+        return "hybrid_knowledge"
+    if source in {"workevent", "memory"}:
+        return "internal_cognitive"
+    return "provider"
 
 
 def _item_with_resource_metadata(*, item: dict, request: ProviderRequest, result: ProviderResult) -> dict:
@@ -740,6 +805,7 @@ def _result_context_from_provider_results(
         if result.result_type:
             result_type = result.result_type
         result_metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        metadata.update(_result_context_semantic_metadata(result_metadata))
         if result_metadata.get("external_query"):
             metadata["external_query"] = str(result_metadata.get("external_query") or "")
             metadata["operation"] = "external_information_query"
@@ -786,6 +852,27 @@ def _empty_result_type(strategy: str, provider_results: list[ProviderResult]) ->
         if result.result_type:
             return result.result_type
     return f"{strategy}_empty"
+
+
+def _result_context_semantic_metadata(result_metadata: dict) -> dict:
+    allowed = (
+        "entity_domain",
+        "people_filter",
+        "field_projection",
+        "result_context_presentation",
+        "domain_query",
+        "people_context_frame",
+        "people_query_field",
+        "people_query_fields",
+        "people_query_mode",
+        "field_reliability",
+        "department_count",
+        "full_user_count",
+        "visible_user_count",
+        "filtered_user_count",
+        "unknown_gender_count",
+    )
+    return {key: result_metadata[key] for key in allowed if key in result_metadata}
 
 
 def _empty_result_reason(provider_results: list[ProviderResult]) -> str:
@@ -861,6 +948,7 @@ def _provider_result_summary(result: ProviderResult) -> dict:
         "waiting_authorization": bool(result_metadata.get("waiting_authorization")),
         "provider_boundary": result_metadata.get("provider_boundary", ""),
         "execution_identity_contract": result_metadata.get("execution_identity_contract", {}),
+        "foundation_data_source": result_metadata.get("foundation_data_source", {}),
     }
 
 

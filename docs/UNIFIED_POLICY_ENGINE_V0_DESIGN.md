@@ -1,5 +1,7 @@
 # Unified Policy Engine V0 Design
 
+> ARCHIVED: 本文档已被 `UNIFIED_POLICY_ENGINE_V0.md` 吸收。后续权限架构以 `V5_RUNTIME_CONSTITUTION.md` 和 `UNIFIED_POLICY_ENGINE_V0.md` 为准，不再基于本文扩展新权限设计。
+
 架构归属：`V5_RUNTIME_CONSTITUTION.md` 中的 Policy Engine。
 
 本文档不是独立架构总图。它只定义 Policy Engine V0 的合同和边界。若本文与 `V5_RUNTIME_CONSTITUTION.md` 冲突，以 Constitution 为准。

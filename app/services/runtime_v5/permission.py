@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.services.runtime_v5.capabilities import capabilities_for_strategy, execution_identity_for_strategy, strategy_requires_confirmation
 from app.services.runtime_v5.execution_identity import allows_user_fallback_for_query, is_bot_first_query_strategy
+from app.services.identity_fact import identity_fact_from_context, identity_fact_payload
 from app.services.runtime_v5.models import IntentResult, PermissionDecision, PlannerResult, RuntimeContext
 
 
@@ -129,6 +130,7 @@ def check_runtime_permission(
             for item in source_capabilities
         ],
         "confirmation_reasons": confirmation_reasons,
+        "intent_contract": _intent_contract(intent, plan=plan),
     }
 
     if context.runtime_scope.scope_type in {"multi_company", "all_companies"}:
@@ -162,18 +164,35 @@ def check_runtime_permission(
 
 
 def _policy_subject(context: RuntimeContext) -> dict[str, object]:
-    identity = context.identity
-    department_ids = [identity.department_id] if identity.department_id else []
+    identity = identity_fact_from_context(context)
+    organization_subject = context.organization_subject if isinstance(context.organization_subject, dict) else {}
+    organization_department_ids = _string_list(organization_subject.get("department_ids"))
+    organization_department_names = _string_list(organization_subject.get("department_names"))
+    department_ids = organization_department_ids or ([identity.department_id] if identity.department_id else [])
+    department_names = organization_department_names or list(identity.department_names)
+    managed_departments = organization_subject.get("managed_departments")
+    management_scope = organization_subject.get("management_scope")
     return {
-        "actor_user_id": identity.user_id,
-        "actor_open_id": identity.open_id,
+        "actor_user_id": str(organization_subject.get("actor_user_id") or identity.user_id),
+        "actor_open_id": str(organization_subject.get("actor_open_id") or identity.open_id),
         "company_id": str(context.runtime_scope.active_company_id or ""),
         "role": identity.role,
         "departments": department_ids,
-        "managed_departments": [],
-        "is_owner": identity.role == "owner",
-        "is_admin": identity.role == "admin",
+        "department_names": department_names,
+        "managed_departments": managed_departments if isinstance(managed_departments, list) else [],
+        "management_scope": management_scope if isinstance(management_scope, list) else [],
+        "subject_source": str(organization_subject.get("source") or "runtime_identity"),
+        "is_owner": identity.is_owner,
+        "is_admin": identity.is_admin,
+        "identity_fact": identity_fact_payload(context),
     }
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 def _policy_scope(*, context: RuntimeContext, intent: IntentResult) -> dict[str, str]:
@@ -190,6 +209,76 @@ def _policy_scope(*, context: RuntimeContext, intent: IntentResult) -> dict[str,
         "target_company_id": str(context.runtime_scope.active_company_id or ""),
         "target_group_id": str(intent.entities.get("target_group_id") or intent.entities.get("group_id") or ""),
     }
+
+
+def _intent_contract(intent: IntentResult, *, plan: PlannerResult) -> dict[str, object]:
+    domain_query = intent.entities.get("domain_query") if isinstance(intent.entities.get("domain_query"), dict) else {}
+    operation_kind = str(domain_query.get("operation_kind") or _intent_contract_operation_kind(intent))
+    return {
+        "intent": intent.intent,
+        "question_type": intent.question_type,
+        "operation_kind": operation_kind,
+        "domain": str(domain_query.get("domain") or _intent_contract_domain(intent, plan=plan)),
+        "scope": intent.data_scope,
+        "presentation_hint": str(domain_query.get("presentation_hint") or ""),
+        "risk_hint": str(domain_query.get("risk_hint") or _intent_contract_risk_hint(intent, operation_kind=operation_kind)),
+        "evidence_requirement": str(domain_query.get("evidence_requirement") or ""),
+        "needs_clarification": intent.needs_clarification,
+    }
+
+
+def _intent_contract_operation_kind(intent: IntentResult) -> str:
+    if intent.question_type != "action":
+        return "read"
+    if intent.intent == "mail_draft_create":
+        return "draft"
+    if intent.intent == "message_send":
+        return "send"
+    if intent.intent == "organization_export":
+        return "export"
+    if intent.intent.startswith("approval_"):
+        return "approval_action"
+    return "write"
+
+
+def _intent_contract_domain(intent: IntentResult, *, plan: PlannerResult) -> str:
+    if plan.sources:
+        source = plan.sources[0]
+        aliases = {
+            "people": "people",
+            "base": "business",
+            "mail": "communication",
+            "im": "communication",
+            "task": "workspace",
+            "calendar": "workspace",
+            "approval": "process",
+            "knowledge": "knowledge",
+        }
+        if source in aliases:
+            return aliases[source]
+    prefix = intent.intent.split("_", 1)[0]
+    return {
+        "people": "people",
+        "organization": "people",
+        "department": "people",
+        "mail": "communication",
+        "message": "communication",
+        "chat": "communication",
+        "task": "workspace",
+        "calendar": "workspace",
+        "approval": "process",
+        "general": "knowledge",
+    }.get(prefix, "")
+
+
+def _intent_contract_risk_hint(intent: IntentResult, *, operation_kind: str) -> str:
+    if intent.needs_clarification:
+        return "clarify"
+    if operation_kind in {"send", "approval_action", "write", "export"}:
+        return "high"
+    if operation_kind == "draft":
+        return "medium"
+    return "low"
 
 
 def _identity_decision(

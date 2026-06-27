@@ -29,6 +29,12 @@ class FeishuInformationSyncRequest(BaseModel):
     extract_items: bool = False
 
 
+class FeishuOrganizationSyncRequest(BaseModel):
+    sync_type: str = "full"
+    max_departments: int = Field(default=500, ge=1, le=1000)
+    max_users: int = Field(default=2000, ge=1, le=5000)
+
+
 class FeishuResourceDiscoverRequest(BaseModel):
     kinds: list[str] = Field(default_factory=list)
     async_run: bool = True

@@ -692,6 +692,19 @@ details summary {
   grid-template-columns: 1fr;
 }
 
+.result-context-mode .detail {
+  min-height: 280px;
+}
+
+.result-context-detail h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.result-context-mode .field-grid strong {
+  word-break: break-word;
+}
+
 .detail-page-mode .list {
   display: none;
 }

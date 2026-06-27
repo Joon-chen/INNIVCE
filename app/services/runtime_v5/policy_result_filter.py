@@ -31,7 +31,14 @@ def build_policy_result_filter_payload(
     scope = str(scope_context.get("scope") or "").upper()
     denied_resource_type_set = {resource_type.lower() for resource_type in denied_resource_types}
     resource_filters = tuple(
-        _resource_filter(index=index, item=item, allowed=permission.allowed, scope=scope, denied_resource_types=denied_resource_type_set)
+        _resource_filter(
+            index=index,
+            item=item,
+            allowed=permission.allowed,
+            scope=scope,
+            denied_resource_types=denied_resource_type_set,
+            policy_subject=policy_subject,
+        )
         for index, item in enumerate(result_context.items if result_context is not None else ())
     )
     section_filters = {
@@ -96,9 +103,10 @@ def _resource_filter(
     allowed: bool,
     scope: str,
     denied_resource_types: set[str],
+    policy_subject: dict[str, Any],
 ) -> dict[str, Any]:
     resource_type = _resource_type(item)
-    visible = allowed and resource_type not in denied_resource_types
+    visible = allowed and resource_type not in denied_resource_types and _resource_visible_to_subject(item=item, policy_subject=policy_subject)
     cognitive = _is_cognitive_resource(item=item, resource_type=resource_type)
     aggregate = visible and cognitive and scope in AGGREGATE_SCOPES
     return {
@@ -111,6 +119,96 @@ def _resource_filter(
         "reason_hidden": aggregate,
         "source_reference_visible": visible and not aggregate,
     }
+
+
+def _resource_visible_to_subject(*, item: dict[str, Any], policy_subject: dict[str, Any]) -> bool:
+    if not _has_visibility_markers(item):
+        return True
+    visibility_scope = _visibility_scope(item)
+    if visibility_scope in {"", "PUBLIC", "COMPANY", "ORGANIZATION"}:
+        return True
+    actor_ids = _subject_actor_ids(policy_subject)
+    if visibility_scope in {"SELF", "OWNER", "PRIVATE", "PERSONAL"}:
+        allowed_user_ids = _item_string_list(item, "allowed_user_ids")
+        if allowed_user_ids and actor_ids & set(allowed_user_ids):
+            return True
+        owner_ids = {value for value in (_item_string(item, "owner_user_id"), _item_string(item, "owner_open_id")) if value}
+        return bool(actor_ids and owner_ids and actor_ids & owner_ids)
+    if visibility_scope in {"DEPARTMENT", "TEAM", "GROUP"}:
+        subject_department_ids = _subject_department_ids(policy_subject)
+        allowed_departments = set(_item_string_list(item, "allowed_department_ids") or _item_string_list(item, "allowed_departments"))
+        owner_department_id = _item_string(item, "owner_department_id")
+        item_departments = {owner_department_id, *allowed_departments}
+        item_departments = {department_id for department_id in item_departments if department_id}
+        return bool(subject_department_ids and item_departments and subject_department_ids & item_departments)
+    return False
+
+
+def _has_visibility_markers(item: dict[str, Any]) -> bool:
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    markers = (
+        "visibility_scope",
+        "inherited_visibility_scope",
+        "allowed_user_ids",
+        "allowed_department_ids",
+        "allowed_departments",
+        "owner_user_id",
+        "owner_open_id",
+        "owner_department_id",
+    )
+    return any(key in item or key in raw for key in markers)
+
+
+def _visibility_scope(item: dict[str, Any]) -> str:
+    return str(_item_string(item, "visibility_scope") or _item_string(item, "inherited_visibility_scope")).strip().upper()
+
+
+def _subject_actor_ids(policy_subject: dict[str, Any]) -> set[str]:
+    return {
+        value
+        for value in (
+            str(policy_subject.get("actor_user_id") or "").strip(),
+            str(policy_subject.get("actor_open_id") or "").strip(),
+        )
+        if value
+    }
+
+
+def _subject_department_ids(policy_subject: dict[str, Any]) -> set[str]:
+    department_ids = set(_string_list(policy_subject.get("departments")))
+    department_ids.update(_string_list(policy_subject.get("department_ids")))
+    for item in policy_subject.get("managed_departments") or ():
+        if isinstance(item, dict):
+            department_id = str(item.get("id") or item.get("department_id") or "").strip()
+            if department_id:
+                department_ids.add(department_id)
+    for item in policy_subject.get("management_scope") or ():
+        if isinstance(item, dict):
+            department_id = str(item.get("department_id") or item.get("id") or "").strip()
+            if department_id:
+                department_ids.add(department_id)
+    return department_ids
+
+
+def _item_string(item: dict[str, Any], key: str) -> str:
+    value = item.get(key)
+    if value is None and isinstance(item.get("raw"), dict):
+        value = item["raw"].get(key)
+    return str(value or "").strip()
+
+
+def _item_string_list(item: dict[str, Any], key: str) -> list[str]:
+    value = item.get(key)
+    if value is None and isinstance(item.get("raw"), dict):
+        value = item["raw"].get(key)
+    return _string_list(value)
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
 
 
 def _section_filter(*, resource_type: str, allowed: bool, scope: str, denied_resource_types: set[str]) -> dict[str, Any]:

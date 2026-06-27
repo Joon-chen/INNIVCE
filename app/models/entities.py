@@ -136,6 +136,140 @@ class Team(Base, TimestampMixin):
     __table_args__ = (Index("ix_teams_company_department", "company_id", "department_id"),)
 
 
+class OrganizationDepartment(Base, TimestampMixin):
+    __tablename__ = "organization_departments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(80), default="feishu")
+    source_department_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    open_department_id: Mapped[str | None] = mapped_column(String(300))
+    parent_source_department_id: Mapped[str | None] = mapped_column(String(300))
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    unit_type: Mapped[str] = mapped_column(String(80), default="department")
+    status: Mapped[str] = mapped_column(String(40), default="active")
+    path_names: Mapped[list] = mapped_column(JSONB, default=list)
+    path_source_department_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    leader_source_user_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    source_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    company: Mapped["Company"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "source_system", "source_department_id", name="uq_org_department_source"),
+        Index("ix_org_departments_company_name", "company_id", "normalized_name"),
+        Index("ix_org_departments_company_parent", "company_id", "parent_source_department_id"),
+    )
+
+
+class OrganizationUser(Base, TimestampMixin):
+    __tablename__ = "organization_users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(80), default="feishu")
+    source_user_id: Mapped[str | None] = mapped_column(String(300))
+    open_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    union_id: Mapped[str | None] = mapped_column(String(300))
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320))
+    mobile: Mapped[str | None] = mapped_column(String(120))
+    job_title: Mapped[str | None] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(40), default="active")
+    source_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    company: Mapped["Company"] = relationship()
+    memberships: Mapped[list["OrganizationMembership"]] = relationship(back_populates="user")
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "source_system", "open_id", name="uq_org_user_source_open_id"),
+        Index("ix_org_users_company_name", "company_id", "normalized_name"),
+        Index("ix_org_users_company_source_user", "company_id", "source_user_id"),
+    )
+
+
+class OrganizationMembership(Base, TimestampMixin):
+    __tablename__ = "organization_memberships"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    organization_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organization_users.id"), nullable=False)
+    organization_department_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organization_departments.id"), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(80), default="feishu")
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    role_in_department: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(40), default="active")
+    source_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    company: Mapped["Company"] = relationship()
+    user: Mapped["OrganizationUser"] = relationship(back_populates="memberships")
+    department: Mapped["OrganizationDepartment"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "company_id",
+            "organization_user_id",
+            "organization_department_id",
+            name="uq_org_membership_user_department",
+        ),
+        Index("ix_org_memberships_company_department", "company_id", "organization_department_id"),
+        Index("ix_org_memberships_company_user", "company_id", "organization_user_id"),
+    )
+
+
+class OrganizationAlias(Base, TimestampMixin):
+    __tablename__ = "organization_aliases"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    alias: Mapped[str] = mapped_column(String(200), nullable=False)
+    normalized_alias: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(80), default="manual")
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    company: Mapped["Company"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("company_id", "normalized_alias", "target_type", "target_id", name="uq_org_alias_target"),
+        Index("ix_org_aliases_company_alias", "company_id", "normalized_alias", "is_active"),
+    )
+
+
+class OrganizationSyncRun(Base, TimestampMixin):
+    __tablename__ = "organization_sync_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("companies.id"), nullable=False)
+    source_system: Mapped[str] = mapped_column(String(80), default="feishu")
+    sync_type: Mapped[str] = mapped_column(String(80), default="full")
+    status: Mapped[str] = mapped_column(String(40), default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    department_count: Mapped[int] = mapped_column(default=0)
+    user_count: Mapped[int] = mapped_column(default=0)
+    membership_count: Mapped[int] = mapped_column(default=0)
+    cursor: Mapped[dict] = mapped_column(JSONB, default=dict)
+    summary: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    company: Mapped["Company"] = relationship()
+
+    __table_args__ = (
+        Index("ix_org_sync_runs_company_started", "company_id", "started_at"),
+        Index("ix_org_sync_runs_source_status", "source_system", "status"),
+    )
+
+
 class Role(Base, TimestampMixin):
     __tablename__ = "roles"
 

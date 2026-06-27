@@ -1,11 +1,16 @@
 import math
 import re
 from hashlib import sha256
+from time import perf_counter
 
 import httpx
 from openai import OpenAI
 
 from app.core.config import settings
+from app.services.llm.call_budget import authorize_llm_call
+from app.services.llm.call_trace import record_llm_call_trace
+from app.services.llm.prompt_audit import prompt_audit_payload
+from app.services.llm.routing_policy import LLMTaskType, llm_route_for_task
 
 
 class LLMGateway:
@@ -27,7 +32,7 @@ class LLMGateway:
             self.model = settings.deepseek_model
             if not settings.deepseek_api_key:
                 return None
-            return OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
+            return OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url, max_retries=0)
         self.provider = "openai"
         self.model = settings.openai_model
         return self._build_openai_client()
@@ -35,17 +40,17 @@ class LLMGateway:
     def _build_deepseek_client(self):
         if not settings.deepseek_api_key:
             return None
-        return OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url)
+        return OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url, max_retries=0)
 
     def _build_openai_client(self):
         if not settings.openai_api_key:
             return None
-        return OpenAI(api_key=settings.openai_api_key)
+        return OpenAI(api_key=settings.openai_api_key, max_retries=0)
 
     def _build_local_client(self, *, model: str):
         if not settings.local_llm_base_url or not model:
             return None
-        return OpenAI(api_key=settings.local_llm_api_key or "ollama", base_url=settings.local_llm_base_url)
+        return OpenAI(api_key=settings.local_llm_api_key or "ollama", base_url=settings.local_llm_base_url, max_retries=0)
 
     def _build_embedding_client(self):
         if not settings.openai_api_key:
@@ -102,11 +107,107 @@ class LLMGateway:
         )
         return response.output_text.strip()
 
-    def complete_reasoning_text(self, prompt: str, *, temperature: float = 0.2) -> str | None:
-        return self.complete_deepseek_text(prompt, temperature=temperature) or self.complete_text(
-            prompt,
-            temperature=temperature,
+    def complete_task_text(
+        self,
+        prompt: str,
+        *,
+        task_type: LLMTaskType,
+        temperature: float = 0.2,
+    ) -> str | None:
+        route = llm_route_for_task(task_type)
+        started = perf_counter()
+        status = "success"
+        error = ""
+        text: str | None = None
+        prompt_audit = prompt_audit_payload(prompt=prompt, task_type=route.task_type, lane=route.lane)
+        allowed, budget_payload = authorize_llm_call(
+            task_type=route.task_type,
+            lane=route.lane,
+            provider=route.provider,
+            model=route.model,
         )
+        if not allowed:
+            record_llm_call_trace(
+                {
+                    "task_type": route.task_type,
+                    "provider": route.provider,
+                    "lane": route.lane,
+                    "model": route.model,
+                    "latency_budget_ms": route.latency_budget_ms,
+                    "duration_ms": 0,
+                    "budget_exceeded": False,
+                    "allow_fallback": route.allow_fallback,
+                    "fallback_provider": route.fallback_provider,
+                    "fallback_used": True,
+                    "status": "budget_denied",
+                    "error": "",
+                    "prompt_chars": len(prompt or ""),
+                    "response_chars": 0,
+                    "budget": budget_payload,
+                    "prompt_audit": prompt_audit,
+                }
+            )
+            return None
+        try:
+            if route.provider == "deepseek_api":
+                text = self._complete_deepseek_model(
+                    prompt,
+                    model=route.model,
+                    temperature=temperature,
+                    timeout_seconds=_timeout_seconds(route.latency_budget_ms),
+                    response_format=_response_format_for_task(route.task_type),
+                    max_tokens=_max_tokens_for_task(route.task_type),
+                )
+            elif route.provider == "openai_api":
+                text = self._complete_openai_model(
+                    prompt,
+                    model=route.model,
+                    temperature=temperature,
+                    timeout_seconds=_timeout_seconds(route.latency_budget_ms),
+                )
+            elif route.provider in {"local_fast", "local_reasoning"}:
+                text = self._complete_local_model(
+                    prompt,
+                    model=route.model,
+                    temperature=temperature,
+                    timeout_seconds=_local_timeout_seconds(route.latency_budget_ms),
+                    response_format=_response_format_for_task(route.task_type),
+                    max_tokens=_max_tokens_for_task(route.task_type),
+                )
+            else:
+                status = "disabled"
+                text = None
+            if text is None and status == "success":
+                status = "empty"
+            return text
+        except Exception as exc:
+            status = "error"
+            error = type(exc).__name__
+            raise
+        finally:
+            record_llm_call_trace(
+                {
+                    "task_type": route.task_type,
+                    "provider": route.provider,
+                    "lane": route.lane,
+                    "model": route.model,
+                    "latency_budget_ms": route.latency_budget_ms,
+                    "duration_ms": int((perf_counter() - started) * 1000),
+                    "budget_exceeded": int((perf_counter() - started) * 1000) > route.latency_budget_ms,
+                    "allow_fallback": route.allow_fallback,
+                    "fallback_provider": route.fallback_provider,
+                    "fallback_used": False,
+                    "status": status,
+                    "error": error,
+                    "prompt_chars": len(prompt or ""),
+                    "response_chars": len(text or ""),
+                    "budget": budget_payload,
+                    "prompt_audit": prompt_audit,
+                }
+            )
+
+    def complete_reasoning_text(self, prompt: str, *, temperature: float = 0.2) -> str | None:
+        return self.complete_task_text(prompt, task_type="reasoning", temperature=temperature)
 
     def complete_openai_text(self, prompt: str, *, temperature: float = 0.2) -> str | None:
         if not self.openai_client:
@@ -119,13 +220,75 @@ class LLMGateway:
         return response.output_text.strip()
 
     def complete_deepseek_text(self, prompt: str, *, temperature: float = 0.2) -> str | None:
+        return self._complete_deepseek_model(prompt, model=settings.deepseek_model, temperature=temperature)
+
+    def _complete_deepseek_model(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        temperature: float = 0.2,
+        timeout_seconds: float | None = None,
+        response_format: dict[str, str] | None = None,
+        max_tokens: int | None = None,
+    ) -> str | None:
         if not self.deepseek_client:
             return None
-        response = self.deepseek_client.chat.completions.create(
-            model=settings.deepseek_model,
-            messages=[{"role": "user", "content": prompt}],
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "timeout": timeout_seconds,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        response = self.deepseek_client.chat.completions.create(**payload)
+        return response.choices[0].message.content or ""
+
+    def _complete_openai_model(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        temperature: float = 0.2,
+        timeout_seconds: float | None = None,
+    ) -> str | None:
+        if not self.openai_client:
+            return None
+        response = self.openai_client.responses.create(
+            model=model,
+            input=prompt,
             temperature=temperature,
+            timeout=timeout_seconds,
         )
+        return response.output_text.strip()
+
+    def _complete_local_model(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        temperature: float = 0.2,
+        timeout_seconds: float | None = None,
+        response_format: dict[str, str] | None = None,
+        max_tokens: int | None = None,
+    ) -> str | None:
+        client = self._build_local_client(model=model)
+        if not client:
+            return None
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+            "timeout": timeout_seconds,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        response = client.chat.completions.create(**payload)
         return response.choices[0].message.content or ""
 
     def embedding(self, text: str) -> list[float] | None:
@@ -167,3 +330,25 @@ def _embedding_tokens(text: str) -> list[str]:
     tokens.extend("".join(chinese_chars[index : index + 2]) for index in range(max(len(chinese_chars) - 1, 0)))
     tokens.extend("".join(chinese_chars[index : index + 3]) for index in range(max(len(chinese_chars) - 2, 0)))
     return [token for token in tokens if token.strip()]
+
+
+def _timeout_seconds(latency_budget_ms: int) -> float:
+    return max(0.5, float(latency_budget_ms or 1800) / 1000.0)
+
+
+def _local_timeout_seconds(latency_budget_ms: int) -> float:
+    return max(8.0, _timeout_seconds(latency_budget_ms))
+
+
+def _response_format_for_task(task_type: str) -> dict[str, str] | None:
+    if task_type == "command_intent":
+        return {"type": "json_object"}
+    return None
+
+
+def _max_tokens_for_task(task_type: str) -> int | None:
+    if task_type == "command_intent":
+        return 300
+    if task_type in {"conversation", "presentation"}:
+        return 120
+    return None

@@ -89,7 +89,6 @@ _USER_TOKEN_STRATEGIES = {
 _TENANT_TOKEN_STRATEGIES = _BOT_FIRST_QUERY_STRATEGIES
 
 _INTERNAL_STRATEGIES = {
-    "company_intro",
     "risk_analysis",
     "general_analysis",
     "decision_advice",

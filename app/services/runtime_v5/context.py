@@ -19,7 +19,7 @@ DEFAULT_PROFILE = RuntimeProfile()
 RESULT_CONTEXT_TTL_SECONDS = 1800
 SESSION_CONTEXT_TTL_SECONDS = 1800
 PORTAL_SESSION_TTL_SECONDS = 86400
-PEOPLE_SNAPSHOT_TTL_SECONDS = 600
+PEOPLE_SNAPSHOT_TTL_SECONDS = 21600
 
 
 def build_runtime_context(
@@ -29,32 +29,106 @@ def build_runtime_context(
     company_id: UUID,
     chat_id: str | None = None,
     runtime_scope: RuntimeScope | None = None,
+    organization_subject: dict[str, Any] | None = None,
 ) -> RuntimeContext:
     scope = runtime_scope or RuntimeScope(
         scope_type="single_company",
         company_ids=(company_id,),
         active_company_id=company_id,
     )
+    runtime_identity = runtime_identity_from_feishu(identity)
+    runtime_identity = enrich_runtime_identity_from_organization_subject(runtime_identity, organization_subject or {})
+    runtime_identity = enrich_runtime_identity_from_people_snapshot(runtime_identity, scope.active_company_id)
     return RuntimeContext(
-        identity=runtime_identity_from_feishu(identity),
+        identity=runtime_identity,
         runtime_scope=scope,
         current_message=message,
         session_context=load_session_context(chat_id),
         profile=load_runtime_profile(getattr(identity, "open_id", "") or ""),
         result_context=load_result_context(chat_id),
         chat_id=chat_id,
+        organization_subject=dict(organization_subject or {}),
     )
 
 
 def runtime_identity_from_feishu(identity: Any) -> RuntimeIdentity:
     return RuntimeIdentity(
-        user_id=str(getattr(identity, "user_id", "") or getattr(identity, "open_id", "") or ""),
-        open_id=str(getattr(identity, "open_id", "") or ""),
-        role=str(getattr(identity, "role", "") or ""),
-        display_name=str(getattr(identity, "display_name", "") or ""),
-        department_id=str(getattr(identity, "department_id", "") or ""),
-        domains=tuple(getattr(identity, "domains", ()) or ()),
+        user_id=str(_identity_value(identity, "user_id") or _identity_value(identity, "open_id") or ""),
+        open_id=str(_identity_value(identity, "open_id") or ""),
+        role=str(_identity_value(identity, "role") or ""),
+        display_name=str(_identity_value(identity, "display_name") or _identity_value(identity, "name") or ""),
+        department_id=str(_identity_value(identity, "department_id") or ""),
+        department_names=tuple(str(item) for item in _identity_value(identity, "department_names", ()) or () if str(item).strip()),
+        job_title=str(_identity_value(identity, "job_title") or ""),
+        email=str(_identity_value(identity, "email") or ""),
+        domains=tuple(_identity_value(identity, "domains", ()) or ()),
     )
+
+
+def _identity_value(identity: Any, key: str, default: Any = "") -> Any:
+    if isinstance(identity, dict):
+        return identity.get(key, default)
+    return getattr(identity, key, default)
+
+
+def enrich_runtime_identity_from_people_snapshot(identity: RuntimeIdentity, company_id: UUID | str | None) -> RuntimeIdentity:
+    if not identity.open_id or not company_id:
+        return identity
+    user = people_snapshot_user(company_id, identity.open_id)
+    if not user:
+        return identity
+    department_names = identity.department_names or _string_tuple(user.get("department_names"))
+    department_ids = _string_tuple(user.get("department_ids"))
+    department_id = identity.department_id or (department_ids[0] if department_ids else "")
+    return RuntimeIdentity(
+        user_id=identity.user_id or str(user.get("user_id") or identity.open_id),
+        open_id=identity.open_id,
+        role=identity.role,
+        display_name=identity.display_name or str(user.get("name") or user.get("display_name") or user.get("english_name") or ""),
+        department_id=department_id,
+        department_names=department_names,
+        job_title=identity.job_title or str(user.get("title") or user.get("job_title") or ""),
+        email=identity.email or str(user.get("email") or ""),
+        domains=identity.domains,
+    )
+
+
+def enrich_runtime_identity_from_organization_subject(identity: RuntimeIdentity, organization_subject: dict[str, Any]) -> RuntimeIdentity:
+    if not organization_subject:
+        return identity
+    department_ids = _string_tuple(organization_subject.get("department_ids"))
+    department_names = _string_tuple(organization_subject.get("department_names"))
+    return RuntimeIdentity(
+        user_id=identity.user_id or str(organization_subject.get("actor_user_id") or organization_subject.get("actor_open_id") or ""),
+        open_id=identity.open_id or str(organization_subject.get("actor_open_id") or ""),
+        role=identity.role,
+        display_name=identity.display_name or str(organization_subject.get("display_name") or ""),
+        department_id=identity.department_id or str(organization_subject.get("department_id") or (department_ids[0] if department_ids else "")),
+        department_names=identity.department_names or department_names,
+        job_title=identity.job_title or str(organization_subject.get("job_title") or ""),
+        email=identity.email or str(organization_subject.get("email") or ""),
+        domains=identity.domains,
+    )
+
+
+def people_snapshot_user(company_id: UUID | str | None, open_id: str) -> dict[str, Any]:
+    if not company_id or not open_id:
+        return {}
+    payload = load_people_snapshot(company_id)
+    users = payload.get("users") if isinstance(payload, dict) and isinstance(payload.get("users"), list) else []
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        if str(user.get("open_id") or user.get("user_id") or "").strip() == open_id:
+            return user
+    return {}
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if str(item).strip())
+    text = str(value or "").strip()
+    return (text,) if text else ()
 
 
 def load_session_context(chat_id: str | None) -> dict[str, Any]:

@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 from app.services.llm import conversation as conversation_module
@@ -6,6 +7,8 @@ from app.services.llm.answer_rewriter import _get_session_context, rewrite_bot_a
 from app.services.llm.conversation import ConversationLLMContext, conversation_llm_reply, conversation_prompt, valid_conversation_reply
 from app.services.llm.presentation import PresentationLLMContext, presentation_llm_rewrite, presentation_prompt, valid_presentation_rewrite
 from app.services.llm.answer_semantics import semantic_intent_for_question
+from app.services.feishu.bot_runtime import _runtime_v5_answer_rewrite_allowed
+from app.services.runtime_v5.response_classification import classify_response_request
 
 
 def test_semantic_intent_maps_data_blindspot_to_resources() -> None:
@@ -130,6 +133,18 @@ def test_semantic_intent_maps_greeting_to_general_chat() -> None:
 
     assert intent.route_hint == "general_chat"
     assert intent.confidence >= 0.85
+
+
+def test_smalltalk_user_context_stays_conversation_not_locked_fact() -> None:
+    classification = classify_response_request(
+        question="你应该怎么称呼我",
+        answer="我知道，你是陈俊。",
+        intent="smalltalk",
+        result_type="smalltalk",
+    )
+
+    assert classification.response_class == "conversation"
+    assert classification.llm_allowed is True
 
 
 def test_semantic_intent_marks_create_org_table_request_as_action() -> None:
@@ -672,7 +687,10 @@ def test_conversation_prompt_freezes_no_business_data_boundary() -> None:
     )
 
     assert "Conversation LLM" in prompt
+    assert "沟通画像" in prompt
+    assert "最近对话与交互信号" in prompt
     assert "主动读取或编造企业业务数据" in prompt
+    assert "把沟通画像当成权限或事实来源" in prompt
     assert "把闲聊升级成业务动作" in prompt
     assert "改变权限边界" in prompt
 
@@ -704,7 +722,7 @@ def test_conversation_reply_respects_feature_switch(monkeypatch) -> None:
     called = False
 
     class FakeGateway:
-        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
             nonlocal called
             called = True
             return "不会被调用"
@@ -725,7 +743,8 @@ def test_conversation_reply_respects_feature_switch(monkeypatch) -> None:
 
 def test_conversation_reply_uses_llm_when_enabled(monkeypatch) -> None:
     class FakeGateway:
-        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "conversation"
             assert "Conversation LLM" in prompt
             return "我在。你可以直接告诉我想查什么范围、对象或时间。"
 
@@ -740,6 +759,71 @@ def test_conversation_reply_uses_llm_when_enabled(monkeypatch) -> None:
     )
 
     assert answer == "我在。你可以直接告诉我想查什么范围、对象或时间。"
+
+
+def test_conversation_reply_deadline_falls_back(monkeypatch) -> None:
+    class FakeRoute:
+        latency_budget_ms = 500
+
+    class FakeGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            time.sleep(2)
+            return "慢回复"
+
+    monkeypatch.setattr(conversation_module.settings, "bot_llm_conversation_enabled", True)
+    monkeypatch.setattr(conversation_module, "llm_route_for_task", lambda task_type: FakeRoute())
+    monkeypatch.setattr(conversation_module, "LLMGateway", lambda: FakeGateway())
+
+    started = time.perf_counter()
+    answer = conversation_llm_reply(
+        ConversationLLMContext(
+            question="你好",
+            fallback_answer="我在，正在听。",
+        )
+    )
+    elapsed = time.perf_counter() - started
+
+    assert answer == "我在，正在听。"
+    assert elapsed < 1.2
+
+
+def test_conversation_reply_can_naturalize_identity_fact(monkeypatch) -> None:
+    called = False
+
+    class FakeGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            nonlocal called
+            called = True
+            assert "我知道，你是陈俊。" in prompt
+            assert "不要直呼其名" in prompt
+            return "知道的，老板。正式说你是陈俊，平时我就不老直呼名字了。"
+
+    monkeypatch.setattr(conversation_module.settings, "bot_llm_conversation_enabled", True)
+    monkeypatch.setattr(conversation_module, "LLMGateway", lambda: FakeGateway())
+
+    answer = conversation_llm_reply(
+        ConversationLLMContext(
+            question="我叫什么名字",
+            fallback_answer="我知道，你是陈俊。",
+            profile_text="不要直呼其名",
+        )
+    )
+
+    assert called is True
+    assert answer == "知道的，老板。正式说你是陈俊，平时我就不老直呼名字了。"
+
+
+def test_response_classification_freezes_fact_answer() -> None:
+    classification = classify_response_request(
+        question="我叫什么名字",
+        answer="我知道，你是陈俊。",
+        intent="smalltalk",
+        result_type="smalltalk",
+    )
+
+    assert classification.response_class == "fact"
+    assert classification.fact_kind == "identity"
+    assert classification.llm_allowed is False
 
 
 def test_presentation_prompt_freezes_fact_boundary() -> None:
@@ -778,9 +862,20 @@ def test_presentation_rewrite_rejects_status_boundary_change() -> None:
     )
 
 
+def test_presentation_rewrite_rejects_prompt_scaffold() -> None:
+    assert (
+        valid_presentation_rewrite(
+            original="部门日程的实时读取功能目前还没接入主系统，所以暂时查不了。",
+            rewritten="好的，收到你的要求。以下是改写后的答案：部门日程暂时查不了。",
+        )
+        is False
+    )
+
+
 def test_presentation_rewrite_uses_llm_when_valid(monkeypatch) -> None:
     class FakeGateway:
-        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "presentation"
             assert "Presentation LLM" in prompt
             return "你有 2 条任务，我按当前范围整理如下。"
 
@@ -800,7 +895,8 @@ def test_presentation_rewrite_uses_llm_when_valid(monkeypatch) -> None:
 
 def test_presentation_rewrite_falls_back_when_invalid(monkeypatch) -> None:
     class FakeGateway:
-        def complete_text(self, prompt: str, *, temperature: float = 0.2) -> str:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "presentation"
             return "已查询到全公司任务，可以查看全部结果。"
 
     monkeypatch.setattr(presentation_module, "LLMGateway", lambda: FakeGateway())
@@ -815,5 +911,64 @@ def test_presentation_rewrite_falls_back_when_invalid(monkeypatch) -> None:
     assert answer == "任务企业实时读取能力还没有接入 Bot/Tenant 主路径。"
 
 
+def test_runtime_v5_fast_response_skips_presentation_llm_for_lists() -> None:
+    envelope = SimpleNamespace(
+        intent=SimpleNamespace(intent="task_query", data_scope="self"),
+        composed=SimpleNamespace(result_context=SimpleNamespace(result_type="task_list")),
+    )
+
+    assert _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer="你有 2 条任务。") is False
 
 
+def test_runtime_v5_fast_response_skips_presentation_llm_for_scope_boundaries() -> None:
+    envelope = SimpleNamespace(
+        intent=SimpleNamespace(intent="calendar_query", data_scope="department"),
+        composed=SimpleNamespace(result_context=SimpleNamespace(result_type="calendar_event_list")),
+    )
+
+    assert (
+        _runtime_v5_answer_rewrite_allowed(
+            envelope=envelope,
+            answer="日程部门实时读取能力还没有接入 Bot/Tenant 主路径，所以不能生成部门认知聚合。",
+        )
+        is False
+    )
+
+
+def test_runtime_v5_smalltalk_allows_bounded_conversation_llm(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.feishu.bot_runtime.settings.bot_llm_answer_rewrite_enabled", True)
+    envelope = SimpleNamespace(
+        intent=SimpleNamespace(intent="smalltalk", data_scope="self"),
+        composed=SimpleNamespace(result_context=SimpleNamespace(result_type="smalltalk")),
+    )
+
+    assert _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer="我在。") is True
+
+
+def test_runtime_v5_smalltalk_allows_identity_but_skips_time_fact(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.feishu.bot_runtime.settings.bot_llm_answer_rewrite_enabled", True)
+    envelope = SimpleNamespace(
+        intent=SimpleNamespace(intent="smalltalk", data_scope="self"),
+        composed=SimpleNamespace(result_context=SimpleNamespace(result_type="smalltalk")),
+    )
+
+    assert _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer="我知道，你是陈俊。") is True
+    assert _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer="你叫陈俊。我平时可以少直呼名字。") is True
+    assert _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer="现在是北京时间 20:31。") is False
+
+
+def test_runtime_v5_identity_question_skips_conversation_llm_even_when_answer_is_profile_boundary(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.feishu.bot_runtime.settings.bot_llm_answer_rewrite_enabled", True)
+    envelope = SimpleNamespace(
+        intent=SimpleNamespace(intent="smalltalk", data_scope="self"),
+        composed=SimpleNamespace(result_context=SimpleNamespace(result_type="smalltalk")),
+    )
+
+    assert (
+        _runtime_v5_answer_rewrite_allowed(
+            envelope=envelope,
+            question="我是什么性格",
+            answer="我现在不把你简单贴性格标签。已知的是你的沟通偏好：直接、简洁。",
+        )
+        is False
+    )

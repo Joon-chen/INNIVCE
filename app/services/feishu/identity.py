@@ -24,6 +24,9 @@ class BotIdentity:
     domains: tuple[str, ...] = ()
     allowed_resources: tuple[str, ...] = ()
     email: str | None = None
+    department_ids: tuple[str, ...] = ()
+    department_names: tuple[str, ...] = ()
+    job_title: str | None = None
 
     @property
     def can_query_company(self) -> bool:
@@ -79,21 +82,22 @@ def member_help_text(identity: BotIdentity) -> str:
 
 
 def identity_reply(identity: BotIdentity) -> str:
+    org_line = _identity_org_line(identity)
     if identity.can_query_company:
         name = identity.display_name or "老板"
         return (
             f"老板，我记得。你是{name}，也是这套数字参谋的系统所有者。"
-            f"当前识别权限：{identity.label}。我可以帮你查全局工作事件、"
+            f"当前识别权限：{identity.label}。{org_line}我可以帮你查全局工作事件、"
             "飞书邮箱、日报、待办、风险、会议、飞书历史消息，以及后续接入的企业知识库。"
         )
     if identity.domains:
         resources = "、".join(identity.allowed_resources[:8]) or "已授权业务域资料"
         return (
-            f"我识别到你的身份：{identity.label}。已授权业务域：{', '.join(identity.domains)}。"
+            f"我识别到你的身份：{identity.label}。{org_line}已授权业务域：{', '.join(identity.domains)}。"
             f"你可以查询：{resources}。未授权的老板邮箱、全公司数据库、薪资财务明细和其他群聊不会向你开放。"
         )
     return (
-        f"我识别到你的身份：{identity.label}。我可以回答当前会话和已授权知识库范围内的问题；"
+        f"我识别到你的身份：{identity.label}。{org_line}我可以回答当前会话和已授权知识库范围内的问题；"
         "全公司数据库、邮箱、薪资、财务和其他群聊信息不会向你开放。"
     )
 
@@ -164,6 +168,9 @@ def get_sender_identity(
             domains=tuple(settings_data.get("permission_domains") or []),
             allowed_resources=tuple(settings_data.get("allowed_resources") or []),
             email=settings_data.get("email"),
+            department_ids=tuple(str(item) for item in settings_data.get("department_ids") or [] if str(item).strip()),
+            department_names=tuple(str(item) for item in settings_data.get("department_names") or [] if str(item).strip()),
+            job_title=settings_data.get("job_title"),
         )
     if is_admin_sender(open_id):
         return BotIdentity(open_id=open_id, role="owner", access_scope="company", source="env", domains=("all",))
@@ -273,6 +280,9 @@ def identity_payload(identity: BotIdentity) -> dict[str, Any]:
         "domains": list(identity.domains),
         "allowed_resources": list(identity.allowed_resources),
         "email": identity.email,
+        "department_ids": list(identity.department_ids),
+        "department_names": list(identity.department_names),
+        "job_title": identity.job_title,
     }
 
 
@@ -286,4 +296,18 @@ def identity_from_payload(payload: dict[str, Any]) -> BotIdentity:
         domains=tuple(payload.get("domains") or ()),
         allowed_resources=tuple(payload.get("allowed_resources") or ()),
         email=payload.get("email"),
+        department_ids=tuple(payload.get("department_ids") or ()),
+        department_names=tuple(payload.get("department_names") or ()),
+        job_title=payload.get("job_title"),
     )
+
+
+def _identity_org_line(identity: BotIdentity) -> str:
+    parts = []
+    if identity.job_title:
+        parts.append(f"职位：{identity.job_title}")
+    if identity.department_names:
+        parts.append(f"部门：{'、'.join(identity.department_names[:3])}")
+    if not parts:
+        return ""
+    return "；".join(parts) + "。"

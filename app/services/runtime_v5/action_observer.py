@@ -12,6 +12,7 @@ from app.services.runtime_v5.context import load_session_context, save_session_c
 
 ACTION_TRACE_KEY = "runtime_v5_action_trace"
 DECISION_TRACE_KEY = "runtime_v5_decision_trace"
+ROUTE_OBSERVATION_TRACE_KEY = "runtime_v5_route_observation_trace"
 PENDING_ACTION_STATUSES = {
     "queued",
     "started",
@@ -194,6 +195,78 @@ def load_runtime_decision_trace(chat_id: str | None, *, limit: int = 5) -> list[
     if not isinstance(traces, list):
         return []
     return [item for item in traces[-limit:] if isinstance(item, dict)]
+
+
+def record_route_observation_trace(chat_id: str | None, entry: dict[str, Any]) -> None:
+    if not chat_id:
+        return
+    payload = _normalize_route_observation_entry(entry)
+    session_context = load_session_context(chat_id)
+    traces = session_context.get(ROUTE_OBSERVATION_TRACE_KEY)
+    if not isinstance(traces, list):
+        traces = []
+    traces.append(payload)
+    session_context[ROUTE_OBSERVATION_TRACE_KEY] = traces[-20:]
+    save_session_context(chat_id, session_context)
+
+
+def load_route_observation_trace(chat_id: str | None, *, limit: int = 12) -> list[dict[str, Any]]:
+    if not chat_id:
+        return []
+    session_context = load_session_context(chat_id)
+    traces = session_context.get(ROUTE_OBSERVATION_TRACE_KEY)
+    if not isinstance(traces, list):
+        return []
+    return [item for item in traces[-limit:] if isinstance(item, dict)]
+
+
+def route_observation_summary(traces: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    items = [item for item in traces if isinstance(item, dict)]
+    risk_reasons: dict[str, int] = {}
+    denoise_actions: dict[str, int] = {}
+    risky_count = 0
+    for item in items:
+        if item.get("misroute_risk"):
+            risky_count += 1
+        for reason in item.get("risk_reasons") or []:
+            key = str(reason or "").strip()
+            if key:
+                risk_reasons[key] = risk_reasons.get(key, 0) + 1
+        action = str(item.get("denoise_action") or "").strip()
+        if action:
+            denoise_actions[action] = denoise_actions.get(action, 0) + 1
+    latest = items[-1] if items else {}
+    return {
+        "available": bool(items),
+        "total_count": len(items),
+        "risky_count": risky_count,
+        "risk_rate": round(risky_count / len(items), 3) if items else 0.0,
+        "risk_reasons": risk_reasons,
+        "denoise_actions": denoise_actions,
+        "latest": latest,
+        "status": "needs_attention" if risky_count else ("healthy" if items else "none"),
+    }
+
+
+def _normalize_route_observation_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(entry or {})
+    observation = payload.get("route_observation")
+    if isinstance(observation, dict):
+        payload = {**payload, **observation}
+        payload["route_observation"] = observation
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    payload["intent"] = str(payload.get("intent") or "")
+    payload["question_type"] = str(payload.get("question_type") or "")
+    payload["data_scope"] = str(payload.get("data_scope") or payload.get("scope") or "")
+    payload["route_source"] = str(payload.get("route_source") or payload.get("route_path") or "")
+    payload["denoise_action"] = str(payload.get("denoise_action") or "none")
+    payload["risk_reasons"] = [str(item) for item in (payload.get("risk_reasons") or []) if str(item)]
+    payload["misroute_risk"] = bool(payload.get("misroute_risk"))
+    payload["confidence"] = float(payload.get("confidence") or 0.0)
+    question = str(payload.get("question") or "").strip()
+    if question:
+        payload["question"] = question[:160]
+    return payload
 
 
 def write_runtime_action_audit(

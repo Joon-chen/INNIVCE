@@ -267,6 +267,14 @@ def test_console_system_logs_can_filter_gateway_reason() -> None:
     assert '["agent_runtime_step_count", "Agent步数"]' in console_app
     assert "rowAction: showSystemLogDetail" in console_app
     assert "function showSystemLogDetail(item)" in console_app
+    assert "function diagnosticStatusRows" in console_app
+    assert "diagnostics_payload" in console_app
+    assert 'diagnostics_source: registry?.diagnostics_payload ? "diagnostics_payload" : "system_logs"' in console_app
+    assert "diagnostics.${key}" in console_app
+    assert '["runtime", "Runtime"' in console_app
+    assert "Result Context" in console_app
+    assert "Response Experience" in console_app
+    assert "Action State" in console_app
     assert "tool_steps: item.agent_runtime_tool_steps || []" in console_app
     assert "workflow_steps: item.agent_runtime_workflow_steps || []" in console_app
     assert 'data-action="view-gateway-card-issues"' in console_html
@@ -382,6 +390,7 @@ def test_console_employee_agent_workbench_surfaces_identity_boundaries() -> None
     assert "latest?.enterprise_identity_boundary" in console_app
     assert "latest?.user_identity_boundary" in console_app
     assert 'id="dataLayerBoard"' in console_html
+    assert "<h3>能力域</h3>" in console_html
     assert 'id="toolFamilyBoard"' in console_html
     assert 'id="entrypointBoard"' in console_html
     assert "知识库模块稍后接入" not in console_html
@@ -399,6 +408,12 @@ def test_console_employee_agent_workbench_surfaces_identity_boundaries() -> None
     assert 'safeLoad("/api/v5/resources/sync-strategy")' in console_app
     assert 'safeLoad(`/api/v5/resources/sync-status${companyQuery()}`)' in console_app
     assert 'safeLoad(`/api/v5/workspace/events${companyQuery("limit=80")}`)' in console_app
+    assert "/api/v5/capability-registry?company_id=" in console_app
+    assert "catalog_payload" in console_app
+    assert "skill_registry_payload" in console_app
+    assert "[capability-registry-diff]" in console_app
+    assert "function capabilityCatalogCards" in console_app
+    assert "function skillRegistryRows" in console_app
     assert 'kinds: ["drive", "wiki"]' in console_app
     assert 'api("/api/v5/resources/sync-preview"' in console_app
     assert "function renderKnowledgePolicyBoard" in console_app
@@ -708,6 +723,11 @@ def test_console_settings_exposes_governance_action_table() -> None:
     assert "access-decision" in console_app
     assert "只有“建议接入”的业务群才通知负责人" in console_app
     assert "执行自动发现，系统会登记可同步资源" in console_app
+    assert "function governanceFindingRows" in console_app
+    assert "governance_payload" in console_app
+    assert 'governance_source: registry?.governance_payload ? "governance_payload" : "resource_sync_status"' in console_app
+    assert '"governance_payload"' in console_app
+    assert "Registry finding" in console_app
 
 
 def test_console_overview_surfaces_only_high_value_group_access_actions() -> None:

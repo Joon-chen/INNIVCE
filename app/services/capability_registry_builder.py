@@ -47,6 +47,7 @@ FROZEN_DOMAINS: tuple[dict[str, str], ...] = (
 
 
 CAPABILITY_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    _capability("people", "identity_resolution", "解析人员身份", "将姓名、邮箱、open_id 等解析为统一人员实体，供消息、邮件、日程和任务复用。"),
     _capability("people", "organization_lookup", "查询组织架构", "读取组织结构、部门和人员关系。"),
     _capability("people", "contact_lookup", "查询通讯录", "查询人员、联系方式和基础身份。"),
     _capability("people", "employee_profile_read", "查看员工档案", "查看员工档案和上下文。", status="planned"),
@@ -185,6 +186,7 @@ STRATEGY_CAPABILITY = {
     "approval_cancel": "approval_detail",
     "approval_cc": "approval_detail",
     "people_lookup": "contact_lookup",
+    "people_resolve": "identity_resolution",
     "department_members": "organization_lookup",
     "organization_snapshot": "organization_lookup",
     "organization_export": "organization_lookup",
@@ -250,6 +252,7 @@ STRATEGY_CAPABILITY = {
     "vc_agent_read": "meeting_summary",
     "vc_agent_join": "meeting_schedule",
     "company_intro": "business_analysis",
+    "external_information_query": "knowledge_search",
     "risk_analysis": "risk_detect",
     "general_analysis": "business_analysis",
     "decision_advice": "decision_recommendation",

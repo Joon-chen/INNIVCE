@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
+from app.services.llm.call_trace import last_llm_call_trace
 from app.services.runtime_v5.capabilities import RUNTIME_CAPABILITIES, SKILL_ATOMIC_CAPABILITIES, path_maturity_for_strategy
 from app.services.runtime_v5.planner import strategy_registry
 
@@ -25,6 +26,8 @@ def runtime_trace_summary(envelope: Any) -> dict[str, Any]:
     permission_summary = _permission_summary(getattr(envelope, "permission", None))
     permission_health = _permission_health(envelope, permission_summary)
     provider_summary = _provider_results_summary(provider_results)
+    llm_trace_summary = _llm_trace_summary(envelope)
+    route_observation = _route_observation_summary(envelope)
     source_execution_contract = _source_execution_contract(envelope, provider_summary)
     planner_runtime_snapshot_contract = _planner_runtime_snapshot_contract(envelope)
     router_health = _router_health(envelope, provider_summary)
@@ -207,6 +210,8 @@ def runtime_trace_summary(envelope: Any) -> dict[str, Any]:
         "action_closure": action_closure,
         "provider_results": provider_summary["items"],
         "provider_summary": provider_summary,
+        "llm_trace_summary": llm_trace_summary,
+        "route_observation": route_observation,
         "source_execution_contract": source_execution_contract,
         "planner_runtime_snapshot_contract": planner_runtime_snapshot_contract,
         "pipeline_frames": pipeline_frames,
@@ -245,6 +250,7 @@ def _diagnostics_capabilities() -> dict[str, Any]:
         "profile_isolation",
         "permission_identity_policy",
         "planner_capability_contract",
+        "llm_routing_observability",
     )
     return {
         "version": DIAGNOSTICS_VERSION,
@@ -1917,6 +1923,44 @@ def _answer_health(envelope: Any, result_context: Any) -> dict[str, Any]:
     }
 
 
+def _route_observation_summary(envelope: Any) -> dict[str, Any]:
+    intent = getattr(envelope, "intent", None)
+    entities = getattr(intent, "entities", {}) if intent is not None else {}
+    if not isinstance(entities, dict):
+        entities = {}
+    trace = entities.get("command_intent_trace") if isinstance(entities.get("command_intent_trace"), dict) else {}
+    observation = trace.get("route_observation") if isinstance(trace, dict) else None
+    if not isinstance(observation, dict):
+        plan = getattr(envelope, "plan", None)
+        frame = getattr(plan, "command_frame", None)
+        rule_candidate = getattr(frame, "rule_candidate", {}) if frame is not None else {}
+        if isinstance(rule_candidate, dict):
+            observation = rule_candidate.get("route_observation")
+    if not isinstance(observation, dict):
+        composed = getattr(envelope, "composed", None)
+        metadata = getattr(composed, "metadata", {}) if composed is not None else {}
+        runtime_result = metadata.get("runtime_result") if isinstance(metadata, dict) else {}
+        runtime_metadata = runtime_result.get("metadata") if isinstance(runtime_result, dict) else {}
+        command_frame = runtime_metadata.get("command_frame") if isinstance(runtime_metadata, dict) else {}
+        rule_candidate = command_frame.get("rule_candidate") if isinstance(command_frame, dict) else {}
+        if isinstance(rule_candidate, dict):
+            observation = rule_candidate.get("route_observation")
+    if not isinstance(observation, dict):
+        return {"available": False}
+    return {
+        "available": True,
+        "intent": str(observation.get("intent") or getattr(intent, "intent", "") or ""),
+        "question_type": str(observation.get("question_type") or getattr(intent, "question_type", "") or ""),
+        "data_scope": str(observation.get("data_scope") or getattr(intent, "data_scope", "") or ""),
+        "route_source": str(observation.get("route_source") or ""),
+        "route_family": str(observation.get("route_family") or ""),
+        "interaction_kind": str(observation.get("interaction_kind") or ""),
+        "misroute_risk": bool(observation.get("misroute_risk")),
+        "risk_reasons": [str(item) for item in (observation.get("risk_reasons") or []) if str(item)],
+        "denoise_action": str(observation.get("denoise_action") or "none"),
+    }
+
+
 def _decision_health(envelope: Any) -> dict[str, Any]:
     intent = getattr(envelope, "intent", None)
     plan = getattr(envelope, "plan", None)
@@ -2452,8 +2496,6 @@ def _result_context_quality(result_context: Any) -> dict[str, Any]:
             }
         )
     provider_evidence = metadata.get("provider_evidence") if isinstance(metadata.get("provider_evidence"), dict) else {}
-    source_execution_status = metadata.get("source_execution_status") if isinstance(metadata.get("source_execution_status"), dict) else {}
-    source_execution_steps = metadata.get("source_execution_steps") if isinstance(metadata.get("source_execution_steps"), list) else []
     execution_status = str(metadata.get("execution_status") or "")
     action_receipt_executed = context_kind == "action_receipt" and execution_status not in {
         "queued",
@@ -4271,6 +4313,68 @@ def _session_result_context_events(context: Any) -> list[dict[str, Any]]:
     if not isinstance(events, list):
         return []
     return [item for item in events[-10:] if isinstance(item, dict)]
+
+
+def _llm_trace_summary(envelope: Any) -> dict[str, Any]:
+    intent = getattr(envelope, "intent", None)
+    entities = getattr(intent, "entities", {}) if intent is not None else {}
+    if not isinstance(entities, dict):
+        entities = {}
+    command_trace = entities.get("command_intent_trace") if isinstance(entities.get("command_intent_trace"), dict) else {}
+    command_llm_call = command_trace.get("llm_call") if isinstance(command_trace.get("llm_call"), dict) else {}
+    latest_call = last_llm_call_trace()
+    calls = []
+    if command_llm_call:
+        calls.append(_llm_call_trace_item(command_llm_call, source="command_intent"))
+    if latest_call and latest_call != command_llm_call:
+        calls.append(_llm_call_trace_item(latest_call, source="latest_gateway_call"))
+    valid_calls = [item for item in calls if item]
+    slowest = max(valid_calls, key=lambda item: int(item.get("duration_ms") or 0), default={})
+    return {
+        "available": bool(valid_calls),
+        "call_count": len(valid_calls),
+        "items": valid_calls[-5:],
+        "latest": valid_calls[-1] if valid_calls else {},
+        "slowest": slowest,
+        "total_duration_ms": sum(int(item.get("duration_ms") or 0) for item in valid_calls),
+        "fallback_used": any(bool(item.get("fallback_used")) for item in valid_calls),
+        "providers": sorted({str(item.get("provider") or "") for item in valid_calls if item.get("provider")}),
+        "lanes": sorted({str(item.get("lane") or "") for item in valid_calls if item.get("lane")}),
+        "task_types": sorted({str(item.get("task_type") or "") for item in valid_calls if item.get("task_type")}),
+    }
+
+
+def _llm_call_trace_item(call: dict[str, Any], *, source: str) -> dict[str, Any]:
+    prompt_audit = call.get("prompt_audit") if isinstance(call.get("prompt_audit"), dict) else {}
+    return {
+        "source": source,
+        "task_type": str(call.get("task_type") or ""),
+        "lane": str(call.get("lane") or ""),
+        "provider": str(call.get("provider") or ""),
+        "model": str(call.get("model") or ""),
+        "duration_ms": int(call.get("duration_ms") or 0),
+        "latency_budget_ms": int(call.get("latency_budget_ms") or 0),
+        "allow_fallback": bool(call.get("allow_fallback")),
+        "fallback_provider": str(call.get("fallback_provider") or ""),
+        "fallback_used": bool(call.get("fallback_used")),
+        "status": str(call.get("status") or ""),
+        "error": str(call.get("error") or ""),
+        "prompt_chars": int(call.get("prompt_chars") or 0),
+        "response_chars": int(call.get("response_chars") or 0),
+        "prompt_audit": {
+            "prompt_chars": int(prompt_audit.get("prompt_chars") or call.get("prompt_chars") or 0),
+            "line_count": int(prompt_audit.get("line_count") or 0),
+            "profile_plane": str(prompt_audit.get("profile_plane") or "none"),
+            "has_profile_context": bool(prompt_audit.get("has_profile_context")),
+            "has_intent_profile_context": bool(prompt_audit.get("has_intent_profile_context")),
+            "has_presentation_profile_context": bool(prompt_audit.get("has_presentation_profile_context")),
+            "has_session_context": bool(prompt_audit.get("has_session_context")),
+            "has_original_answer": bool(prompt_audit.get("has_original_answer")),
+            "risk_count": int(prompt_audit.get("risk_count") or 0),
+            "risks": list(prompt_audit.get("risks") or ()) if isinstance(prompt_audit.get("risks"), list) else [],
+        },
+        "created_at": str(call.get("created_at") or ""),
+    }
 
 
 def _result_context_event_summary(events: list[dict[str, Any]]) -> dict[str, Any]:

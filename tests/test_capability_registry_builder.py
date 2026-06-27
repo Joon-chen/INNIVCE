@@ -48,8 +48,14 @@ def test_skill_registry_payload_maps_capability_to_skills() -> None:
     capability_map = {item["capability_id"]: item for item in payload["capabilities"]}
 
     assert "approval_approve" in capability_map
+    assert "identity_resolution" in capability_map
     assert "task_query" in capability_map
     assert "meeting_schedule" in capability_map
+
+    people_skills = {skill["skill_id"]: skill for skill in capability_map["identity_resolution"]["skills"]}
+    assert people_skills["people.resolve_identity"]["source"] == "people"
+    assert people_skills["people.resolve_identity"]["provider_bindings"][0]["provider_operation"] == "resolve_identity"
+    assert people_skills["people.resolve_identity"]["identity_contract"]["actor_identity"] == "BOT"
 
     approval_skills = {skill["skill_id"]: skill for skill in capability_map["approval_approve"]["skills"]}
     assert approval_skills["approval.approve"]["risk_level"] == "high"

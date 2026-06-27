@@ -9,14 +9,18 @@ from app.services.runtime_v5.models import (
     ExecutionResult,
     IntentResult,
     PermissionDecision,
+    ResultContext,
     ResultFollowup,
     RuntimeContext,
 )
 from app.services.runtime_v5.response_classification import classify_response_request
 from app.services.runtime_v5.interaction_intent import classify_interaction_intent
+from app.services.runtime_v5.people_resolver import filter_people_by_department, filter_people_by_title, format_people_brief, normalize_gender, people_context_metadata
 
 
 _LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+_DEFAULT_FOLLOWUP_PAGE_SIZE = 20
+_PEOPLE_FOLLOWUP_PAGE_SIZE = 50
 
 
 def compose_answer(
@@ -104,13 +108,26 @@ def compose_answer(
                 result_context=execution.result_context,
                 metadata={"strategy": execution.strategy},
             )
+        orchestrated = _conversation_first_answer(intent=intent, result_context=execution.result_context)
+        if not orchestrated:
+            orchestrated = _default_structured_people_answer(context=context, result_context=execution.result_context)
+        if orchestrated:
+            return ComposedAnswer(
+                answer=orchestrated,
+                result_context=execution.result_context,
+                metadata={
+                    "strategy": execution.strategy,
+                    "response_orchestrator": "conversation_first_v1",
+                    "output_contract": _conversation_output_contract(intent),
+                },
+            )
         answer = _human_readable_answer(execution.result_context.answer)
         if not answer:
             answer = _result_context_items_answer(execution.result_context)
         if not answer:
             answer = "已取得结构化结果，但暂时无法生成可读摘要。你可以继续问「展开」或「第一个详情」。"
         return ComposedAnswer(
-            answer=_with_followup_hint(_with_command_enrichment(answer, intent=intent), execution.result_context),
+            answer=_with_optional_followup_hint(_with_command_enrichment(answer, intent=intent), intent=intent, result_context=execution.result_context),
             result_context=execution.result_context,
             metadata={"strategy": execution.strategy},
         )
@@ -122,7 +139,7 @@ def compose_answer(
             answer = _result_context_items_answer(execution.result_context)
         if answer:
             return ComposedAnswer(
-                answer=_with_followup_hint(_with_command_enrichment(answer, intent=intent), execution.result_context),
+                answer=_with_optional_followup_hint(_with_command_enrichment(answer, intent=intent), intent=intent, result_context=execution.result_context),
                 result_context=execution.result_context,
                 metadata={"strategy": execution.strategy},
             )
@@ -132,6 +149,190 @@ def compose_answer(
     if errors:
         return ComposedAnswer(answer=errors[0])
     return ComposedAnswer(answer="暂时没有查到可用结果。")
+
+
+def _conversation_first_answer(*, intent: IntentResult, result_context: ResultContext) -> str:
+    contract = _conversation_output_contract(intent)
+    if not contract:
+        return ""
+    result_type = str(result_context.result_type or "")
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    if result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return _conversation_people_answer(intent=intent, result_context=result_context, contract=contract, metadata=metadata)
+    if result_type in {"company_profile_knowledge", "knowledge_search", "docs_read"}:
+        return _conversation_knowledge_answer(result_context=result_context, contract=contract, metadata=metadata)
+    return ""
+
+
+def _conversation_people_answer(
+    *,
+    intent: IntentResult,
+    result_context: ResultContext,
+    contract: dict[str, Any],
+    metadata: dict[str, Any],
+) -> str:
+    result_type = str(result_context.result_type or "")
+    mode = str(contract.get("mode") or "")
+    surface = str(contract.get("surface") or "")
+    count = int(result_context.count or len(result_context.items or ()))
+    field_projection = str(metadata.get("field_projection") or "")
+    semantic = _conversation_semantic_frame(intent)
+    filters = semantic.get("parameters", {}).get("filters") if isinstance(semantic.get("parameters"), dict) else {}
+    field = _requested_people_field(intent=intent, semantic=semantic, metadata=metadata)
+    if result_type == "people_search" and count == 1:
+        item = result_context.items[0] if result_context.items else {}
+        answer = _single_people_field_answer(item=item, field=field)
+        if answer:
+            return answer
+        name = str(item.get("name") or "").strip()
+        title = str(item.get("title") or item.get("job_title") or "").strip()
+        department = _people_department_label(item)
+        if name and (title or department):
+            parts = "，".join(part for part in (title, department) if part)
+            return f"{name}是{parts}。"
+        if name:
+            return f"我找到了{name}。"
+    if result_type in {"department_members", "organization_snapshot"}:
+        if surface == "sidepanel" or mode == "sidepanel" or field_projection in {"name_only", "detail"}:
+            return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
+        if mode == "numeric_only":
+            return str(count)
+        if mode in {"count", "short_answer"} or field_projection == "count_only":
+            gender = filters.get("gender") if isinstance(filters, dict) else ""
+            if gender in {"male", "female"}:
+                label = "男性" if gender == "male" else "女性"
+                return f"目前能确认的{label}员工是 {count} 位。"
+            return f"{count}人。"
+        if count:
+            return f"当前可见通讯录里有 {count} 位同事。"
+    return ""
+
+
+def _default_structured_people_answer(*, context: RuntimeContext, result_context: ResultContext) -> str:
+    result_type = str(result_context.result_type or "")
+    if result_type not in {"department_members", "organization_snapshot", "people_search"}:
+        return ""
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    if metadata.get("result_context_presentation") == "detail":
+        return ""
+    count = int(result_context.count or len(result_context.items or ()))
+    question = str(context.current_message or "")
+    if result_type == "department_members":
+        if _people_question_wants_list(question):
+            return _people_sidepanel_summary(result_context=result_context, metadata={**metadata, "result_context_presentation": "detail"})
+        return f"{count}人。" if count else _human_readable_answer(result_context.answer)
+    if result_type == "organization_snapshot" and not _people_question_wants_list(question):
+        return f"{count}人。" if count else _human_readable_answer(result_context.answer)
+    return ""
+
+
+def _people_question_wants_list(question: str) -> bool:
+    compact = str(question or "").replace(" ", "")
+    return any(token in compact for token in ("分别是谁", "都有谁", "有哪些", "名单", "列出", "全部显示", "全部展示", "展开", "明细"))
+
+
+def _conversation_knowledge_answer(
+    *,
+    result_context: ResultContext,
+    contract: dict[str, Any],
+    metadata: dict[str, Any],
+) -> str:
+    if not result_context.items:
+        return _human_readable_answer(result_context.answer)
+    text = _human_readable_answer(result_context.answer)
+    if not text:
+        return ""
+    if str(contract.get("surface") or "") == "sidepanel":
+        return "我把相关知识资料整理好了，完整内容可以在侧边栏继续看。"
+    return text
+
+
+def _conversation_output_contract(intent: IntentResult) -> dict[str, Any]:
+    frame = _conversation_command_frame(intent)
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    contract = params.get("output_contract") if isinstance(params.get("output_contract"), dict) else {}
+    if not contract or not _is_conversation_first_frame(frame=frame, params=params):
+        return {}
+    return contract
+
+
+def _conversation_semantic_frame(intent: IntentResult) -> dict[str, Any]:
+    frame = _conversation_command_frame(intent)
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    semantic = params.get("semantic_frame") if isinstance(params.get("semantic_frame"), dict) else {}
+    return semantic
+
+
+def _conversation_command_frame(intent: IntentResult) -> dict[str, Any]:
+    entities = intent.entities if isinstance(intent.entities, dict) else {}
+    frame = entities.get("command_frame") if isinstance(entities.get("command_frame"), dict) else {}
+    if frame:
+        return frame
+    frame = entities.get("conversation_first_v1_frame") if isinstance(entities.get("conversation_first_v1_frame"), dict) else {}
+    return frame
+
+
+def _is_conversation_first_frame(*, frame: dict[str, Any], params: dict[str, Any]) -> bool:
+    return bool(params.get("conversation_first_v1") or frame.get("route_path") == "conversation_first_v1")
+
+
+def _requested_people_field(*, intent: IntentResult, semantic: dict[str, Any], metadata: dict[str, Any]) -> str:
+    entities = intent.entities if isinstance(intent.entities, dict) else {}
+    field = str(entities.get("people_query_field") or "").strip()
+    if field:
+        return field
+    parameters = semantic.get("parameters") if isinstance(semantic.get("parameters"), dict) else {}
+    field = str(parameters.get("field") or parameters.get("inherited_field_projection") or "").strip()
+    if field:
+        return field
+    return str(metadata.get("field_projection") or "").strip()
+
+
+def _single_people_field_answer(*, item: dict[str, Any], field: str) -> str:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        return ""
+    normalized = {
+        "mobile": "mobile",
+        "phone": "mobile",
+        "email": "email",
+        "job_title": "title",
+        "title": "title",
+        "gender": "gender",
+    }.get(field, field)
+    if normalized == "mobile":
+        mobile = str(item.get("mobile") or "").strip()
+        return f"{name}的手机号是 {mobile}。" if mobile else f"我没看到{name}的手机号。"
+    if normalized == "email":
+        email = str(item.get("email") or "").strip()
+        return f"{name}的邮箱是 {email}。" if email else f"我没看到{name}的邮箱。"
+    if normalized == "title":
+        title = str(item.get("title") or item.get("job_title") or "").strip()
+        return f"{name}的职位是{title}。" if title else f"我没看到{name}的职位。"
+    if normalized == "gender":
+        gender = str(item.get("gender") or "").strip()
+        if gender in {"male", "男", "男性"}:
+            return f"{name}是男性。"
+        if gender in {"female", "女", "女性"}:
+            return f"{name}是女性。"
+        return f"通讯录里没有可靠的{name}性别字段，我不按姓名推断。"
+    return ""
+
+
+def _people_department_label(item: dict[str, Any]) -> str:
+    department = item.get("department")
+    if isinstance(department, (list, tuple)):
+        return "、".join(str(part) for part in department if str(part).strip())
+    return str(department or item.get("department_name") or "").strip()
+
+
+def _people_sidepanel_summary(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
+    count = int(result_context.count or len(result_context.items or ()))
+    filters = metadata.get("people_filter") if isinstance(metadata.get("people_filter"), dict) else {}
+    if filters.get("filter") == "gender":
+        label = "男性" if filters.get("value") == "male" else "女性" if filters.get("value") == "female" else "匹配"
+        return f"我把这 {count} 位{label}员工整理好了，打开侧边栏可以看完整名单。"
+    return f"我把 {count} 条人员结果整理好了，打开侧边栏可以看完整明细。"
 
 
 def _with_command_enrichment(answer: str, *, intent: IntentResult) -> str:
@@ -185,13 +386,22 @@ def _with_followup_hint(answer: str, result_context) -> str:
     metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
     actionable = bool(metadata.get("actionable", False))
     context_kind = str(metadata.get("context_kind") or "")
+    result_type = str(getattr(result_context, "result_type", "") or metadata.get("result_type") or "")
     if context_kind == "action_receipt":
-        hint = "可继续问：链接在哪里 / 发给谁了 / 为什么失败 / 刚才结果是什么。"
+        return text
+    elif result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return text
     elif actionable:
         hint = "可继续问：第一个详情 / 全部显示 / 把这些发给某人。"
     else:
         hint = "可继续问：展开 / 第一个是什么 / 全部显示。"
     return f"{text}\n\n{hint}"
+
+
+def _with_optional_followup_hint(answer: str, *, intent: IntentResult, result_context) -> str:
+    if intent.question_type == "action":
+        return str(answer or "").strip()
+    return _with_followup_hint(answer, result_context)
 
 
 def _smalltalk_answer(context: RuntimeContext) -> str:
@@ -2690,6 +2900,7 @@ def _missing_param_label(key: str) -> str:
         "subject": "主题",
         "body": "正文",
         "target_type": "发送对象",
+        "delivery_mode": "发送方式",
         "text": "消息内容",
         "chat_id": "会话",
     }.get(key, key)
@@ -2775,6 +2986,14 @@ def _compose_followup(*, context: RuntimeContext, followup: ResultFollowup) -> C
     if result_context is None or not result_context.items:
         return ComposedAnswer(answer="上一轮结果已经过期了，请重新查询一次。")
 
+    if followup.followup_type == "people_filter":
+        filtered_context = _people_filtered_result_context(result_context, followup)
+        return ComposedAnswer(
+            answer=_format_people_followup(filtered_context, followup),
+            result_context=filtered_context,
+            metadata=_followup_metadata(result_context, followup),
+        )
+
     if followup.followup_type == "receipt_detail":
         lines = [
             _format_followup_item_detail(
@@ -2812,17 +3031,197 @@ def _compose_followup(*, context: RuntimeContext, followup: ResultFollowup) -> C
         )
 
     if followup.followup_type in {"expand", "pronoun", "detail"}:
-        lines = [
-            f"{_item_display_index(item, fallback_index=index)}. {_format_item(item, result_type=result_context.result_type)}"
-            for index, item in enumerate(result_context.items[:20], start=1)
+        projection = str(followup.entity_ref.get("field_projection") or "")
+        start, end, operation = _followup_display_window(result_context, followup)
+        window_items = result_context.items[start:end]
+        if projection == "count_only":
+            return ComposedAnswer(
+                answer=f"这组结果共有 {len(result_context.items)} 人。",
+                result_context=_result_context_with_display_window(
+                    result_context,
+                    start=start,
+                    end=end,
+                    limit=_DEFAULT_FOLLOWUP_PAGE_SIZE,
+                    operation=operation,
+                    projection=projection,
+                ),
+                metadata=_followup_metadata(result_context, followup),
+            )
+        item_lines = [
+            f"{_item_display_index(item, fallback_index=index)}. {_format_projected_item(item, result_type=result_context.result_type, projection=projection)}"
+            for index, item in enumerate(window_items, start=start + 1)
         ]
+        lines = item_lines
+        if _is_people_result_context(result_context) and projection == "name_only" and len(result_context.items) > 8:
+            lines = [f"这组结果共有 {len(result_context.items)} 人，名单我放到侧边栏里，聊天里不展开长清单。"]
+        elif _is_people_result_context(result_context) and projection == "name_only":
+            heading = (
+                f"继续列出剩余人员姓名，本次是第 {start + 1}-{end} 位："
+                if operation == "continue" and item_lines
+                else f"上一轮结果共有 {len(result_context.items)} 人："
+            )
+            lines = [heading, *item_lines]
+        if not lines:
+            lines = ["上一轮结果已经没有剩余可补全的明细。" if operation == "continue" else "上一轮结果里没有可展开的结构化明细。"]
+        display_context = _result_context_with_display_window(
+            result_context,
+            start=start,
+            end=end,
+            limit=_DEFAULT_FOLLOWUP_PAGE_SIZE,
+            operation=operation,
+            projection=projection,
+        )
         return ComposedAnswer(
             answer="\n".join(lines),
-            result_context=result_context,
+            result_context=display_context,
             metadata=_followup_metadata(result_context, followup),
         )
 
     return ComposedAnswer(answer="上一轮结果里没有可展开的结构化明细，请重新查询一次。")
+
+
+def _is_people_result_context(result_context: ResultContext) -> bool:
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    return result_context.result_type in {"people_search", "department_members", "organization_snapshot"} or metadata.get("entity_domain") == "people"
+
+
+def _followup_display_window(result_context: ResultContext, followup: ResultFollowup) -> tuple[int, int, str]:
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    operation = str(followup.entity_ref.get("result_context_operation") or "expand")
+    if operation == "continue":
+        start = _safe_int(metadata.get("display_end"), default=0)
+    else:
+        start = 0
+    total = len(result_context.items)
+    start = min(max(start, 0), total)
+    end = min(start + _DEFAULT_FOLLOWUP_PAGE_SIZE, total)
+    return start, end, operation
+
+
+def _result_context_with_display_window(
+    result_context: ResultContext,
+    *,
+    start: int,
+    end: int,
+    limit: int,
+    operation: str,
+    projection: str = "",
+) -> ResultContext:
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    total = len(result_context.items)
+    projection = projection or str(metadata.get("field_projection") or "")
+    return ResultContext(
+        result_type=result_context.result_type,
+        query_id=result_context.query_id,
+        count=result_context.count or total,
+        items=result_context.items,
+        metadata={
+            **metadata,
+            "result_context_operation": operation,
+            "display_offset": start,
+            "display_end": end,
+            "display_limit": limit,
+            "has_more": end < total,
+            "field_projection": projection,
+            "result_context_presentation": "detail" if projection in {"detail", "name_only"} and total > 8 else metadata.get("result_context_presentation", ""),
+        },
+        answer=result_context.answer,
+    )
+
+
+def _safe_int(value: Any, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_people_followup(result_context, followup: ResultFollowup) -> str:
+    items = tuple(item for item in result_context.items if isinstance(item, dict))
+    filter_type = str(followup.entity_ref.get("filter") or "")
+    projection = str(followup.entity_ref.get("field_projection") or "")
+    if filter_type == "gender":
+        gender = str(followup.entity_ref.get("gender") or "")
+        label = "男性" if gender == "male" else "女性"
+        return _people_filtered_answer(items, f"能确认的{label}员工是 {len(items)} 位。", projection=projection, detail_label=f"{label}员工")
+    if filter_type == "department":
+        keyword = str(followup.entity_ref.get("keyword") or "").strip()
+        return _people_filtered_answer(items, f"「{keyword}」相关人员是 {len(items)} 人。", projection=projection, detail_label=f"「{keyword}」相关人员")
+    if filter_type == "title":
+        keyword = str(followup.entity_ref.get("keyword") or "").strip()
+        return _people_filtered_answer(items, f"岗位/职位包含「{keyword}」的人员是 {len(items)} 人。", projection=projection, detail_label=f"岗位/职位包含「{keyword}」的人员")
+    return _people_filtered_answer(items, f"这组结果共有 {len(items)} 人。", projection=projection, detail_label="这组人员")
+
+
+def _people_filtered_result_context(result_context, followup: ResultFollowup) -> ResultContext:
+    items = tuple(item for item in result_context.items if isinstance(item, dict))
+    filter_type = str(followup.entity_ref.get("filter") or "")
+    keyword = str(followup.entity_ref.get("keyword") or "").strip()
+    if filter_type == "gender":
+        gender = normalize_gender(followup.entity_ref.get("gender"))
+        filtered = tuple(item for item in items if _people_item_gender(item) == gender) if gender else ()
+    elif filter_type == "department":
+        filtered = filter_people_by_department(items, keyword)
+    elif filter_type == "title":
+        filtered = filter_people_by_title(items, keyword)
+    else:
+        filtered = items
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    return ResultContext(
+        result_type=result_context.result_type,
+        query_id=result_context.query_id,
+        count=len(filtered),
+        items=filtered,
+        metadata={
+            **people_context_metadata(capability=str(metadata.get("resolver_capability") or "people.filter")),
+            **metadata,
+            "context_kind": metadata.get("context_kind") or "query_result",
+            "people_filter": {key: value for key, value in followup.entity_ref.items() if key in {"filter", "gender", "keyword"}},
+            "result_context_operation": followup.entity_ref.get("result_context_operation") or "filter",
+            "field_projection": followup.entity_ref.get("field_projection") or "",
+            "result_context_presentation": "detail" if followup.entity_ref.get("field_projection") in {"detail", "name_only"} else "summary",
+            "parent_count": len(items),
+            "display_offset": 0,
+            "display_end": min(len(filtered), _PEOPLE_FOLLOWUP_PAGE_SIZE),
+            "display_limit": _PEOPLE_FOLLOWUP_PAGE_SIZE,
+            "has_more": len(filtered) > _PEOPLE_FOLLOWUP_PAGE_SIZE,
+        },
+        answer=result_context.answer,
+    )
+
+
+def _people_filtered_answer(items: tuple[dict[str, Any], ...], heading: str, *, projection: str = "", detail_label: str = "人员") -> str:
+    if projection == "count_only":
+        if not items:
+            return "没有匹配到人员。"
+        return heading
+    if not items:
+        return "没有匹配到人员。"
+    if projection in {"detail", "name_only"}:
+        return f"{heading} {detail_label}明细我放到侧边栏里，聊天里不展开长清单。"
+    return heading
+
+
+def _people_followup_lines(items: tuple[dict[str, Any], ...], *, limit: int = _PEOPLE_FOLLOWUP_PAGE_SIZE, projection: str = "") -> list[str]:
+    return [
+        f"{index}. {_format_projected_item(item, result_type='people_search', projection=projection)}"
+        for index, item in enumerate(items[:limit], start=1)
+    ]
+
+
+def _format_projected_item(item: dict, *, result_type: str = "", projection: str = "") -> str:
+    if projection == "name_only":
+        name = str(item.get("name") or item.get("title") or item.get("subject") or item.get("id") or "未知").strip()
+        return name or "未知"
+    if result_type in {"people_search", "department_members", "organization_snapshot"}:
+        return format_people_brief(item)
+    return _format_item(item, result_type=result_type)
+
+
+def _people_item_gender(item: dict[str, Any]) -> str:
+    if "gender_source" in item and str(item.get("gender_source") or "").strip() != "source":
+        return ""
+    return normalize_gender(item.get("gender_normalized") or item.get("gender"))
 
 
 def _format_followup_item_detail(
@@ -2889,6 +3288,8 @@ def _clarification_text(intent: IntentResult) -> str:
         labels = {"to": "收件邮箱", "subject": "主题", "body": "正文"}
         missing = [labels.get(key, key) for key in intent.missing_params]
         return f"创建邮件草稿还缺少：{', '.join(missing)}。我会先创建草稿，不会直接发送。"
+    if intent.intent == "message_send" and "delivery_mode" in intent.missing_params:
+        return "你想怎么发给这些人？可以说「用机器人通知这些人」「替我分别发给这些人」，或「拉群后发到群里」。"
     if intent.intent == "external_information_query":
         return "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。等联网能力开启后，可以查天气、新闻、官网资料、市场信息这些公开信息。"
     if intent.missing_params:
@@ -2929,6 +3330,7 @@ def _missing_param_label(param: str) -> str:
         "recipient": "接收人",
         "message": "消息内容",
         "target_type": "发送对象",
+        "delivery_mode": "发送方式",
         "text": "消息内容",
         "chat_id": "会话",
         "task_query_criteria": "要看的任务范围或条件",

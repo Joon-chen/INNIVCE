@@ -3,6 +3,18 @@ from uuid import uuid4
 
 from app.services.feishu import bot_runtime
 from app.services.feishu.identity import BotIdentity
+from app.services.runtime_v5.models import (
+    AnswerEnvelope,
+    ComposedAnswer,
+    ExecutionResult,
+    IntentResult,
+    PermissionDecision,
+    PlannerResult,
+    ResultContext,
+    RuntimeContext,
+    RuntimeIdentity,
+    RuntimeScope,
+)
 
 
 def test_actor_from_identity_preserves_permission_shape() -> None:
@@ -24,31 +36,82 @@ def test_actor_from_identity_preserves_permission_shape() -> None:
     assert actor.email == "sales@example.com"
 
 
-def test_employee_bot_answer_uses_company_agent_write_policy(monkeypatch) -> None:
+def test_conversation_actor_bridge_tolerates_legacy_identity_shape() -> None:
+    fallback = SimpleNamespace(
+        open_id="ou_1",
+        role="member",
+        access_scope="personal",
+        domains=(),
+        display_name="陈俊",
+    )
+    envelope = SimpleNamespace(context=None)
+
+    actor = bot_runtime._conversation_actor_from_envelope(envelope=envelope, fallback_identity=fallback)
+
+    assert actor.open_id == "ou_1"
+    assert actor.display_name == "陈俊"
+    assert actor.department_names == ()
+    assert actor.job_title == ""
+
+
+def _fake_runtime_envelope(company_id, answer: str = "ok", intent_entities: dict | None = None) -> AnswerEnvelope:
+    intent = IntentResult(
+        question_type="query",
+        intent="task_query",
+        data_scope="self",
+        entities=intent_entities or {},
+        confidence=0.9,
+    )
+    plan = PlannerResult(strategy="task_query", sources=("task_qa",))
+    return AnswerEnvelope(
+        context=RuntimeContext(
+            identity=RuntimeIdentity(open_id="ou_1", role="owner"),
+            runtime_scope=RuntimeScope(company_ids=(company_id,), active_company_id=company_id),
+            current_message="",
+        ),
+        intent=intent,
+        plan=plan,
+        permission=PermissionDecision(allowed=True, execution_identity="bot"),
+        execution=ExecutionResult(
+            strategy="task_query",
+            status="success",
+            provider_results=(),
+            result_context=ResultContext(result_type="task_query", count=1),
+        ),
+        composed=ComposedAnswer(
+            answer=answer,
+            result_context=ResultContext(result_type="task_query", count=1),
+        ),
+    )
+
+
+def _patch_runtime_v5_dependencies(monkeypatch, company_id, answer: str = "ok") -> None:
+    monkeypatch.setattr("app.services.feishu.bot_runtime.build_feishu_provider_registry", lambda **kwargs: {})
+    monkeypatch.setattr("app.services.feishu.bot_runtime.run_runtime_v5", lambda **kwargs: _fake_runtime_envelope(company_id, answer))
+    monkeypatch.setattr("app.services.feishu.bot_runtime.runtime_trace_summary", lambda envelope: {"strategy": envelope.plan.strategy, "sources": list(envelope.plan.sources)})
+    monkeypatch.setattr("app.services.feishu.bot_runtime.capability_summary", lambda: {})
+    monkeypatch.setattr("app.services.feishu.bot_runtime.provider_registry_diagnostics", lambda providers: {})
+    monkeypatch.setattr("app.services.feishu.bot_runtime.build_runtime_provider_snapshot", lambda providers: {})
+    monkeypatch.setattr("app.services.feishu.bot_runtime.runtime_v5_diagnostics_snapshot_base", lambda **kwargs: {})
+    monkeypatch.setattr("app.services.feishu.bot_runtime.load_result_context_events", lambda chat_id: [])
+    monkeypatch.setattr("app.services.feishu.bot_runtime.load_action_trace", lambda chat_id: None)
+    monkeypatch.setattr("app.services.feishu.bot_runtime.load_runtime_decision_trace", lambda chat_id: None)
+    monkeypatch.setattr("app.services.feishu.bot_runtime.record_runtime_decision_trace", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.services.feishu.bot_runtime.save_session_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.services.feishu.bot_runtime.save_result_context", lambda *args, **kwargs: None)
+
+
+def test_employee_bot_answer_uses_runtime_v5_mainline(monkeypatch) -> None:
     company_id = uuid4()
     captured = {}
 
-    def fake_get_settings(db, received_company_id):
-        assert received_company_id == company_id
-        return {
-            "settings": {
-                "planner_enabled": True,
-                "max_planner_steps": 4,
-                "allow_write_tools": False,
-                "require_write_confirmation": True,
-            }
-        }
+    def fake_run_runtime_v5(**kwargs):
+        captured["context"] = kwargs["context"]
+        captured["providers"] = kwargs["providers"]
+        return _fake_runtime_envelope(company_id)
 
-    def fake_answer_agent_message_with_trace(*args, **kwargs):
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(answer="ok", trace=SimpleNamespace())
-
-    monkeypatch.setattr("app.services.feishu.bot_runtime.get_company_agent_settings", fake_get_settings)
-    monkeypatch.setattr("app.services.feishu.bot_runtime.answer_agent_message_with_trace", fake_answer_agent_message_with_trace)
-    monkeypatch.setattr(
-        "app.services.feishu.bot_runtime.agent_runtime_result_payload",
-        lambda result: {"answer": result.answer, "trace": {"route_path": "company_qa", "steps": []}},
-    )
+    _patch_runtime_v5_dependencies(monkeypatch, company_id)
+    monkeypatch.setattr("app.services.feishu.bot_runtime.run_runtime_v5", fake_run_runtime_v5)
 
     reply = bot_runtime.employee_bot_answer(
         object(),
@@ -60,35 +123,15 @@ def test_employee_bot_answer_uses_company_agent_write_policy(monkeypatch) -> Non
     )
 
     assert reply == "ok"
-    assert captured["kwargs"]["company_id"] == company_id
-    assert captured["kwargs"]["planner_enabled"] is True
-    assert captured["kwargs"]["max_planner_steps"] == 4
-    assert captured["kwargs"]["allow_write_tools"] is False
-    assert captured["kwargs"]["require_write_confirmation"] is True
+    assert captured["context"].runtime_scope.active_company_id == company_id
+    assert captured["context"].identity.open_id == "ou_1"
+    assert captured["providers"] == {}
 
 
 def test_employee_bot_answer_result_exposes_trace_payload(monkeypatch) -> None:
     company_id = uuid4()
 
-    monkeypatch.setattr(
-        "app.services.feishu.bot_runtime.get_company_agent_settings",
-        lambda db, received_company_id: {
-            "settings": {
-                "planner_enabled": False,
-                "max_planner_steps": 3,
-                "allow_write_tools": True,
-                "require_write_confirmation": True,
-            }
-        },
-    )
-    monkeypatch.setattr(
-        "app.services.feishu.bot_runtime.answer_agent_message_with_trace",
-        lambda *args, **kwargs: SimpleNamespace(answer="公司摘要", trace=SimpleNamespace()),
-    )
-    monkeypatch.setattr(
-        "app.services.feishu.bot_runtime.agent_runtime_result_payload",
-        lambda result: {"answer": result.answer, "trace": {"route_path": "company_qa", "route_label": "公司级问答", "steps": []}},
-    )
+    _patch_runtime_v5_dependencies(monkeypatch, company_id, answer="公司摘要")
 
     result = bot_runtime.employee_bot_answer_result(
         object(),
@@ -100,8 +143,49 @@ def test_employee_bot_answer_result_exposes_trace_payload(monkeypatch) -> None:
     )
 
     assert result.answer == "公司摘要"
-    assert result.trace_payload["route_path"] == "company_qa"
-    assert result.trace_payload["route_label"] == "公司级问答"
+    assert result.trace_payload["route_path"] == "feishu_task_query"
+    assert result.trace_payload["route_label"] == "任务查询"
+
+
+def test_employee_bot_answer_persists_profile_update_candidate(monkeypatch) -> None:
+    company_id = uuid4()
+    captured = {}
+
+    _patch_runtime_v5_dependencies(monkeypatch, company_id)
+    monkeypatch.setattr(
+        "app.services.feishu.bot_runtime.run_runtime_v5",
+        lambda **kwargs: _fake_runtime_envelope(
+            company_id,
+            intent_entities={
+                "profile_update_candidate": {
+                    "preferred_address": "陈总",
+                    "avoid_direct_name": True,
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.profile_context.apply_profile_update",
+        lambda open_id, update: captured.update({"open_id": open_id, "update": update}) or dict(update),
+    )
+
+    result = bot_runtime.employee_bot_answer_result(
+        object(),
+        SimpleNamespace(company_id=company_id),
+        question="以后叫我陈总",
+        normalized="以后叫我陈总",
+        identity=BotIdentity(open_id="ou_1", role="owner", access_scope="company", domains=("all",)),
+        chat_id="oc_1",
+    )
+
+    assert result.answer == "ok"
+    assert captured == {
+        "open_id": "ou_1",
+        "update": {
+            "preferred_address": "陈总",
+            "avoid_direct_name": True,
+        },
+    }
 
 
 def test_reply_scope_and_route_parse_standard_prefixes() -> None:
@@ -116,4 +200,3 @@ def test_reply_scope_and_route_parse_explicit_labels() -> None:
 
     assert bot_runtime.reply_scope_value(reply) == "当前会话"
     assert bot_runtime.reply_route_value(reply) == "员工助理"
-

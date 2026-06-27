@@ -20,7 +20,7 @@ def presentation_llm_rewrite(context: PresentationLLMContext) -> str:
     """Rewrite answer wording without changing facts, counts, status, or permissions."""
     prompt = presentation_prompt(context)
     try:
-        rewritten = (LLMGateway().complete_text(prompt, temperature=0.3) or "").strip()
+        rewritten = (LLMGateway().complete_task_text(prompt, task_type="presentation", temperature=0.3) or "").strip()
     except Exception:
         return context.original_answer
     if not valid_presentation_rewrite(
@@ -54,6 +54,8 @@ def presentation_prompt(context: PresentationLLMContext) -> str:
 def valid_presentation_rewrite(*, original: str, rewritten: str) -> bool:
     if not rewritten:
         return False
+    if not _presentation_scaffold_ok(rewritten):
+        return False
     if len(rewritten) > max(len(original) * 2, 1200):
         return False
     if not _count_integrity_ok(original=original, rewritten=rewritten):
@@ -61,6 +63,17 @@ def valid_presentation_rewrite(*, original: str, rewritten: str) -> bool:
     if not _status_boundary_ok(original=original, rewritten=rewritten):
         return False
     return True
+
+
+def _presentation_scaffold_ok(rewritten: str) -> bool:
+    forbidden = (
+        "改写后的答案",
+        "以下是改写",
+        "收到你的要求",
+        "原答案",
+        "输出改写",
+    )
+    return not any(text in rewritten for text in forbidden)
 
 
 def _count_integrity_ok(*, original: str, rewritten: str) -> bool:

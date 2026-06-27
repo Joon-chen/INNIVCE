@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import re
+
+from app.services.runtime_v5.conversation_state import ConversationState
+
+
+@dataclass(frozen=True)
+class ConversationHints:
+    """Deterministic signals for Conversation First understanding.
+
+    Hints are not routing decisions. They only make stable, auditable facts
+    available to Semantic Understanding and DialogueResolver.
+    """
+
+    domain_hint: str = ""
+    operation_hint: str = ""
+    requested_output_hint: str = ""
+    target_hint: str = ""
+    scope_hint: str = ""
+    is_confirmation_word: bool = False
+    is_cancel_word: bool = False
+    is_followup_reference: bool = False
+    is_action_request: bool = False
+    keywords: tuple[str, ...] = ()
+    text_compact: str = ""
+
+
+_CONFIRMATION_WORDS = {"是", "是的", "对", "对的", "确认", "可以", "好的", "嗯"}
+_CANCEL_WORDS = {"不用", "不用了", "取消", "算了", "先不用", "不要了"}
+_FOLLOWUP_MARKERS = ("呢", "他", "她", "哪个", "哪些", "哪", "那个", "那位", "这个", "这些", "那些", "刚才", "上面", "继续", "展开", "补全", "全部", "第")
+_ACTION_MARKERS = ("发给", "发送", "发消息", "发到", "通知", "拉群", "建群", "发邮件", "群发")
+_KNOWLEDGE_MARKERS = (
+    "公司是做什么",
+    "主营业务",
+    "业务介绍",
+    "公司介绍",
+    "制度",
+    "流程",
+    "文档",
+    "资料",
+    "知识库",
+    "云文档",
+)
+_PEOPLE_MARKERS = (
+    "多少人",
+    "男生",
+    "男性",
+    "女生",
+    "女性",
+    "电话",
+    "手机号",
+    "号码",
+    "邮箱",
+    "职位",
+    "岗位",
+    "通讯录",
+    "名单",
+    "人员",
+    "工程师",
+    "部门",
+)
+
+
+def build_conversation_hints(message: str, state: ConversationState) -> ConversationHints:
+    text = str(message or "").strip()
+    compact = re.sub(r"\s+", "", text)
+    keywords = _keywords(compact)
+    domain_hint = _domain_hint(compact=compact, state=state)
+    return ConversationHints(
+        domain_hint=domain_hint,
+        operation_hint=_operation_hint(compact=compact, state=state),
+        requested_output_hint=_requested_output_hint(compact=compact),
+        target_hint=_target_hint(text=text, compact=compact),
+        scope_hint=_scope_hint(compact=compact, state=state),
+        is_confirmation_word=compact in _CONFIRMATION_WORDS,
+        is_cancel_word=compact in _CANCEL_WORDS,
+        is_followup_reference=_is_followup_reference(compact=compact, state=state),
+        is_action_request=any(marker in compact for marker in _ACTION_MARKERS),
+        keywords=keywords,
+        text_compact=compact,
+    )
+
+
+def _domain_hint(*, compact: str, state: ConversationState) -> str:
+    if compact.startswith(("你知道我", "我在这个公司", "我现在在这个公司")):
+        return "Conversation"
+    if any(marker in compact for marker in _KNOWLEDGE_MARKERS):
+        return "Knowledge"
+    if any(marker in compact for marker in _ACTION_MARKERS):
+        return "Communication"
+    if any(marker in compact for marker in _PEOPLE_MARKERS) or _looks_like_named_person_question(compact):
+        return "People"
+    if "部" in compact and any(token in compact for token in ("多少", "哪些", "有哪些", "人", "名单")):
+        return "People"
+    if _is_followup_reference(compact=compact, state=state) and state.active_domain:
+        return state.active_domain
+    return ""
+
+
+def _operation_hint(*, compact: str, state: ConversationState) -> str:
+    if compact in _CANCEL_WORDS:
+        return "cancel"
+    if compact in _CONFIRMATION_WORDS:
+        return "confirm"
+    if any(token in compact for token in _ACTION_MARKERS):
+        return "action_request"
+    if compact in {"继续", "展开", "补全", "全部显示", "全部展示", "全部名单", "全部列出"} and state.previous_result_reference.result_type:
+        return "followup" if compact == "继续" else "list"
+    if any(token in compact for token in ("公司是做什么", "主营业务", "公司介绍")):
+        return "company_profile"
+    if any(token in compact for token in ("制度", "流程", "文档", "资料", "知识库")):
+        return "knowledge_query"
+    if any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "是男是女", "性别")):
+        return "field_lookup"
+    if any(token in compact for token in ("哪", "名单", "列出", "展开", "全部", "补全", "继续")):
+        return "list"
+    if any(token in compact for token in ("多少人", "多少", "几个人", "几位", "数量", "男生", "男性", "女生", "女性")):
+        return "count"
+    if state.previous_result_reference.collection_type and _is_followup_reference(compact=compact, state=state):
+        return "followup"
+    return "ask"
+
+
+def _requested_output_hint(*, compact: str) -> str:
+    if any(token in compact for token in ("只回数字", "只回答数字", "只要数字", "只需数字", "只说数字", "数字就行")):
+        return "numeric_only"
+    if any(token in compact for token in ("只回答", "只要", "不用详情", "不需要详情", "只说")):
+        return "short_answer"
+    if any(token in compact for token in ("哪", "名单", "明细", "全部", "列出", "展示", "展开", "补全", "侧边栏")):
+        return "sidepanel"
+    if any(token in compact for token in ("多少", "几位", "数量")):
+        return "count"
+    return "natural_text"
+
+
+def _target_hint(*, text: str, compact: str) -> str:
+    if any(token in compact for token in ("男生", "男性")):
+        return "male"
+    if any(token in compact for token in ("女生", "女性")):
+        return "female"
+    for field in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "性别"):
+        if field in compact:
+            return field
+    match = re.search(r"[\u4e00-\u9fff]{2,4}", text)
+    return match.group(0) if match else ""
+
+
+def _scope_hint(*, compact: str, state: ConversationState) -> str:
+    if any(token in compact for token in ("部门", "组")) or ("部" in compact and any(token in compact for token in ("多少", "哪些", "哪些人", "有哪些", "人"))):
+        return "department"
+    if any(token in compact for token in ("公司", "通讯录", "全员")):
+        return "organization"
+    if state.previous_result_reference.collection_type and _is_followup_reference(compact=compact, state=state):
+        return state.previous_result_reference.collection_type
+    if _looks_like_named_person_question(compact):
+        return "person"
+    return ""
+
+
+def _keywords(compact: str) -> tuple[str, ...]:
+    words: list[str] = []
+    for token in (*_PEOPLE_MARKERS, *_KNOWLEDGE_MARKERS, *_ACTION_MARKERS):
+        if token in compact and token not in words:
+            words.append(token)
+    return tuple(words)
+
+
+def _is_followup_reference(*, compact: str, state: ConversationState) -> bool:
+    if not state.active_domain and not state.previous_result_reference.result_type:
+        return False
+    return any(marker in compact for marker in _FOLLOWUP_MARKERS) or compact in _CONFIRMATION_WORDS
+
+
+def _looks_like_named_person_question(compact: str) -> bool:
+    if any(token in compact for token in ("公司", "部门", "我们", "你", "我")):
+        return False
+    return bool(re.search(r"^[\u4e00-\u9fff]{2,4}(的)?(电话|手机号|号码|邮箱|职位|岗位|性别|是男是女)", compact))

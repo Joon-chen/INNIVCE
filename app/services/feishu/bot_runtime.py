@@ -1,6 +1,8 @@
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from time import perf_counter
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -10,7 +12,14 @@ from app.core.config import settings
 from app.services.agent.policies import BotActor
 from app.services.feishu.cli_profile import feishu_app_cli_profile
 from app.services.feishu.identity import BotIdentity
-from app.services.runtime_v5.action_observer import load_action_trace, load_runtime_decision_trace, record_action_trace, record_runtime_decision_trace
+from app.services.runtime_v5.action_observer import (
+    load_action_trace,
+    load_route_observation_trace,
+    load_runtime_decision_trace,
+    record_action_trace,
+    record_runtime_decision_trace,
+    route_observation_summary,
+)
 from app.services.runtime_v5.capabilities import capabilities_for_strategy, capability_summary, label_for_strategy, route_path_for_result
 from app.services.runtime_v5.context import build_runtime_context, load_result_context_events, load_session_context, save_result_context, save_session_context
 from app.services.runtime_v5.diagnostics import provider_registry_diagnostics, runtime_trace_summary
@@ -19,7 +28,11 @@ from app.services.runtime_v5.bot_diagnostics import runtime_v5_diagnostics_snaps
 from app.services.runtime_v5.bot_trace import runtime_v5_bot_trace_payload, runtime_v5_disabled_trace_payload
 from app.services.runtime_v5.feishu_resource_providers import build_feishu_provider_registry
 from app.services.runtime_v5.models import ResultContext
+from app.services.runtime_v5.response_classification import classify_response_request
+from app.services.runtime_v5.response_orchestration import build_response_policy
 from app.services.runtime_v5.runtime import run_runtime_v5
+from app.services.organization_foundation import resolve_policy_subject_from_organization
+from app.services.llm.call_budget import current_llm_call_budget_summary, foreground_user_turn_budget
 from app.services.llm.answer_rewriter import rewrite_bot_answer
 
 _APPROVAL_BATCH_SELECTION_KEY = "runtime_v5_approval_batch_selection"
@@ -70,12 +83,27 @@ def employee_bot_answer_result(
     identity: BotIdentity,
     chat_id: str | None,
 ) -> BotRuntimeAnswer:
+    with foreground_user_turn_budget():
+        return _employee_bot_answer_result(db, app_config, question, normalized, identity, chat_id)
+
+
+def _employee_bot_answer_result(
+    db: Session,
+    app_config: FeishuAppConfig,
+    question: str,
+    normalized: str,
+    identity: BotIdentity,
+    chat_id: str | None,
+) -> BotRuntimeAnswer:
+    response_started = perf_counter()
     if settings.feishu_bot_runtime_v5_enabled:
+        runtime_started = perf_counter()
         runtime_context = build_runtime_context(
             message=question,
             identity=identity,
             company_id=app_config.company_id,
             chat_id=chat_id,
+            organization_subject=_organization_subject_for_runtime(db, app_config=app_config, identity=identity),
         )
         providers = build_feishu_provider_registry(
             db=db,
@@ -85,6 +113,8 @@ def employee_bot_answer_result(
             context=runtime_context,
             providers=providers,
         )
+        runtime_duration_ms = _elapsed_ms(runtime_started)
+        diagnostics_started = perf_counter()
         route_path = _runtime_v5_route_path(envelope)
         route_label = _runtime_v5_route_label(envelope)
         requires_confirmation = bool(envelope.composed.metadata.get("requires_confirmation"))
@@ -95,6 +125,7 @@ def employee_bot_answer_result(
         capability = capability_summary()
         provider_registry = provider_registry_diagnostics(providers)
         runtime_provider_snapshot = build_runtime_provider_snapshot(providers)
+        route_observation_trace = load_route_observation_trace(chat_id)
         current_capability_readiness = _current_capability_readiness(
             strategy=str(runtime_summary.get("strategy") or ""),
             sources=tuple(str(source) for source in (runtime_summary.get("sources") if isinstance(runtime_summary.get("sources"), list) else []) if str(source)),
@@ -114,6 +145,8 @@ def employee_bot_answer_result(
             runtime_provider_snapshot=runtime_provider_snapshot,
             action_trace=_runtime_action_trace(chat_id),
             decision_trace=_runtime_decision_trace(chat_id),
+            route_observation_trace=route_observation_trace,
+            route_observation_summary=route_observation_summary(route_observation_trace),
         )
         _apply_current_capability_readiness_to_snapshot(diagnostics_snapshot)
         _apply_source_execution_contract_to_snapshot(diagnostics_snapshot)
@@ -137,6 +170,8 @@ def employee_bot_answer_result(
             chat_id,
             diagnostics_snapshot,
         )
+        diagnostics_duration_ms = _elapsed_ms(diagnostics_started)
+        answer_started = perf_counter()
         answer = envelope.composed.answer
         if envelope.intent.intent == "runtime_status":
             answer = _runtime_status_answer_from_snapshot(
@@ -155,6 +190,28 @@ def employee_bot_answer_result(
                 envelope=envelope,
                 chat_id=chat_id,
             )
+        answer_duration_ms = _elapsed_ms(answer_started)
+        refreshed_runtime_summary = runtime_trace_summary(envelope)
+        diagnostics_snapshot["llm_trace_summary"] = refreshed_runtime_summary.get(
+            "llm_trace_summary",
+            diagnostics_snapshot.get("llm_trace_summary", {}),
+        )
+        diagnostics_snapshot["llm_call_budget"] = current_llm_call_budget_summary()
+        diagnostics_snapshot["foreground_llm_call_audit"] = _foreground_llm_call_audit(
+            diagnostics_snapshot["llm_call_budget"],
+        )
+        diagnostics_snapshot["bot_response_timing"] = _bot_response_timing_summary(
+            total_ms=_elapsed_ms(response_started),
+            runtime_ms=runtime_duration_ms,
+            diagnostics_ms=diagnostics_duration_ms,
+            answer_ms=answer_duration_ms,
+            diagnostics_snapshot=diagnostics_snapshot,
+        )
+        _save_runtime_diagnostics_snapshot(
+            chat_id,
+            diagnostics_snapshot,
+        )
+        _persist_profile_update_from_envelope(identity=identity, envelope=envelope)
         return BotRuntimeAnswer(
             answer=answer,
             trace_payload=runtime_v5_bot_trace_payload(
@@ -176,6 +233,95 @@ def employee_bot_answer_result(
     )
 
 
+def _organization_subject_for_runtime(db: Session, *, app_config: FeishuAppConfig, identity: BotIdentity) -> dict[str, Any]:
+    open_id = str(identity.open_id or "").strip()
+    if not open_id:
+        return {}
+    try:
+        return resolve_policy_subject_from_organization(
+            db,
+            company_id=app_config.company_id,
+            open_id=open_id,
+        )
+    except Exception:
+        return {}
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((perf_counter() - started) * 1000)
+
+
+def _bot_response_timing_summary(
+    *,
+    total_ms: int,
+    runtime_ms: int,
+    diagnostics_ms: int,
+    answer_ms: int,
+    diagnostics_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    llm_trace = diagnostics_snapshot.get("llm_trace_summary") if isinstance(diagnostics_snapshot.get("llm_trace_summary"), dict) else {}
+    provider_summary = diagnostics_snapshot.get("provider_summary") if isinstance(diagnostics_snapshot.get("provider_summary"), dict) else {}
+    phases = [
+        {"phase": "runtime", "duration_ms": runtime_ms},
+        {"phase": "diagnostics", "duration_ms": diagnostics_ms},
+        {"phase": "answer", "duration_ms": answer_ms},
+    ]
+    slowest = max(phases, key=lambda item: int(item.get("duration_ms") or 0), default={})
+    return {
+        "available": True,
+        "total_ms": total_ms,
+        "phases": phases,
+        "slowest_phase": slowest.get("phase", ""),
+        "slowest_phase_ms": int(slowest.get("duration_ms") or 0),
+        "llm_total_ms": int(llm_trace.get("total_duration_ms") or 0),
+        "llm_call_count": int(llm_trace.get("call_count") or 0),
+        "provider_total_ms": int(provider_summary.get("total_duration_ms") or 0),
+    }
+
+
+def _foreground_llm_call_audit(budget: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(budget, dict) or not budget.get("available"):
+        return {"available": False, "status": "not_recorded", "label": "未记录"}
+    calls = budget.get("calls") if isinstance(budget.get("calls"), list) else []
+    denied = budget.get("denied") if isinstance(budget.get("denied"), list) else []
+    try:
+        max_calls = int(budget.get("max_calls") or 0)
+        used_calls = int(budget.get("used_calls") or len(calls))
+        denied_calls = int(budget.get("denied_calls") or len(denied))
+    except (TypeError, ValueError):
+        max_calls = used_calls = denied_calls = 0
+    attempted_calls = used_calls + denied_calls
+    status = "healthy"
+    label = "正常"
+    if denied_calls:
+        status = "budget_denied"
+        label = "有调用被预算拒绝"
+    elif attempted_calls > max_calls:
+        status = "repeated_attempt"
+        label = "出现重复调用企图"
+    call_tasks = [
+        str(item.get("task_type") or "")
+        for item in calls
+        if isinstance(item, dict) and str(item.get("task_type") or "")
+    ]
+    denied_tasks = [
+        str(item.get("task_type") or "")
+        for item in denied
+        if isinstance(item, dict) and str(item.get("task_type") or "")
+    ]
+    return {
+        "available": True,
+        "status": status,
+        "label": label,
+        "max_calls": max_calls,
+        "used_calls": used_calls,
+        "denied_calls": denied_calls,
+        "attempted_calls": attempted_calls,
+        "call_tasks": call_tasks[:5],
+        "denied_tasks": denied_tasks[:5],
+    }
+
+
 def _rewrite_runtime_v5_answer(
     *,
     answer: str,
@@ -186,15 +332,9 @@ def _rewrite_runtime_v5_answer(
     envelope: Any,
     chat_id: str | None,
 ) -> str:
-    if not _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer=answer):
+    if not _runtime_v5_answer_rewrite_allowed(envelope=envelope, answer=answer, question=question):
         return answer
-    actor = BotActor(
-        open_id=identity.open_id,
-        role=identity.role,
-        access_scope=identity.access_scope,
-        domains=tuple(identity.domains or ()),
-        display_name=identity.display_name,
-    )
+    actor = _conversation_actor_from_envelope(envelope=envelope, fallback_identity=identity)
     return rewrite_bot_answer(
         question=question,
         answer=answer,
@@ -207,30 +347,96 @@ def _rewrite_runtime_v5_answer(
     )
 
 
-def _runtime_v5_answer_rewrite_allowed(*, envelope: Any, answer: str) -> bool:
+def _conversation_actor_from_envelope(*, envelope: Any, fallback_identity: BotIdentity) -> Any:
+    runtime_identity = getattr(getattr(envelope, "context", None), "identity", None)
+    return SimpleNamespace(
+        open_id=str(getattr(runtime_identity, "open_id", "") or fallback_identity.open_id or ""),
+        role=str(getattr(runtime_identity, "role", "") or fallback_identity.role or ""),
+        access_scope=str(getattr(fallback_identity, "access_scope", "") or ""),
+        domains=tuple(getattr(runtime_identity, "domains", ()) or fallback_identity.domains or ()),
+        display_name=str(getattr(runtime_identity, "display_name", "") or fallback_identity.display_name or ""),
+        email=str(getattr(runtime_identity, "email", "") or getattr(fallback_identity, "email", "") or ""),
+        department_names=tuple(getattr(runtime_identity, "department_names", ()) or getattr(fallback_identity, "department_names", ()) or ()),
+        job_title=str(getattr(runtime_identity, "job_title", "") or getattr(fallback_identity, "job_title", "") or ""),
+    )
+
+
+def _runtime_v5_answer_rewrite_allowed(*, envelope: Any, answer: str, question: str = "") -> bool:
     if not settings.bot_llm_answer_rewrite_enabled:
         return False
     if not str(answer or "").strip():
         return False
-    intent = str(getattr(envelope.intent, "intent", "") or "")
-    result_type = str(getattr(getattr(envelope, "composed", None), "result_context", None).result_type if getattr(getattr(envelope, "composed", None), "result_context", None) else "")
-    blocked_intents = {"runtime_status", "governance_view", "action_trace"}
-    blocked_result_types = {
-        "runtime_pending_confirmation",
-        "runtime_waiting_input",
-        "waiting_authorization",
-        "runtime_action",
-        "approval_approve",
-        "approval_reject",
-        "task_complete",
-        "task_create",
-        "calendar_create",
-    }
-    if intent in blocked_intents or result_type in blocked_result_types:
+    output_contract = _runtime_v5_output_contract(envelope)
+    if output_contract.get("mode") == "numeric_only" or output_contract.get("surface") == "sidepanel":
         return False
-    if any(text in answer for text in ("操作确认", "请先完成飞书用户授权", "请回复", "缺少公司上下文")):
+    intent = str(getattr(envelope.intent, "intent", "") or "")
+    if intent == "smalltalk" and _runtime_v5_uses_command_draft_reply(envelope):
+        return False
+    result_type = str(getattr(getattr(envelope, "composed", None), "result_context", None).result_type if getattr(getattr(envelope, "composed", None), "result_context", None) else "")
+    classification = classify_response_request(question=question, answer=answer, intent=intent, result_type=result_type)
+    if classification.response_class == "fact" and not (intent == "smalltalk" and classification.fact_kind in {"identity", "assistant_identity", "emoji"}):
+        return False
+    data_scope = str(getattr(envelope.intent, "data_scope", "") or "")
+    response_policy = _runtime_v5_response_policy(envelope=envelope, answer=answer)
+    if response_policy and not bool(response_policy.get("llm_allowed")):
+        return False
+    if response_policy:
+        return True
+    if _runtime_v5_fast_response_result(result_type=result_type, answer=answer, data_scope=data_scope):
         return False
     return True
+
+
+def _runtime_v5_output_contract(envelope: Any) -> dict[str, Any]:
+    intent = getattr(envelope, "intent", None)
+    entities = getattr(intent, "entities", None)
+    if not isinstance(entities, dict):
+        return {}
+    frame = entities.get("command_frame") if isinstance(entities.get("command_frame"), dict) else {}
+    params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+    contract = params.get("output_contract") if isinstance(params.get("output_contract"), dict) else {}
+    return contract
+
+
+def _runtime_v5_uses_command_draft_reply(envelope: Any) -> bool:
+    entities = getattr(getattr(envelope, "intent", None), "entities", None)
+    if not isinstance(entities, dict):
+        return False
+    if not str(entities.get("fallback_answer") or entities.get("draft_response_hint") or "").strip():
+        return False
+    trace = entities.get("command_intent_trace") if isinstance(entities.get("command_intent_trace"), dict) else {}
+    return trace.get("source") == "llm"
+
+
+def _runtime_v5_response_policy(*, envelope: Any, answer: str) -> dict[str, Any]:
+    metadata = getattr(getattr(envelope, "composed", None), "metadata", None)
+    runtime_result = metadata.get("runtime_result") if isinstance(metadata, dict) and isinstance(metadata.get("runtime_result"), dict) else {}
+    runtime_metadata = runtime_result.get("metadata") if isinstance(runtime_result.get("metadata"), dict) else {}
+    response_policy = runtime_metadata.get("response_policy") if isinstance(runtime_metadata.get("response_policy"), dict) else {}
+    if response_policy:
+        return response_policy
+    intent = str(getattr(envelope.intent, "intent", "") or "")
+    result_context = getattr(getattr(envelope, "composed", None), "result_context", None)
+    return build_response_policy(
+        intent=intent,
+        result_type=str(getattr(result_context, "result_type", "") or ""),
+        data_scope=str(getattr(envelope.intent, "data_scope", "") or ""),
+        answer=answer,
+        question_type=str(getattr(envelope.intent, "question_type", "") or ""),
+        requires_confirmation=bool(getattr(getattr(envelope, "permission", None), "requires_confirmation", False)),
+    )
+
+
+def _runtime_v5_fast_response_result(*, result_type: str, answer: str, data_scope: str) -> bool:
+    if result_type.endswith("_list") or result_type.endswith("_detail") or result_type.endswith("_empty"):
+        return True
+    if result_type in {"workspace_aggregation_summary", "waiting_authorization"}:
+        return True
+    if data_scope in {"company", "department", "person"} and any(
+        text in answer for text in ("未接入", "没有接入", "没有权限", "不能生成", "不会改用")
+    ):
+        return True
+    return False
 
 
 def employee_bot_approval_fast_answer_result(
@@ -1229,6 +1435,10 @@ def _runtime_status_summary_answer_from_snapshot(snapshot: dict[str, Any]) -> st
         "关键状态",
         f"- 主链路：{pipeline_issue_count} 个问题",
         f"- 能力源：{provider_available_count} 类可用，异常：{provider_abnormal}",
+        f"- {_runtime_status_llm_line(snapshot)}",
+        f"- {_runtime_status_foreground_llm_audit_line(snapshot)}",
+        f"- {_runtime_status_llm_prompt_line(snapshot)}",
+        f"- {_runtime_status_bot_response_timing_line(snapshot)}",
         f"- 上下文：{result_context_quality.get('label') or result_context_quality.get('status') or '未生成'}",
         f"- 动作闭环：{action_status}",
     ]
@@ -1363,6 +1573,10 @@ def _runtime_status_detail_answer_from_snapshot(snapshot: dict[str, Any]) -> str
         f"- 可用：{'、'.join(provider_labels.get('available', [])) or '无'}",
         f"- 异常：{'、'.join(provider_labels.get('abnormal', [])) or '无'}",
         f"- 规划快照：{_human_runtime_label(planner_snapshot_contract.get('label') or planner_snapshot_contract.get('status') or '未生成')}",
+        f"- {_runtime_status_llm_line(snapshot)}",
+        f"- {_runtime_status_foreground_llm_audit_line(snapshot)}",
+        f"- {_runtime_status_llm_prompt_line(snapshot)}",
+        f"- {_runtime_status_bot_response_timing_line(snapshot)}",
         "",
         "四、执行与上下文",
         f"- 能力执行：成功 {provider_summary.get('success_count', 0)}，失败 {provider_summary.get('error_count', 0)}，无权限 {provider_summary.get('denied_count', 0)}，总耗时 {provider_summary.get('total_duration_ms', 0)}ms",
@@ -1502,6 +1716,202 @@ def _runtime_status_planner_snapshot_line(contract: dict[str, Any]) -> str:
         f"｜阻断 {contract.get('blocked_operation_count', 0)}"
         f"｜异常：{issue_text}。"
     )
+
+
+def _runtime_status_llm_line(snapshot: dict[str, Any]) -> str:
+    llm_trace = snapshot.get("llm_trace_summary") if isinstance(snapshot.get("llm_trace_summary"), dict) else {}
+    if not llm_trace.get("available"):
+        return "LLM 路由：本轮未调用"
+    latest = llm_trace.get("latest") if isinstance(llm_trace.get("latest"), dict) else {}
+    providers = llm_trace.get("providers") if isinstance(llm_trace.get("providers"), list) else []
+    lanes = llm_trace.get("lanes") if isinstance(llm_trace.get("lanes"), list) else []
+    task_types = llm_trace.get("task_types") if isinstance(llm_trace.get("task_types"), list) else []
+    provider = str(latest.get("provider") or (providers[0] if providers else "") or "未知")
+    model = str(latest.get("model") or "未知模型")
+    lane = str(latest.get("lane") or (lanes[0] if lanes else "") or "未知 lane")
+    task_type = str(latest.get("task_type") or (task_types[0] if task_types else "") or "未知任务")
+    status = str(latest.get("status") or "unknown")
+    status_label = {
+        "success": "成功",
+        "failed": "失败",
+        "error": "失败",
+        "skipped": "跳过",
+        "budget_denied": "预算拒绝",
+        "unknown": "未知",
+    }.get(status, status)
+    try:
+        duration_ms = int(latest.get("duration_ms") or llm_trace.get("total_duration_ms") or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    fallback_used = bool(latest.get("fallback_used") or llm_trace.get("fallback_used"))
+    fallback_label = "发生" if fallback_used else "未发生"
+    try:
+        call_count = int(llm_trace.get("call_count") or 0)
+    except (TypeError, ValueError):
+        call_count = 0
+    budget = snapshot.get("llm_call_budget") if isinstance(snapshot.get("llm_call_budget"), dict) else {}
+    budget_label = ""
+    if budget.get("available"):
+        try:
+            max_calls = int(budget.get("max_calls") or 0)
+            used_calls = int(budget.get("used_calls") or 0)
+            denied_calls = int(budget.get("denied_calls") or 0)
+        except (TypeError, ValueError):
+            max_calls = used_calls = denied_calls = 0
+        budget_label = f"｜预算 {used_calls}/{max_calls}，拒绝 {denied_calls}"
+    return (
+        "LLM 路由："
+        f"{provider}/{model}"
+        f"｜lane {lane}"
+        f"｜任务 {task_type}"
+        f"｜状态 {status_label}"
+        f"｜耗时 {duration_ms}ms"
+        f"｜调用 {call_count}"
+        f"｜fallback {fallback_label}"
+        f"{budget_label}"
+    )
+
+
+def _runtime_status_bot_response_timing_line(snapshot: dict[str, Any]) -> str:
+    latency_trace = snapshot.get("response_latency_trace") if isinstance(snapshot.get("response_latency_trace"), dict) else {}
+    if latency_trace.get("available"):
+        return _runtime_status_response_latency_trace_line(latency_trace)
+    timing = snapshot.get("bot_response_timing") if isinstance(snapshot.get("bot_response_timing"), dict) else {}
+    if not timing.get("available"):
+        return "响应耗时：未记录"
+    try:
+        total_ms = int(timing.get("total_ms") or 0)
+        slowest_ms = int(timing.get("slowest_phase_ms") or 0)
+        llm_total_ms = int(timing.get("llm_total_ms") or 0)
+        provider_total_ms = int(timing.get("provider_total_ms") or 0)
+    except (TypeError, ValueError):
+        total_ms = slowest_ms = llm_total_ms = provider_total_ms = 0
+    phases = timing.get("phases") if isinstance(timing.get("phases"), list) else []
+    phase_map: dict[str, int] = {}
+    for item in phases:
+        if not isinstance(item, dict):
+            continue
+        phase = str(item.get("phase") or "")
+        if not phase:
+            continue
+        try:
+            phase_map[phase] = int(item.get("duration_ms") or 0)
+        except (TypeError, ValueError):
+            phase_map[phase] = 0
+    slowest_phase = _runtime_response_phase_label(str(timing.get("slowest_phase") or ""))
+    return (
+        "响应耗时："
+        f"总 {total_ms}ms"
+        f"｜最慢 {slowest_phase} {slowest_ms}ms"
+        f"｜Runtime {phase_map.get('runtime', 0)}ms"
+        f"｜答案 {phase_map.get('answer', 0)}ms"
+        f"｜LLM {llm_total_ms}ms"
+        f"｜Provider {provider_total_ms}ms"
+    )
+
+
+def _runtime_status_response_latency_trace_line(latency_trace: dict[str, Any]) -> str:
+    try:
+        total_ms = int(latency_trace.get("total_ms") or 0)
+        gateway_total_ms = int(latency_trace.get("gateway_total_ms") or 0)
+        runtime_total_ms = int(latency_trace.get("runtime_total_ms") or 0)
+        slowest_ms = int(latency_trace.get("slowest_phase_ms") or 0)
+    except (TypeError, ValueError):
+        total_ms = gateway_total_ms = runtime_total_ms = slowest_ms = 0
+    phases = latency_trace.get("phases") if isinstance(latency_trace.get("phases"), list) else []
+    phase_map: dict[str, int] = {}
+    for item in phases:
+        if not isinstance(item, dict):
+            continue
+        phase = str(item.get("phase") or "")
+        if not phase:
+            continue
+        try:
+            phase_map[phase] = phase_map.get(phase, 0) + int(item.get("duration_ms") or 0)
+        except (TypeError, ValueError):
+            phase_map.setdefault(phase, 0)
+    slowest_phase = _runtime_response_phase_label(str(latency_trace.get("slowest_phase") or ""))
+    return (
+        "响应耗时："
+        f"总 {total_ms}ms"
+        f"｜最慢 {slowest_phase} {slowest_ms}ms"
+        f"｜Runtime {runtime_total_ms}ms"
+        f"｜网关 {gateway_total_ms}ms"
+        f"｜发送 {phase_map.get('reply_send', 0) + phase_map.get('runtime_result_card_send', 0)}ms"
+    )
+
+
+def _runtime_status_foreground_llm_audit_line(snapshot: dict[str, Any]) -> str:
+    audit = snapshot.get("foreground_llm_call_audit") if isinstance(snapshot.get("foreground_llm_call_audit"), dict) else {}
+    if not audit:
+        budget = snapshot.get("llm_call_budget") if isinstance(snapshot.get("llm_call_budget"), dict) else {}
+        audit = _foreground_llm_call_audit(budget)
+    if not audit.get("available"):
+        return "前台 LLM 调用：未记录"
+    call_tasks = audit.get("call_tasks") if isinstance(audit.get("call_tasks"), list) else []
+    denied_tasks = audit.get("denied_tasks") if isinstance(audit.get("denied_tasks"), list) else []
+    return (
+        "前台 LLM 调用："
+        f"{audit.get('label') or audit.get('status') or '未知'}"
+        f"｜尝试 {audit.get('attempted_calls', 0)}"
+        f"｜允许 {audit.get('used_calls', 0)}/{audit.get('max_calls', 0)}"
+        f"｜拒绝 {audit.get('denied_calls', 0)}"
+        f"｜已执行：{'、'.join(str(item) for item in call_tasks) or '无'}"
+        f"｜被拒绝：{'、'.join(str(item) for item in denied_tasks) or '无'}"
+    )
+
+
+def _runtime_status_llm_prompt_line(snapshot: dict[str, Any]) -> str:
+    llm_trace = snapshot.get("llm_trace_summary") if isinstance(snapshot.get("llm_trace_summary"), dict) else {}
+    latest = llm_trace.get("latest") if isinstance(llm_trace.get("latest"), dict) else {}
+    audit = latest.get("prompt_audit") if isinstance(latest.get("prompt_audit"), dict) else {}
+    if not audit:
+        return "Prompt 审计：未记录"
+    try:
+        prompt_chars = int(audit.get("prompt_chars") or latest.get("prompt_chars") or 0)
+        line_count = int(audit.get("line_count") or 0)
+        risk_count = int(audit.get("risk_count") or 0)
+    except (TypeError, ValueError):
+        prompt_chars = line_count = risk_count = 0
+    profile_plane = str(audit.get("profile_plane") or ("present" if audit.get("has_profile_context") else "none"))
+    flags = [
+        f"画像{_runtime_profile_plane_label(profile_plane)}",
+        f"会话{'有' if audit.get('has_session_context') else '无'}",
+        f"原答案{'有' if audit.get('has_original_answer') else '无'}",
+    ]
+    risks = audit.get("risks") if isinstance(audit.get("risks"), list) else []
+    risk_text = "、".join(str(item) for item in risks[:3]) if risks else "无"
+    return (
+        "Prompt 审计："
+        f"{prompt_chars} 字"
+        f"｜{line_count} 行"
+        f"｜{'、'.join(flags)}"
+        f"｜风险 {risk_count}：{risk_text}"
+    )
+
+
+def _runtime_profile_plane_label(plane: str) -> str:
+    return {
+        "intent": "意图",
+        "presentation": "表达",
+        "mixed": "混用",
+        "none": "无",
+    }.get(plane, plane or "无")
+
+
+def _runtime_response_phase_label(phase: str) -> str:
+    return {
+        "runtime": "Runtime",
+        "diagnostics": "诊断",
+        "answer": "答案组织",
+        "dispatch": "网关调度",
+        "progress_notice_send": "进度提示发送",
+        "thinking_notice_send": "思考提示发送",
+        "authorization_card_check": "授权卡检查",
+        "runtime_result_card_send": "结果卡发送",
+        "reply_send": "回复发送",
+        "reply_send_fallback": "兜底发送",
+    }.get(phase, phase or "未知")
 
 
 def _runtime_status_path_line(snapshot: dict[str, Any], current_path_maturity: dict[str, Any]) -> str:
@@ -2057,6 +2467,7 @@ def _runtime_status_answer_from_snapshot(snapshot: dict[str, Any], *, detail: bo
     current_path_maturity = snapshot.get("current_path_maturity") if isinstance(snapshot.get("current_path_maturity"), dict) else {}
     snapshot_integrity = snapshot.get("snapshot_integrity") if isinstance(snapshot.get("snapshot_integrity"), dict) else {}
     pipeline_constitution_contract = snapshot.get("pipeline_constitution_contract") if isinstance(snapshot.get("pipeline_constitution_contract"), dict) else {}
+    route_observation = snapshot.get("route_observation_summary") if isinstance(snapshot.get("route_observation_summary"), dict) else {}
     guardrail_parts = [
         "来源已对齐" if source_contract_for_summary.get("status") == "healthy" else "来源需关注",
         "追问已守护" if followup_contract_for_summary.get("status") == "healthy" else "追问需关注",
@@ -2089,6 +2500,7 @@ def _runtime_status_answer_from_snapshot(snapshot: dict[str, Any], *, detail: bo
         if snapshot_integrity
         else "诊断完整性：未生成。",
         "V5 护栏：" + "｜".join(guardrail_parts) + "。",
+        _route_observation_status_line(route_observation),
         f"Provider：已注册 {provider_count} 个，待接运行操作 {pending_ops} 个。",
         "写操作确认契约："
         f"写入 {write_confirmation_contract.get('write_operation_count', 0)} 个，"
@@ -3424,6 +3836,28 @@ def _runtime_status_answer_from_snapshot(snapshot: dict[str, Any], *, detail: bo
     return "\n".join(lines)
 
 
+def _route_observation_status_line(summary: dict[str, Any]) -> str:
+    if not summary or not summary.get("available"):
+        return "路由观察：暂无会话样本。"
+    total = int(summary.get("total_count") or 0)
+    risky = int(summary.get("risky_count") or 0)
+    reasons = summary.get("risk_reasons") if isinstance(summary.get("risk_reasons"), dict) else {}
+    reason_text = "、".join(
+        f"{_route_risk_reason_label(str(reason))} {count}"
+        for reason, count in sorted(reasons.items(), key=lambda item: int(item[1] or 0), reverse=True)[:3]
+    )
+    return f"路由观察：最近 {total} 轮，疑似误路由 {risky} 轮" + (f"｜{reason_text}。" if reason_text else "。")
+
+
+def _route_risk_reason_label(reason: str) -> str:
+    return {
+        "conversation_routed_to_business": "自然对话误进业务",
+        "external_info_routed_to_internal_business": "外部信息误进内部业务",
+        "self_scope_routed_to_broader_scope": "自我范围被扩大",
+        "low_confidence_action": "低置信动作",
+    }.get(reason, reason or "未知风险")
+
+
 def _runtime_probe_suggestions(snapshot: dict[str, Any]) -> list[str]:
     provider_registry = snapshot.get("provider_registry") if isinstance(snapshot.get("provider_registry"), dict) else {}
     registered = set(provider_registry.get("registered_sources") or [])
@@ -4719,7 +5153,26 @@ def actor_from_identity(identity: BotIdentity) -> BotActor:
         domains=identity.domains,
         display_name=identity.display_name,
         open_id=identity.open_id,
+        email=identity.email,
     )
+
+
+def _persist_profile_update_from_envelope(*, identity: BotIdentity, envelope: Any) -> dict[str, Any]:
+    open_id = str(getattr(identity, "open_id", "") or "").strip()
+    if not open_id:
+        return {}
+    entities = getattr(getattr(envelope, "intent", None), "entities", {})
+    if not isinstance(entities, dict):
+        return {}
+    update = entities.get("profile_update_candidate")
+    if not isinstance(update, dict) or not update:
+        return {}
+    try:
+        from app.services.profile_context import apply_profile_update
+
+        return apply_profile_update(open_id, update)
+    except Exception:
+        return {}
 
 
 def reply_line_value(reply: str, label: str) -> str | None:

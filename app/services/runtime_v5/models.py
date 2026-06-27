@@ -27,6 +27,9 @@ class RuntimeIdentity:
     role: str = ""
     display_name: str = ""
     department_id: str = ""
+    department_names: tuple[str, ...] = ()
+    job_title: str = ""
+    email: str = ""
     domains: tuple[str, ...] = ()
 
 
@@ -78,6 +81,7 @@ class RuntimeContext:
     profile: RuntimeProfile = field(default_factory=RuntimeProfile)
     result_context: ResultContext | None = None
     chat_id: str | None = None
+    organization_subject: dict[str, Any] = field(default_factory=dict)
 
     def for_company(self, company_id: UUID) -> "RuntimeContext":
         return replace(self, runtime_scope=self.runtime_scope.for_company(company_id))
@@ -127,6 +131,42 @@ class CommandPlan:
     context_scope: dict[str, Any]
     intent_result: IntentResult
     planner_result: PlannerResult
+    command_frame: "CommandFrame | None" = None
+
+
+@dataclass(frozen=True)
+class CommandFrame:
+    """Structured Command Engine frame before Policy and Runtime execution.
+
+    This is the stable shape Command should reason about. The current Runtime
+    still consumes IntentResult, so CommandFrame is first carried as trace
+    metadata while the execution contract remains unchanged.
+    """
+
+    utterance_type: str = "business_query"
+    dialogue_mode: str = "execute"
+    user_goal: str = ""
+    intent: str = ""
+    question_type: str = "query"
+    domain: str = ""
+    context_mode: str = "new_question"
+    capability: str = ""
+    skill_intent: str = ""
+    scope: str = "self"
+    action_type: str = "read"
+    safety_level: str = "low"
+    target: dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
+    missing_slots: tuple[str, ...] = ()
+    gates: dict[str, Any] = field(default_factory=dict)
+    context_used: dict[str, bool] = field(default_factory=dict)
+    response_intent: dict[str, Any] = field(default_factory=dict)
+    draft_response_hint: str = ""
+    confidence: float = 0.0
+    needs_clarification: bool = False
+    route_reason: str = ""
+    route_path: str = "natural_language"
+    rule_candidate: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -322,6 +362,8 @@ class RuntimeResult:
     status: str
     title: str
     summary: str
+    contextual_intro: str = ""
+    followup_suggestions: tuple[str, ...] = ()
     items: tuple[dict[str, Any], ...] = ()
     actions: tuple[dict[str, Any], ...] = ()
     target_ui: TargetUI = "card"
@@ -339,6 +381,8 @@ class InteractionPayload:
     payload_type: str
     title: str
     summary: str
+    contextual_intro: str = ""
+    followup_suggestions: tuple[str, ...] = ()
     recommendation: str = ""
     status: str = ""
     items: tuple[dict[str, Any], ...] = ()

@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -16,6 +17,7 @@ from app.services.gateway.audit import write_gateway_message_audit
 from app.services.gateway.feishu import build_feishu_gateway_message, should_reply_to_feishu_message
 from app.services.gateway.message import GatewayMessage, GatewayMessageKind
 from app.services.runtime_v5.context import load_session_context, save_portal_session_context, save_session_context
+from app.services.runtime_v5.response_latency_trace import ResponseLatencyTrace, merge_gateway_latency_trace
 
 
 FEISHU_MESSAGE_GATEWAY_CHAIN = [
@@ -83,6 +85,7 @@ class FeishuCommandResult:
     message_id: str | None = None
     reply_target: dict[str, str] | None = None
     gateway_chain: list[str] = field(default_factory=lambda: list(FEISHU_MESSAGE_GATEWAY_CHAIN))
+    latency_trace: dict[str, Any] | None = None
 
     def as_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -118,6 +121,7 @@ class FeishuCommandResult:
             "message_id": self.message_id,
             "reply_target": self.reply_target,
             "gateway_chain": self.gateway_chain,
+            "latency_trace": self.latency_trace,
         }
         return {key: value for key, value in payload.items() if value is not None}
 
@@ -149,6 +153,7 @@ async def handle_feishu_command_result(
     app_config: FeishuAppConfig,
     payload: dict[str, Any],
 ) -> FeishuCommandResult:
+    latency_trace = ResponseLatencyTrace()
     if await approval_card_entrypoint.handle_feishu_gateway_card_action_message(db, app_config, payload):
         return FeishuCommandResult(handled=True, status="handled", route_path="approval_card_action")
     gateway_message = build_feishu_gateway_message(payload)
@@ -188,12 +193,15 @@ async def handle_feishu_command_result(
     runtime_v5_enabled = bool(getattr(settings, "feishu_" + "bot_" + "runtime_v5_enabled"))
     progress_notice = _runtime_v5_progress_notice_text(command, chat_id) if runtime_v5_enabled else ""
     if progress_notice:
+        send_started = perf_counter()
         await feishu_replies.send_text_reply(
             app_config=app_config,
             reply_target=reply_target,
             text=progress_notice,
         )
+        latency_trace.mark("progress_notice_send", send_started)
         thinking_notice_sent = True
+    dispatch_started = perf_counter()
     if runtime_v5_enabled:
         runtime_answer = command_handlers.runtime_v5_answer_result(
             db,
@@ -229,6 +237,7 @@ async def handle_feishu_command_result(
             ai_mode_enabled=settings.feishu_bot_ai_mode_enabled,
             handlers=command_handlers.default_command_dispatch_handlers(),
         )
+    latency_trace.mark("dispatch", dispatch_started, route_path=getattr(dispatch_result, "route_path", None))
     if not dispatch_result.handled:
         _record_gateway_message(db, app_config, gateway_message, status="ignored", reason="unhandled_command", handled=False, commit=True)
         return _ignored_result(gateway_message, reason="unhandled_command", normalized_command=normalized)
@@ -256,11 +265,13 @@ async def handle_feishu_command_result(
     send_approval_card = dispatch_result.send_approval_card
     user_identity_authorization_actions = _authorization_actions_from_runtime_or_trace(dispatch_result.agent_runtime_trace)
     if _should_send_thinking_notice(dispatch_result.agent_runtime_trace):
+        send_started = perf_counter()
         await feishu_replies.send_text_reply(
             app_config=app_config,
             reply_target=reply_target,
             text=_thinking_notice_text(dispatch_result.agent_runtime_trace),
         )
+        latency_trace.mark("thinking_notice_send", send_started)
         thinking_notice_sent = True
 
     if normalized in ("授权", "重新授权", "authorize"):
@@ -273,12 +284,19 @@ async def handle_feishu_command_result(
                 "   docker exec -it v5launchcheck-feishu-ws-1 lark-cli auth login --profile v5-local-prod\n"
                 "6. 用飞书扫码完成授权\n\n"
                 "授权完成后重新问「等待我审批的单子有哪些」，附件可正常读取。")
+        send_started = perf_counter()
         await feishu_replies.send_text_reply(
             app_config=app_config,
             reply_target=reply_target,
             text=text,
         )
-        return FeishuCommandResult(handled=True, status="handled", reply_sent=True)
+        latency_trace.mark("reply_send", send_started, reply_channel="text")
+        return FeishuCommandResult(
+            handled=True,
+            status="handled",
+            reply_sent=True,
+            latency_trace=latency_trace.payload(route_path="authorization", reply_channel="text"),
+        )
 
     authorization_card_sent = False
     approval_card_route_path = getattr(dispatch_result, "route_path", None)
@@ -292,6 +310,7 @@ async def handle_feishu_command_result(
         )
     )
     if should_send_approval_card:
+        send_started = perf_counter()
         sent_card = await approval_card_entrypoint.send_feishu_approval_action_card(
             app_config,
             identity,
@@ -299,7 +318,9 @@ async def handle_feishu_command_result(
             reply_target,
             db=db,
         )
+        latency_trace.mark("reply_send", send_started, reply_channel="approval_card")
         if not sent_card:
+            send_started = perf_counter()
             await feishu_replies.send_smart_reply(
                 app_config=app_config,
                 reply_target=reply_target,
@@ -307,7 +328,9 @@ async def handle_feishu_command_result(
                 route_path=getattr(dispatch_result, "route_path", None),
                 chat_id=chat_id,
             )
+            latency_trace.mark("reply_send_fallback", send_started, reply_channel="smart")
     else:
+        send_started = perf_counter()
         authorization_card_sent = await _send_authorization_card_if_needed(
             app_config=app_config,
             identity=identity,
@@ -315,14 +338,18 @@ async def handle_feishu_command_result(
             answer=reply,
             actions=user_identity_authorization_actions,
         )
+        latency_trace.mark("authorization_card_check", send_started, reply_channel="authorization_card" if authorization_card_sent else "none")
         if not authorization_card_sent:
+            send_started = perf_counter()
             runtime_result_reply = await _send_runtime_result_card_if_supported(
                 app_config=app_config,
                 reply_target=reply_target,
                 trace_payload=dispatch_result.agent_runtime_trace,
                 chat_id=chat_id,
             )
+            latency_trace.mark("runtime_result_card_send", send_started, reply_channel="runtime_result_card" if runtime_result_reply is not None else "none")
             if runtime_result_reply is None:
+                send_started = perf_counter()
                 await feishu_replies.send_smart_reply(
                     app_config=app_config,
                     reply_target=reply_target,
@@ -330,6 +357,15 @@ async def handle_feishu_command_result(
                     route_path=getattr(dispatch_result, "route_path", None),
                     chat_id=chat_id,
                 )
+                latency_trace.mark("reply_send", send_started, reply_channel="smart")
+    latency_payload = latency_trace.payload(
+        route_path=dispatch_result.route_path,
+        reply_channel=_reply_channel_label(
+            authorization_card_sent=authorization_card_sent,
+            runtime_result_trace=dispatch_result.agent_runtime_trace,
+        ),
+    )
+    _merge_gateway_latency_into_last_diagnostics(chat_id, latency_payload)
     result = FeishuCommandResult(
         handled=True,
         status="handled",
@@ -351,6 +387,7 @@ async def handle_feishu_command_result(
         chat_id=gateway_message.context.chat_id,
         message_id=gateway_message.context.message_id,
         reply_target=reply_target,
+        latency_trace=latency_payload,
     )
     _record_gateway_message(
         db,
@@ -448,7 +485,36 @@ def _gateway_result_audit_payload(result: FeishuCommandResult) -> dict[str, Any]
         else None,
         "normalized_command": payload.get("normalized_command"),
         "gateway_chain": payload.get("gateway_chain"),
+        "latency_trace": payload.get("latency_trace"),
     }
+
+
+def _merge_gateway_latency_into_last_diagnostics(chat_id: str | None, latency_trace: dict[str, Any]) -> None:
+    if not chat_id:
+        return
+    session_context = load_session_context(chat_id)
+    snapshot = session_context.get("runtime_v5_last_diagnostics")
+    if not isinstance(snapshot, dict):
+        return
+    session_context["runtime_v5_last_diagnostics"] = merge_gateway_latency_trace(
+        diagnostics_snapshot=snapshot,
+        gateway_trace=latency_trace,
+    )
+    save_session_context(chat_id, session_context)
+
+
+def _reply_channel_label(
+    *,
+    authorization_card_sent: bool,
+    runtime_result_trace: dict[str, Any] | None,
+) -> str:
+    if authorization_card_sent:
+        return "authorization_card"
+    if isinstance(runtime_result_trace, dict):
+        runtime_result = runtime_result_trace.get("runtime_result")
+        if isinstance(runtime_result, dict) and runtime_result.get("result_type"):
+            return "runtime_result_or_smart"
+    return "smart"
 
 
 def _reply_mode_result_fields(trace_payload: dict[str, Any] | None) -> dict[str, Any]:

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import re
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.services.runtime_v5.explicit_command import explicit_command_intent
+from app.services.runtime_v5.domain_query import intent_with_domain_query
+from app.services.runtime_v5.intent_candidates import IntentCandidate, arbitrate_intent_candidates
 from app.services.runtime_v5.interaction_intent import classify_interaction_intent
 from app.services.runtime_v5.llm_intent import llm_command_intent
 from app.services.runtime_v5.models import IntentResult, RuntimeContext
+from app.services.runtime_v5.people_resolver import people_targets_from_result_context, references_people_context
 from app.services.runtime_v5.response_classification import classify_response_request
 
 
@@ -43,10 +47,10 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
     if force_llm or _allows_llm_command_fallback(question=question, rule_intent=rule_intent):
         llm_intent = llm_command_intent(question=question, context=context, rule_intent=rule_intent, force=force_llm)
     if llm_intent is not None:
-        return llm_intent
+        return intent_with_domain_query(llm_intent, context)
     if force_llm and _should_degrade_on_llm_miss(rule_intent):
-        return _degraded_command_triage_intent(question=question, rule_intent=rule_intent)
-    return rule_intent
+        return intent_with_domain_query(_degraded_command_triage_intent(question=question, rule_intent=rule_intent), context)
+    return intent_with_domain_query(rule_intent, context)
 
 
 def _requires_llm_command_triage(*, question: str, rule_intent: IntentResult) -> bool:
@@ -56,6 +60,8 @@ def _requires_llm_command_triage(*, question: str, rule_intent: IntentResult) ->
     if text.startswith("/"):
         return False
     if rule_intent.intent == "smalltalk" and not _smalltalk_needs_command_llm(text):
+        return False
+    if rule_intent.entities.get("foundation_route") and rule_intent.confidence >= 0.84 and not rule_intent.missing_params:
         return False
     if rule_intent.intent in _DETERMINISTIC_RULE_LOCK_INTENTS and rule_intent.confidence >= 0.8 and not rule_intent.missing_params:
         return False
@@ -183,6 +189,28 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
     if contextual_intent is not None:
         return contextual_intent
 
+    candidate_intent = _arbitrated_command_intent(question=question, text=text, context=context)
+    if candidate_intent is not None:
+        return candidate_intent
+
+    if _is_organization_export(text):
+        app_token = _extract_app_token(text)
+        entities = {"app_token": app_token, "target": "existing_base"} if app_token else {"target": "new_base"}
+        entities.update(_result_delivery_target_params(question, context))
+        return IntentResult(
+            question_type="action",
+            intent="organization_export",
+            data_scope="organization",
+            entities=entities,
+            missing_params=(),
+            confidence=0.92,
+            canonical_question=question,
+        )
+
+    embedded_people_intent = _embedded_people_lookup_intent(question=question, text=text)
+    if embedded_people_intent is not None:
+        return embedded_people_intent
+
     if _is_non_work_conversation(text):
         return IntentResult(
             question_type="query",
@@ -205,6 +233,10 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             confidence=0.86,
             canonical_question=question,
         )
+
+    foundation_intent = _foundation_data_source_intent(question=question, text=text)
+    if foundation_intent is not None:
+        return foundation_intent
 
     if _is_smalltalk(text):
         return IntentResult(
@@ -511,11 +543,13 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
         )
 
     if _is_task_create(text):
+        people_targets = people_targets_from_result_context(context.result_context)
+        member_params = _people_context_task_member_params(question, people_targets)
         return IntentResult(
             question_type="action",
             intent="task_create",
             data_scope="self",
-            entities={"summary": _task_summary(question)},
+            entities={"summary": _task_summary(question), **member_params},
             missing_params=(),
             confidence=0.86,
             canonical_question=question,
@@ -523,11 +557,13 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
 
     if _is_calendar_create(text):
         time_params = _calendar_time_params(question)
+        people_targets = people_targets_from_result_context(context.result_context)
+        attendee_params = _people_context_attendee_params(question, people_targets)
         return IntentResult(
             question_type="action",
             intent="calendar_create",
             data_scope="self",
-            entities={"summary": _calendar_summary(question), **time_params},
+            entities={"summary": _calendar_summary(question), **time_params, **attendee_params},
             missing_params=tuple(key for key in ("start", "end") if not time_params.get(key)),
             confidence=0.84,
             canonical_question=question,
@@ -556,14 +592,14 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
-    if _is_people_aggregate_query(text):
+    if _is_department_members_query(text):
         return IntentResult(
             question_type="query",
-            intent="organization_snapshot",
-            data_scope="organization",
-            entities={"view": "people_aggregate", "query": question.strip()},
+            intent="department_members",
+            data_scope="department",
+            entities={"keyword": _department_keyword(question), "foundation_route": "people.department_members"},
             missing_params=(),
-            confidence=0.88,
+            confidence=0.86,
             canonical_question=question,
         )
 
@@ -590,7 +626,7 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
         )
 
     if _is_mail_draft_create(text):
-        draft_params = _mail_draft_params(question)
+        draft_params = _mail_draft_params(question, context)
         return IntentResult(
             question_type="action",
             intent="mail_draft_create",
@@ -625,12 +661,15 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
 
     if _is_im_send(text):
         send_params = _im_send_params(question, context)
+        missing = [key for key in ("target_type", "text") if not send_params.get(key)]
+        if send_params.get("target_type") == "people_context" and not send_params.get("delivery_mode"):
+            missing.append("delivery_mode")
         return IntentResult(
             question_type="action",
             intent="message_send",
             data_scope="self",
             entities=send_params,
-            missing_params=tuple(key for key in ("target_type", "text") if not send_params.get(key)),
+            missing_params=tuple(missing),
             confidence=0.88,
             canonical_question=question,
         )
@@ -658,18 +697,37 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             canonical_question=question,
         )
 
-    if _is_department_members_query(text):
+    if _is_people_aggregate_query(text):
         return IntentResult(
             question_type="query",
-            intent="department_members",
-            data_scope="department",
-            entities={"keyword": _department_keyword(question)},
+            intent="organization_snapshot",
+            data_scope="organization",
+            entities={
+                "view": "people_aggregate",
+                "query": question.strip(),
+                "people_query_mode": _people_query_mode(text),
+                "foundation_route": "people.aggregate",
+            },
             missing_params=(),
-            confidence=0.86,
+            confidence=0.88,
             canonical_question=question,
         )
 
     if _has_any(text, ("组织架构", "组织结构", "通讯录")):
+        if _is_people_aggregate_query(text):
+            return IntentResult(
+                question_type="query",
+                intent="organization_snapshot",
+                data_scope="organization",
+                entities={
+                    "view": "people_aggregate",
+                    "query": question.strip(),
+                    "people_query_mode": _people_query_mode(text),
+                    "foundation_route": "people.aggregate",
+                },
+                confidence=0.88,
+                canonical_question=question,
+            )
         return IntentResult(
             question_type="query",
             intent="organization_snapshot",
@@ -684,7 +742,7 @@ def _recognize_intent_by_rules(question: str, context: RuntimeContext) -> Intent
             question_type="query",
             intent="people_lookup",
             data_scope="person",
-            entities={"keyword": _people_keyword(question)},
+            entities={"keyword": _people_keyword(question), "people_query_field": _people_query_field(question)},
             confidence=0.86,
             canonical_question=question,
         )
@@ -769,6 +827,369 @@ def _is_company_intro_query(text: str) -> bool:
     ):
         return True
     return False
+
+
+def _foundation_data_source_intent(*, question: str, text: str) -> IntentResult | None:
+    if _is_department_members_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="department_members",
+            data_scope="department",
+            entities={"keyword": _department_keyword(question), "foundation_route": "people.department_members"},
+            missing_params=(),
+            confidence=0.86,
+            canonical_question=question,
+        )
+    if _is_people_aggregate_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="organization_snapshot",
+            data_scope="organization",
+            entities={
+                "view": "people_aggregate",
+                "query": question.strip(),
+                "people_query_mode": _people_query_mode(text),
+                "foundation_route": "people.aggregate",
+            },
+            missing_params=(),
+            confidence=0.88,
+            canonical_question=question,
+        )
+    if _is_named_person_lookup_query(question=question, text=text):
+        return IntentResult(
+            question_type="query",
+            intent="people_lookup",
+            data_scope="person",
+            entities={"keyword": _people_keyword(question), "people_query_field": _people_query_field(question), "foundation_route": "people.person"},
+            missing_params=(),
+            confidence=0.86,
+            canonical_question=question,
+        )
+    if _is_foundation_mail_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="mail_query",
+            data_scope="self",
+            entities={"page_size": 20, "view": _foundation_query_view(text), "foundation_route": "communication.mail"},
+            missing_params=(),
+            confidence=0.84,
+            canonical_question=question,
+        )
+    if _is_foundation_chat_query(text):
+        view = _foundation_query_view(text)
+        return IntentResult(
+            question_type="query",
+            intent="chat_search",
+            data_scope="self",
+            entities={"query": _im_chat_query(question) if view == "search" else "", "page_size": 20, "view": view, "foundation_route": "communication.im.chat"},
+            missing_params=(),
+            confidence=0.84,
+            canonical_question=question,
+        )
+    if _is_company_intro_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="general_query",
+            data_scope="company",
+            entities={"query": question.strip(), "knowledge_context": "company_profile", "foundation_route": "knowledge.company_profile"},
+            missing_params=(),
+            confidence=0.82,
+            canonical_question=question,
+        )
+    if _is_foundation_knowledge_query(text):
+        return IntentResult(
+            question_type="query",
+            intent="general_query",
+            data_scope="company",
+            entities={"query": question.strip(), "knowledge_context": "general", "foundation_route": "knowledge.general"},
+            missing_params=(),
+            confidence=0.84,
+            canonical_question=question,
+        )
+    return None
+
+
+def _arbitrated_command_intent(*, question: str, text: str, context: RuntimeContext) -> IntentResult | None:
+    candidates = _intent_candidates(question=question, text=text, context=context)
+    if not candidates:
+        return None
+    if all(candidate.domain == "Conversation" for candidate in candidates):
+        return None
+    arbitration = arbitrate_intent_candidates(tuple(candidates))
+    return arbitration.selected
+
+
+def _intent_candidates(*, question: str, text: str, context: RuntimeContext) -> list[IntentCandidate]:
+    candidates: list[IntentCandidate] = []
+    export_intent = _organization_export_intent(question=question, text=text, context=context)
+    if export_intent is not None:
+        candidates.append(
+            IntentCandidate(
+                intent=export_intent,
+                domain="People",
+                source="rule.organization_export",
+                confidence=0.92,
+                evidence=("export_signal",),
+                route_reason="explicit_export_action",
+            )
+        )
+    candidates.extend(_action_intent_candidates(question=question, text=text, context=context))
+    embedded_people_intent = _embedded_people_lookup_intent(question=question, text=text)
+    if embedded_people_intent is not None:
+        candidates.append(
+            IntentCandidate(
+                intent=embedded_people_intent,
+                domain="People",
+                source="rule.embedded_people_lookup",
+                confidence=0.9,
+                evidence=("named_person", "requested_field"),
+                route_reason="exact_people_field_query",
+            )
+        )
+    foundation_intent = _foundation_data_source_intent(question=question, text=text)
+    if foundation_intent is not None:
+        candidates.append(
+            IntentCandidate(
+                intent=foundation_intent,
+                domain=_candidate_domain(foundation_intent),
+                source="rule.foundation_source",
+                confidence=foundation_intent.confidence,
+                evidence=tuple(filter(None, (str(foundation_intent.entities.get("foundation_route") or ""),))),
+                route_reason="foundation_domain_query",
+            )
+        )
+    if _is_non_work_conversation(text):
+        candidates.append(
+            IntentCandidate(
+                intent=IntentResult(
+                    question_type="query",
+                    intent="smalltalk",
+                    data_scope="self",
+                    entities={"fallback_answer": _non_work_conversation_answer(text)},
+                    missing_params=(),
+                    confidence=0.9,
+                    canonical_question=question,
+                ),
+                domain="Conversation",
+                source="rule.non_work_conversation",
+                confidence=0.9,
+                evidence=("conversation_signal",),
+                route_reason="non_work_conversation",
+            )
+        )
+    return candidates
+
+
+def _action_intent_candidates(*, question: str, text: str, context: RuntimeContext) -> list[IntentCandidate]:
+    candidates: list[IntentCandidate] = []
+    if _is_mail_draft_create(text):
+        draft_params = _mail_draft_params(question, context)
+        intent = IntentResult(
+            question_type="action",
+            intent="mail_draft_create",
+            data_scope="self",
+            entities=draft_params,
+            missing_params=tuple(key for key in ("to", "subject", "body") if not draft_params.get(key)),
+            confidence=0.86,
+            canonical_question=question,
+        )
+        candidates.append(
+            IntentCandidate(
+                intent=intent,
+                domain="Communication",
+                source="rule.mail_draft_action",
+                confidence=intent.confidence,
+                evidence=("draft_signal",),
+                route_reason="communication_draft_action",
+            )
+        )
+    if _is_im_send(text):
+        send_params = _im_send_params(question, context)
+        missing = [key for key in ("target_type", "text") if not send_params.get(key)]
+        if send_params.get("target_type") == "people_context" and not send_params.get("delivery_mode"):
+            missing.append("delivery_mode")
+        if "target_type" in missing and "text" in missing and not _has_strong_im_send_signal(text):
+            return candidates
+        intent = IntentResult(
+            question_type="action",
+            intent="message_send",
+            data_scope="self",
+            entities=send_params,
+            missing_params=tuple(missing),
+            confidence=0.88,
+            canonical_question=question,
+        )
+        candidates.append(
+            IntentCandidate(
+                intent=intent,
+                domain="Communication",
+                source="rule.message_send_action",
+                confidence=intent.confidence,
+                evidence=("send_signal",),
+                route_reason="communication_send_action",
+                missing_slots=tuple(missing),
+            )
+        )
+    return candidates
+
+
+def _has_strong_im_send_signal(text: str) -> bool:
+    return _has_any(
+        text,
+        (
+            "发消息",
+            "发送消息",
+            "发条信息",
+            "发条消息",
+            "发个信息",
+            "发个消息",
+            "发给",
+            "发到",
+            "发送给",
+            "转发给",
+        ),
+    )
+
+
+def _organization_export_intent(*, question: str, text: str, context: RuntimeContext) -> IntentResult | None:
+    if not _is_organization_export(text):
+        return None
+    app_token = _extract_app_token(text)
+    entities = {"app_token": app_token, "target": "existing_base"} if app_token else {"target": "new_base"}
+    entities.update(_result_delivery_target_params(question, context))
+    return IntentResult(
+        question_type="action",
+        intent="organization_export",
+        data_scope="organization",
+        entities=entities,
+        missing_params=(),
+        confidence=0.92,
+        canonical_question=question,
+    )
+
+
+def _candidate_domain(intent: IntentResult) -> str:
+    if intent.intent in {"people_lookup", "department_members", "organization_snapshot", "organization_export"}:
+        return "People"
+    if intent.intent in {"mail_query", "mail_search", "mail_draft_create", "message_send", "message_query", "chat_search"}:
+        return "Communication"
+    if intent.intent in {"general_query", "docs_read", "wiki_search", "drive_list"}:
+        return "Knowledge"
+    if intent.intent in {"task_query", "calendar_query"}:
+        return "Workspace"
+    if intent.intent == "external_information_query":
+        return "External"
+    return ""
+
+
+def _is_named_person_lookup_query(*, question: str, text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact:
+        return False
+    if _has_any(compact, ("我是谁", "你是谁", "你知道我是谁", "我是什么", "这个公司", "这家公司", "公司老板", "老板是谁")):
+        return False
+    if _has_any(compact, ("任务", "待办", "日程", "会议", "审批")):
+        return False
+    if _has_any(compact, ("邮件", "收件箱")):
+        return False
+    if "邮箱" in compact and not re.search(r"[\u4e00-\u9fffA-Za-z·.\-]{2,32}的邮箱", compact):
+        return False
+    identity_signal = _has_any(compact, ("是谁", "谁是"))
+    contact_signal = _has_any(compact, ("电话", "号码", "邮箱", "手机号", "职位", "岗位")) or bool(
+        re.search(r"(哪个|什么|所属|所在)?部门", compact)
+    )
+    if not (identity_signal or contact_signal):
+        return False
+    keyword = _people_keyword(question)
+    keyword_compact = re.sub(r"\s+", "", keyword)
+    if not keyword_compact:
+        return False
+    if _has_any(keyword_compact, ("我", "你", "公司", "企业", "组织", "部门", "团队", "老板", "负责人", "这个", "那个")):
+        return False
+    return bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z·.\-]{1,31}", keyword_compact))
+
+
+def _embedded_people_lookup_intent(*, question: str, text: str) -> IntentResult | None:
+    keyword, field = _embedded_people_lookup_parts(question)
+    if not keyword or not field:
+        return None
+    return IntentResult(
+        question_type="query",
+        intent="people_lookup",
+        data_scope="person",
+        entities={"keyword": keyword, "people_query_field": field, "foundation_route": "people.person"},
+        missing_params=(),
+        confidence=0.88,
+        canonical_question=f"{keyword}的{ {'mobile': '手机号', 'email': '邮箱', 'title': '岗位'}.get(field, '信息') }",
+    )
+
+
+def _is_foundation_mail_query(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not _has_any(compact, ("邮件", "邮箱", "收件箱", "email", "mail")):
+        return False
+    return _has_any(
+        compact,
+        (
+            "多少",
+            "几封",
+            "几封邮件",
+            "数量",
+            "列表",
+            "有哪些",
+            "最近",
+            "未读",
+            "查看",
+            "查询",
+            "查一下",
+            "搜索",
+            "查找",
+        ),
+    )
+
+
+def _is_foundation_chat_query(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not _has_any(compact, ("群", "群聊", "会话", "聊天")):
+        return False
+    if _has_any(compact, ("群消息", "聊天记录", "群聊记录")):
+        return False
+    return _has_any(
+        compact,
+        (
+            "多少",
+            "几个",
+            "数量",
+            "列表",
+            "有哪些",
+            "现在有",
+            "当前有",
+            "搜索",
+            "查找",
+            "找一下",
+            "查一下",
+        ),
+    )
+
+
+def _is_foundation_knowledge_query(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if not compact or _is_company_intro_query(compact):
+        return False
+    if _has_any(compact, ("任务", "待办", "负荷", "延期", "到期")) and not _has_any(compact, ("流程", "制度", "规范", "手册", "模板", "资料", "文档")):
+        return False
+    knowledge_object = _has_any(compact, ("流程", "制度", "规范", "手册", "模板", "sop", "说明", "指南", "资料", "文档", "知识库", "wiki"))
+    knowledge_action = _has_any(compact, ("怎么", "如何", "怎么办", "哪里", "在哪", "查", "看", "有哪些", "是什么", "说明"))
+    return knowledge_object and knowledge_action
+
+
+def _foundation_query_view(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if _has_any(compact, ("多少", "几个", "几封", "数量")):
+        return "count"
+    if _has_any(compact, ("搜索", "查找", "找一下")):
+        return "search"
+    return "list"
 
 
 def _is_organization_export(text: str) -> bool:
@@ -910,6 +1331,9 @@ def _is_external_information_followup(text: str, context: RuntimeContext) -> boo
 
 def _contextual_followup_intent(*, question: str, text: str, context: RuntimeContext) -> IntentResult | None:
     compact = text.replace(" ", "")
+    people_followup = _contextual_people_followup_intent(question=question, text=text, context=context)
+    if people_followup is not None:
+        return people_followup
     if not context.chat_id or not _looks_like_contextual_followup(compact):
         return None
     if _rejects_recent_business_context(compact) or _is_non_work_conversation(text):
@@ -960,6 +1384,135 @@ def _contextual_followup_intent(*, question: str, text: str, context: RuntimeCon
             canonical_question=question,
         )
     return None
+
+
+def _contextual_people_followup_intent(*, question: str, text: str, context: RuntimeContext) -> IntentResult | None:
+    result_context = context.result_context
+    if result_context is None or result_context.result_type not in {"people_search", "department_members", "organization_snapshot"}:
+        return None
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    field_switch = _people_query_field(question)
+    if field_switch and _is_people_field_switch_followup(compact):
+        item = _single_people_context_item(result_context)
+        keyword = str(item.get("name") or "").strip() if item else ""
+        if keyword:
+            field_text = {
+                "mobile": "手机号",
+                "email": "邮箱",
+                "title": "岗位",
+                "gender": "性别",
+            }.get(field_switch, "信息")
+            return IntentResult(
+                question_type="query",
+                intent="people_lookup",
+                data_scope="person",
+                entities={"keyword": keyword, "people_query_field": field_switch, "foundation_route": "people.person"},
+                missing_params=(),
+                confidence=0.88,
+                canonical_question=f"{keyword}的{field_text}",
+            )
+        if _has_people_context_pronoun(compact):
+            return IntentResult(
+                question_type="query",
+                intent="smalltalk",
+                data_scope="self",
+                entities={
+                    "fallback_answer": "你说的是上一轮结果里的哪一位？告诉我名字后，我再查对应信息。",
+                    "command_intent_trace": {
+                        "source": "context_gate",
+                        "reason": "people_pronoun_with_multiple_or_empty_results",
+                        "result_type": result_context.result_type,
+                        "result_count": result_context.count or len(result_context.items),
+                        "requested_field": field_switch,
+                    },
+                },
+                missing_params=("person",),
+                confidence=0.55,
+                canonical_question=question,
+            )
+    if not compact.startswith(("那", "那么", "还有")) and not compact.endswith(("呢", "的呢")):
+        return None
+    if _is_people_result_filter_followup(compact):
+        return None
+    keyword = _contextual_people_keyword(question)
+    if not keyword:
+        return None
+    metadata = result_context.metadata if isinstance(result_context.metadata, dict) else {}
+    query_field = str(metadata.get("people_query_field") or _people_query_field(str(getattr(result_context, "answer", "") or "")) or "")
+    if not query_field:
+        query_field = "profile"
+    field_text = {
+        "mobile": "手机号",
+        "email": "邮箱",
+        "title": "岗位",
+        "gender": "性别",
+        "profile": "信息",
+    }.get(query_field, "信息")
+    canonical = f"{keyword}的{field_text}"
+    return IntentResult(
+        question_type="query",
+        intent="people_lookup",
+        data_scope="person",
+        entities={"keyword": keyword, "people_query_field": query_field, "foundation_route": "people.person"},
+        missing_params=(),
+        confidence=0.86,
+        canonical_question=canonical,
+    )
+
+
+def _contextual_people_keyword(question: str) -> str:
+    compact = re.sub(r"\s+", "", str(question or ""))
+    compact = compact.removeprefix("那么").removeprefix("那").removeprefix("还有")
+    compact = compact.removesuffix("的呢").removesuffix("呢")
+    compact = compact.strip("，,。.!！?？")
+    for token in ("你有吗", "有吗", "有么", "有没有", "你这有吗", "你这里有吗", "的"):
+        compact = compact.replace(token, "")
+    if not compact or compact in {"他", "她", "这个", "这个人", "上面这个"}:
+        return ""
+    if len(compact) > 8:
+        return ""
+    return compact
+
+
+def _has_people_context_pronoun(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    return any(token in compact for token in ("他", "她", "那个人", "这个人", "刚才那个人", "那位", "这位"))
+
+
+def _is_people_result_filter_followup(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or "").lower()).strip("，,。.!！?？")
+    compact = compact.removeprefix("那").removeprefix("那么").removesuffix("呢").removesuffix("的呢")
+    if any(token in compact for token in ("男生", "男性", "男的", "男员工", "女生", "女性", "女的", "女员工")):
+        return True
+    if len(compact) <= 12 and any(token in compact for token in ("工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发", "部门", "事业部", "团队", "小组")):
+        return True
+    return False
+
+
+def _is_people_field_switch_followup(compact: str) -> bool:
+    if not compact:
+        return False
+    return _has_any(
+        compact,
+        (
+            "我问的是",
+            "问的是",
+            "他的",
+            "她的",
+            "这个人的",
+            "刚才那个人的",
+            "上面那个人的",
+            "那个人的",
+        ),
+    )
+
+
+def _single_people_context_item(result_context: Any) -> dict[str, Any]:
+    items = getattr(result_context, "items", ()) or ()
+    if len(items) != 1:
+        return {}
+    item = items[0]
+    return item if isinstance(item, dict) else {}
 
 
 def _looks_like_contextual_followup(compact: str) -> bool:
@@ -1287,11 +1840,13 @@ def _is_task_create(text: str) -> bool:
 
 def _task_summary(question: str) -> str:
     summary = question.strip()
+    summary = re.sub(r"^\s*(给|让|安排|指派)?\s*(这些人|他们|她们|这批人)\s*", "", summary)
     summary = re.sub(
         r"^\s*(帮我|请)?\s*(创建|新建|加|记|安排)\s*(一个|个)?\s*(任务|待办)[:：]?\s*",
         "",
         summary,
     )
+    summary = re.sub(r"^\s*(做|处理|负责|执行)\s*(任务|待办)?[:：]?\s*", "", summary)
     summary = re.sub(r"^\s*(帮我|请)?\s*提醒我[:：]?\s*", "", summary)
     return summary.strip() or question.strip()
 
@@ -1472,9 +2027,15 @@ def _is_im_message_query(text: str) -> bool:
 
 
 def _is_department_members_query(text: str) -> bool:
-    return _has_any(text, ("部门", "团队", "中心", "小组")) and _has_any(
-        text,
-        ("有哪些人", "都有谁", "成员", "人员", "同事", "名单"),
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if _has_any(compact, ("不要告诉我多少部门", "不用告诉我多少部门", "没必要告诉我多少部门", "不要部门数", "不用部门数")):
+        return False
+    has_org_unit = _has_any(compact, ("部门", "事业部", "团队", "中心", "小组", "组", "财务部", "研发部", "测试部", "运营部", "销售部")) or bool(
+        re.search(r"[\u4e00-\u9fffA-Za-z0-9]{1,20}(?:部|组)", compact)
+    )
+    return has_org_unit and _has_any(
+        compact,
+        ("有哪些人", "都有谁", "成员", "人员", "同事", "名单", "多少人", "几个人", "几位", "多少位", "多少个"),
     )
 
 
@@ -1482,6 +2043,8 @@ def _is_people_aggregate_query(text: str) -> bool:
     compact = re.sub(r"\s+", "", str(text or "").lower()).replace("多少个", "多少")
     if not compact:
         return False
+    if _has_any(compact, ("有谁的号码", "谁的号码", "有谁的电话", "谁的电话")):
+        return True
     if _has_any(
         compact,
         (
@@ -1510,7 +2073,9 @@ def _is_people_aggregate_query(text: str) -> bool:
             "全公司",
             "企业",
             "组织",
+            "通讯录",
             "团队",
+            "我们",
             "员工",
             "人员",
             "同事",
@@ -1518,14 +2083,28 @@ def _is_people_aggregate_query(text: str) -> bool:
             "女生",
             "男性",
             "女性",
+            "岗位",
+            "职位",
+            "工程师",
+            "经理",
+            "主管",
+            "总监",
+            "销售",
+            "财务",
+            "测试",
+            "运营",
+            "人事",
+            "研发",
         ),
     )
     metric_signal = _has_any(
         compact,
         (
+            "多少",
             "多少人",
             "多少个人",
             "几个人",
+            "几个",
             "人数",
             "员工数",
             "人员数",
@@ -1537,13 +2116,45 @@ def _is_people_aggregate_query(text: str) -> bool:
             "构成",
             "分布",
             "规模",
+            "有哪些",
+            "都有谁",
+            "分别是谁",
+            "名单",
+            "发我",
+            "发下",
+            "发我下",
+            "给我",
+            "给我下",
+            "发一下",
         ),
     )
     return subject_signal and metric_signal
 
 
+def _people_query_mode(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or "").lower()).replace("多少个", "多少")
+    wants_list = _has_any(compact, ("分别是谁", "都有谁", "名单", "列出", "全部显示", "有哪些"))
+    if _has_any(compact, ("有谁的号码", "谁的号码", "有谁的电话", "谁的电话")):
+        return "list"
+    if "通讯录" in compact and _has_any(compact, ("发我", "发下", "发我下", "给我", "给我下", "发一下")):
+        return "list"
+    if "数量" in compact and _has_any(compact, ("只", "只需", "只要", "告诉我", "回答")):
+        return "count_only"
+    if _has_any(compact, ("只需要回答", "只回答", "不用告诉", "不要告诉", "不用给我详情", "不要给我详情", "不用详情", "不要详情", "不用明细", "不要明细", "不用列", "不要列", "没必要告诉", "直接回答")):
+        return "count_only"
+    if _has_any(compact, ("男生", "男性", "男的", "男员工", "女生", "女性", "女的", "女员工")):
+        return "gender_list" if wants_list else "gender_count"
+    if _has_any(compact, ("岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+        return "title_list" if wants_list else "title_count"
+    if wants_list:
+        return "list"
+    return "count"
+
+
 def _is_people_lookup(text: str) -> bool:
     if _has_any(text, ("电话", "邮箱", "手机号")):
+        return True
+    if _has_any(text, ("男还是女", "女还是男", "男性还是女性", "性别")):
         return True
     if _has_any(text, ("查通讯录", "通讯录查", "找人", "找一下人", "搜索人员", "人员搜索")):
         return True
@@ -1560,15 +2171,112 @@ def _extract_app_token(text: str) -> str | None:
 
 
 def _people_keyword(question: str) -> str:
+    embedded_keyword, _ = _embedded_people_lookup_parts(question)
+    if embedded_keyword:
+        return embedded_keyword
     keyword = question
-    for token in ("公司", "的", "是谁", "谁是", "谁担任", "电话", "邮箱", "手机号", "职位", "部门", "查一下", "帮我查", "帮我", "请"):
+    for token in (
+        "公司",
+        "那",
+        "那么",
+        "还有",
+        "呢",
+        "吗",
+        "的",
+        "是",
+        "是什么",
+        "是多少",
+        "多少",
+        "号码",
+        "是谁",
+        "谁是",
+        "谁担任",
+        "是什么岗位",
+        "是什么职位",
+        "什么岗位",
+        "什么职位",
+        "男还是女",
+        "女还是男",
+        "男性还是女性",
+        "性别",
+        "电话",
+        "邮箱",
+        "手机号",
+        "手机",
+        "职位",
+        "岗位",
+        "职务",
+        "部门",
+        "和",
+        "以及",
+        "与",
+        "什么",
+        "告诉我",
+        "你有吗",
+        "有吗",
+        "有么",
+        "有没有",
+        "查一下",
+        "帮我查",
+        "帮我",
+        "请",
+    ):
         keyword = keyword.replace(token, "")
     return keyword.strip() or question.strip()
 
 
+def _embedded_people_lookup_parts(question: str) -> tuple[str, str]:
+    compact = re.sub(r"\s+", "", str(question or ""))
+    if _has_any(compact, ("我是谁", "你是谁", "你知道我", "我现在", "我在这个公司", "我在公司", "收件箱", "邮件")):
+        return "", ""
+    field_pattern = r"(?:电话号码|手机号|电话|号码|手机|邮箱|职位|岗位|职务)"
+    patterns = (
+        rf"([\u4e00-\u9fffA-Za-z·.\-]{{2,16}})的({field_pattern})",
+        rf"([\u4e00-\u9fffA-Za-z·.\-]{{2,8}})({field_pattern})",
+        rf"把([\u4e00-\u9fffA-Za-z·.\-]{{2,16}})的?({field_pattern})(?:告诉我|发我|给我)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, compact)
+        if not match:
+            continue
+        keyword = _clean_people_keyword_candidate(match.group(1))
+        field = _people_query_field(match.group(2))
+        if field == "email" and compact[match.end(2): match.end(2) + 1] in {"里", "中"}:
+            continue
+        if keyword and field:
+            return keyword, field
+    return "", ""
+
+
+def _clean_people_keyword_candidate(value: str) -> str:
+    text = str(value or "").strip("，,。.!！?？")
+    if any(token in text for token in ("谁", "我", "你")):
+        return ""
+    for token in ("那就把", "那你把", "请把", "帮我把", "把", "告诉我", "我让他", "让他", "给我", "发我", "查一下", "那", "那么", "还有"):
+        text = text.replace(token, "")
+    if any(token in text for token in ("公司", "通讯录", "你", "我")):
+        parts = re.findall(r"[\u4e00-\u9fffA-Za-z·.\-]{2,8}", text)
+        text = parts[-1] if parts else text
+    text = text.removesuffix("的")
+    return text.strip()
+
+
+def _people_query_field(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if _has_any(compact, ("电话", "号码", "手机号", "手机")):
+        return "mobile"
+    if "邮箱" in compact:
+        return "email"
+    if _has_any(compact, ("职位", "岗位", "职务")):
+        return "title"
+    if _has_any(compact, ("男还是女", "女还是男", "男性还是女性", "性别")):
+        return "gender"
+    return ""
+
+
 def _department_keyword(question: str) -> str:
     keyword = question
-    for token in ("帮我", "请", "查一下", "查看", "有哪些人", "都有谁", "成员", "人员", "同事", "名单", "的"):
+    for token in ("帮我", "请", "查一下", "查看", "有哪些人", "有多少人", "都有多少人", "多少人", "几个人", "几位", "多少位", "多少个", "都有谁", "分别是谁", "成员", "人员", "同事", "名单", "公司", "的", "都", "，", ",", "。", "？", "?"):
         keyword = keyword.replace(token, "")
     return keyword.strip() or question.strip()
 
@@ -1841,8 +2549,15 @@ def _mail_search_keyword(question: str) -> str:
     return keyword.strip()
 
 
-def _mail_draft_params(question: str) -> dict[str, str]:
-    params: dict[str, str] = {}
+def _mail_draft_params(question: str, context: RuntimeContext | None = None) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    people_targets = people_targets_from_result_context(context.result_context if context else None)
+    if people_targets and references_people_context(question):
+        emails = [str(item.get("email") or "").strip() for item in people_targets if str(item.get("email") or "").strip()]
+        params["people_targets"] = [dict(item) for item in people_targets]
+        params["people_target_count"] = str(len(people_targets))
+        if emails:
+            params["to"] = ", ".join(emails)
     email = _extract_email(question)
     if email:
         params["to"] = email
@@ -1852,6 +2567,34 @@ def _mail_draft_params(question: str) -> dict[str, str]:
     body = _extract_labeled_segment(question, ("正文", "内容", "说"))
     if body:
         params["body"] = body
+    return params
+
+
+def _people_context_attendee_params(question: str, people_targets: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    if not people_targets or not references_people_context(question):
+        return {}
+    attendee_ids = [str(item.get("open_id") or "").strip() for item in people_targets if str(item.get("open_id") or "").strip()]
+    params: dict[str, Any] = {
+        "people_targets": [dict(item) for item in people_targets],
+        "people_target_count": str(len(people_targets)),
+    }
+    if attendee_ids:
+        params["attendee_ids"] = attendee_ids
+        params["user_id_type"] = "open_id"
+    return params
+
+
+def _people_context_task_member_params(question: str, people_targets: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    if not people_targets or not references_people_context(question):
+        return {}
+    members = [str(item.get("open_id") or "").strip() for item in people_targets if str(item.get("open_id") or "").strip()]
+    params: dict[str, Any] = {
+        "people_targets": [dict(item) for item in people_targets],
+        "people_target_count": str(len(people_targets)),
+    }
+    if members:
+        params["members"] = members
+        params["user_id_type"] = "open_id"
     return params
 
 
@@ -1869,13 +2612,27 @@ def _extract_labeled_segment(question: str, labels: tuple[str, ...]) -> str:
 
 
 def _im_send_params(question: str, context: RuntimeContext) -> dict[str, str]:
-    params: dict[str, str] = {}
+    params: dict[str, str | list[dict[str, str]]] = {}
     if _has_any(question, ("用机器人发", "机器人发", "以机器人", "用大飞哥发", "大飞哥通知", "系统通知", "自动推送", "自动通知")):
         params["execution_identity"] = "bot"
     elif _has_any(question, ("替我发", "用我", "以我的名义", "我发给")):
         params["execution_identity"] = "user"
     transfer_target = _extract_send_target(question)
-    if transfer_target:
+    people_targets = people_targets_from_result_context(context.result_context)
+    if not people_targets:
+        people_targets = _people_targets_from_runtime_action(context)
+    if transfer_target and not references_people_context(transfer_target[1]):
+        target_type, target = transfer_target
+        params["target_type"] = target_type
+        params["target"] = target
+    elif people_targets and references_people_context(question):
+        params["target_type"] = "people_context"
+        params["people_targets"] = [dict(item) for item in people_targets]
+        params["people_target_count"] = str(len(people_targets))
+        delivery_mode = _people_context_delivery_mode(question)
+        if delivery_mode:
+            params["delivery_mode"] = delivery_mode
+    elif transfer_target:
         target_type, target = transfer_target
         params["target_type"] = target_type
         params["target"] = target
@@ -1894,7 +2651,32 @@ def _im_send_params(question: str, context: RuntimeContext) -> dict[str, str]:
     elif context.result_context:
         params["text"] = _result_context_message_text(context)
         params["use_previous_result"] = "true"
-    return params
+    return params  # type: ignore[return-value]
+
+
+def _people_targets_from_runtime_action(context: RuntimeContext) -> tuple[dict[str, Any], ...]:
+    for key in ("runtime_v5_pending_action", "runtime_v5_confirmed_action_entities"):
+        payload = context.session_context.get(key)
+        entities = payload.get("entities") if isinstance(payload, dict) and key == "runtime_v5_pending_action" else payload
+        if not isinstance(entities, dict):
+            continue
+        if entities.get("target_type") != "people_context":
+            continue
+        targets = entities.get("people_targets")
+        if isinstance(targets, list):
+            return tuple(dict(item) for item in targets if isinstance(item, dict))
+    return ()
+
+
+def _people_context_delivery_mode(question: str) -> str:
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if _has_any(compact, ("机器人通知", "用机器人", "机器人发", "系统通知", "自动通知", "大飞哥通知")):
+        return "bot_multi_notify"
+    if _has_any(compact, ("替我发", "用我", "以我的名义", "我发给", "分别发", "单独发", "单独发送", "私聊发")):
+        return "user_multi_private"
+    if _has_any(compact, ("拉群", "建群", "建个群", "创建群", "群里发", "发到群")):
+        return "create_group_then_send"
+    return ""
 
 
 def _result_delivery_target_params(question: str, context: RuntimeContext) -> dict[str, str]:
@@ -1940,21 +2722,34 @@ def _result_context_message_text(context: RuntimeContext) -> str:
 
 def _extract_send_target(question: str) -> tuple[str, str] | None:
     for pattern in (
-        r"发(?:条|个)?(?:信息|消息)给\s*(?!我|自己)([^，,。；;:\s：]+)",
-        r"发(?:送)?给\s*(?!我|自己)([^，,。；;\s]+)",
-        r"转发给\s*(?!我|自己)([^，,。；;\s]+)",
-        r"给\s*(?!我|自己)([^，,。；;\s]+)\s*发消息",
+        r"发(?:条|个)?(?:信息|消息)给\s*(?!我|自己)(.+?)(?=\s*(?:说|内容是|消息是|通知|告诉)\s*[：:]?|[，,。；;]|$)",
+        r"发(?:送)?给\s*(?!我|自己)(.+?)(?=\s*(?:说|内容是|消息是|通知|告诉)\s*[：:]?|[，,。；;]|$)",
+        r"转发给\s*(?!我|自己)(.+?)(?=\s*(?:说|内容是|消息是|通知|告诉)\s*[：:]?|[，,。；;]|$)",
+        r"给\s*(?!我|自己)(.+?)\s*发消息",
     ):
         match = re.search(pattern, question)
         if match:
-            target = match.group(1).strip()
+            target = _normalize_send_target(match.group(1))
             if target:
-                return ("chat" if any(token in target for token in ("群", "群聊")) else "person", target.replace("群聊", "").replace("群", "").strip() or target)
-    chat_match = re.search(r"发(?:送)?到\s*([^，,。；;\s]+群(?:聊)?)", question)
+                return _send_target_type_and_value(target)
+    chat_match = re.search(r"发(?:送|条|个)?(?:信息|消息)?到\s*(.+?群(?:聊)?)(?=\s*(?:说|内容是|消息是|通知|告诉)\s*[：:]?|[：:，,。；;]|$)", question)
     if chat_match:
-        target = chat_match.group(1).replace("群聊", "").replace("群", "").strip()
-        return ("chat", target or chat_match.group(1).strip())
+        target = _normalize_send_target(chat_match.group(1))
+        return ("chat", target.replace("群聊", "").replace("群", "").strip() or target)
     return None
+
+
+def _normalize_send_target(value: str) -> str:
+    target = str(value or "").strip()
+    target = re.sub(r"\s+", "", target)
+    target = re.sub(r"(?:说|内容是|消息是|通知|告诉)\s*[：:]?.*$", "", target).strip()
+    return target
+
+
+def _send_target_type_and_value(target: str) -> tuple[str, str]:
+    if any(token in target for token in ("群", "群聊")):
+        return ("chat", target.replace("群聊", "").replace("群", "").strip() or target)
+    return ("person", target)
 
 
 def _extract_message_text(question: str) -> str:
@@ -1976,7 +2771,14 @@ def _extract_message_text_after_target(question: str, target: str) -> str:
         return ""
     tail = question[marker_index + len(target):].strip()
     tail = re.sub(r"^(?:说|内容是|消息是|通知|告诉)?\s*[：:\s，,]*", "", tail).strip()
+    if _is_message_action_scaffold(tail):
+        return ""
     return tail
+
+
+def _is_message_action_scaffold(value: str) -> bool:
+    compact = re.sub(r"\s+", "", str(value or ""))
+    return compact in {"发消息", "发信息", "发送消息", "发送信息", "发条消息", "发条信息", "发个消息", "发个信息"}
 
 
 def _extract_between(question: str, starts: tuple[str, ...], ends: tuple[str, ...]) -> str:

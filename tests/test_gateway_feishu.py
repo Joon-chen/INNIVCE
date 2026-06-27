@@ -1008,6 +1008,50 @@ def test_build_runtime_result_card_renders_task_complete_action_input() -> None:
     assert button["value"]["runtime_action_input"] == runtime_action_input
 
 
+def test_build_runtime_result_card_renders_generic_sidepanel_entry() -> None:
+    card = build_runtime_result_card(
+        {
+            "result_type": "people_search",
+            "title": "通讯录",
+            "summary": "公司通讯录里现有 22 人。",
+            "items": [{"name": "王五", "title": "工程师"}],
+            "actions": [
+                {
+                    "action": "open_sidepanel",
+                    "label": "打开侧边栏",
+                    "target_ui": "sidepanel",
+                    "route": "/sidepanel",
+                    "requires_confirmation": False,
+                }
+            ],
+            "metadata": {
+                "sidepanel_context": {
+                    "title": "人员明细",
+                    "kind": "result_context",
+                    "result_type": "people_search",
+                    "entity_domain": "people",
+                    "item_count": 22,
+                }
+            },
+        },
+        chat_id="oc_people",
+    )
+
+    assert card is not None
+    assert card["header"]["title"]["content"] == "人员明细"
+    button = next(
+        action
+        for element in card["elements"]
+        if element.get("tag") == "action"
+        for action in element["actions"]
+    )
+    url = button["multi_url"]["url"]
+    assert button["text"]["content"] == "打开侧边栏"
+    assert "mode=sidebar-semi" in url
+    assert "chat_id%3Doc_people" in url
+    assert "view%3Dresult_context" in url
+
+
 def test_handle_feishu_command_routes_employee_calendar_create_to_runtime_auth_card(monkeypatch) -> None:
     class EmptyScalars:
         def all(self):

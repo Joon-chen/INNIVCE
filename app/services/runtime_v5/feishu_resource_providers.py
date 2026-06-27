@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Company, FeishuAppConfig, MemoryFact, Snapshot, WorkEvent
+from app.models.entities import Company, FeishuAppConfig, MemoryFact, Resource, Snapshot, WorkEvent
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -39,9 +39,23 @@ from app.services.feishu.meeting import FeishuMeetingService
 from app.services.feishu.okr import FeishuOkrService
 from app.services.feishu.task import FeishuTaskService
 from app.services.llm.approval_advisor import generate_approval_llm_advice
+from app.services.organization_foundation import resolve_department_members
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
+from app.services.runtime_v5.domain_query import domain_query_fields, domain_query_payload
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
 from app.services.runtime_v5.models import ProviderRequest, ProviderResult, RuntimeContext
+from app.services.runtime_v5.people_resolver import (
+    asks_people_list,
+    filter_people_by_department,
+    filter_people_by_title,
+    format_people_brief,
+    gender_filter_from_text,
+    normalize_gender,
+    normalize_people_item,
+    normalize_people_items,
+    people_context_metadata,
+    resolve_people_from_items,
+)
 from app.services.tools.base import ToolContext, ToolExecutionStatus, ToolRequest
 from app.services.tools.providers.feishu_api import execute_feishu_api_tool, feishu_write_confirmation_token
 from app.services.tools.providers.feishu_mcp import run_lark_cli_json_via_mcp, run_lark_cli_text_via_mcp
@@ -91,6 +105,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
     source = "people"
 
     _OPERATIONS: dict[str, tuple[str, bool]] = {
+        "resolve_identity": ("feishu_contact_user_search", False),
         "search_person": ("feishu_contact_user_search", False),
         "get_person": ("feishu_contact_user_get", False),
         "department_children": ("feishu_contact_department_children", False),
@@ -101,18 +116,41 @@ class FeishuPeopleProvider(FeishuResourceProvider):
     }
 
     def execute(self, request: ProviderRequest) -> ProviderResult:
-        if request.operation == "search_person":
-            keyword = str(request.params.get("keyword") or request.intent.canonical_question or "").strip()
-            cached_items = _people_items_from_snapshot(load_people_snapshot(request.context.runtime_scope.active_company_id), keyword)
+        if request.operation in {"resolve_identity", "search_person"}:
+            entities = request.intent.entities if isinstance(request.intent.entities, dict) else {}
+            keyword = str(request.params.get("keyword") or entities.get("keyword") or request.intent.canonical_question or "").strip()
+            query_fields = _people_query_fields_from_request(request)
+            query_field = query_fields[-1] if query_fields else _people_query_field_from_request(request)
+            cached_result = _people_resolve_from_snapshot(load_people_snapshot(request.context.runtime_scope.active_company_id), keyword)
+            cached_items = cached_result.items
+            capability = "people.resolve_identity" if request.operation == "resolve_identity" else "people.search_person"
             if cached_items:
+                cached_items = self._augment_people_lookup_items(request=request, keyword=keyword, items=cached_items, query_field=query_field)
+                match_type = cached_result.match_type
                 return ProviderResult(
                     source="people",
                     status="success",
                     result_type="people_search",
                     count=len(cached_items),
                     items=cached_items,
-                    metadata={"keyword": keyword, "cache_hit": True},
-                    answer=_people_search_answer(keyword, cached_items),
+                    metadata={
+                        **people_context_metadata(capability=capability),
+                        **_people_lookup_context_metadata(
+                            cached_items,
+                            keyword=keyword,
+                            query_field=query_field,
+                            query_fields=query_fields,
+                            match_type=match_type,
+                            intent_entities=entities,
+                        ),
+                        "keyword": keyword,
+                        "people_query_field": query_field,
+                        "people_query_fields": query_fields,
+                        "cache_hit": True,
+                        "match_type": match_type,
+                        "needs_confirmation": match_type == "near_identity_candidate",
+                    },
+                    answer=_people_search_answer(keyword, cached_items, question=request.context.current_message, match_type=match_type, requested_fields=query_fields),
                     error="",
                 )
             result = self._execute_tool(
@@ -123,19 +161,52 @@ class FeishuPeopleProvider(FeishuResourceProvider):
             payload = _tool_payload(result)
             users = payload.get("users") or payload.get("items") or []
             items = tuple(_user_item(user) for user in users if isinstance(user, dict)) if isinstance(users, list) else ()
+            items = self._augment_people_lookup_items(request=request, keyword=keyword, items=items, query_field=query_field)
             return ProviderResult(
                 source="people",
                 status=_provider_status(result),
                 result_type="people_search",
                 count=len(items),
                 items=items,
-                metadata={"keyword": keyword, "raw": payload},
-                answer=_people_search_answer(keyword, items),
+                metadata={
+                    **people_context_metadata(capability=capability),
+                    **_people_lookup_context_metadata(items, keyword=keyword, query_field=query_field, query_fields=query_fields, intent_entities=entities),
+                    "keyword": keyword,
+                    "people_query_field": query_field,
+                    "people_query_fields": query_fields,
+                    "raw": payload,
+                },
+                answer=_people_search_answer(keyword, items, question=request.context.current_message, requested_fields=query_fields),
                 error=result.error or str(payload.get("error") or ""),
             )
 
         if request.operation == "list_department_members":
             keyword = str(request.params.get("keyword") or request.intent.canonical_question or "").strip()
+            foundation_result = resolve_department_members(
+                self.db,
+                company_id=request.context.runtime_scope.active_company_id,
+                query=keyword,
+            )
+            if foundation_result is not None:
+                resolution = foundation_result.resolution
+                items = foundation_result.items
+                return ProviderResult(
+                    source="people",
+                    status="success",
+                    result_type="department_members",
+                    count=len(items),
+                    items=items,
+                    metadata={
+                        **people_context_metadata(capability="people.list_department_members"),
+                        "keyword": keyword,
+                        "organization_foundation": True,
+                        "organization_resolution": _organization_resolution_metadata(resolution),
+                    },
+                    answer=_department_members_answer(keyword, items)
+                    if resolution.resolved_department_id
+                    else _organization_resolution_failure_answer(keyword, resolution),
+                    error="" if resolution.resolved_department_id else "organization_resolution_not_resolved",
+                )
             result, payload = self._organization_snapshot_payload(request)
             users = payload.get("users") if isinstance(payload.get("users"), list) else []
             items = tuple(
@@ -149,7 +220,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                 result_type="department_members",
                 count=len(items),
                 items=items,
-                metadata={"keyword": keyword, "raw": payload},
+                metadata={**people_context_metadata(capability="people.list_department_members"), "keyword": keyword, "raw": payload},
                 answer=_department_members_answer(keyword, items),
                 error=result.error or "",
             )
@@ -158,9 +229,17 @@ class FeishuPeopleProvider(FeishuResourceProvider):
             result, payload = self._organization_snapshot_payload(request)
             departments = payload.get("departments") if isinstance(payload.get("departments"), list) else []
             users = payload.get("users") if isinstance(payload.get("users"), list) else []
-            items = tuple(_user_item(user) for user in users if isinstance(user, dict))
+            all_items = tuple(_user_item(user) for user in users if isinstance(user, dict))
+            domain_query = domain_query_payload(request.intent.entities if isinstance(request.intent.entities, dict) else {})
+            items, filter_metadata = _apply_people_domain_filters(
+                all_items,
+                question=request.context.current_message,
+                domain_query=domain_query,
+            )
             field_stats = _field_presence_stats(items)
-            if _provider_status(result) == "success" and not departments and not items:
+            member_stats = _department_member_stats(departments)
+            field_stats = {**field_stats, **member_stats}
+            if _provider_status(result) == "success" and not departments and not all_items:
                 return ProviderResult(
                     source="people",
                     status="error",
@@ -169,6 +248,10 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                     answer="没有读取到组织架构数据，已停止后续建表写入。",
                     error="empty_organization_snapshot",
                 )
+            output_mode = str(domain_query.get("output_mode") or "")
+            query_mode = str(request.intent.entities.get("people_query_mode") or _people_query_mode_from_text(request.context.current_message))
+            field_projection = _people_field_projection_for_query_mode(output_mode or query_mode)
+            presentation = "detail" if output_mode == "sidepanel" or query_mode in {"list", "gender_list", "title_list"} else "summary"
             return ProviderResult(
                 source="people",
                 status=_provider_status(result),
@@ -176,14 +259,31 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                 count=len(items),
                 items=items,
                 metadata={
+                    **people_context_metadata(capability="people.get_org_snapshot"),
                     "department_count": len(departments),
+                    "full_user_count": len(all_items),
+                    **filter_metadata,
+                    "reported_member_count": member_stats.get("reported_member_count", 0),
+                    "reported_member_count_basis": member_stats.get("reported_member_count_basis", ""),
+                    "visible_user_count": len(items),
+                    "people_query_mode": query_mode,
+                    "domain_query": domain_query,
+                    "field_projection": field_projection,
+                    "result_context_presentation": presentation,
                     "field_stats": field_stats,
                     "fetch_ms": payload.get("_runtime_v5_fetch_ms", 0),
                     "cache_hit": bool(payload.get("_runtime_v5_cached", False)),
                     "raw": payload,
                 },
                 answer=(
-                    _people_aggregate_answer(len(departments), items, field_stats)
+                    _people_aggregate_answer(
+                        len(departments),
+                        all_items,
+                        field_stats,
+                        question=request.context.current_message,
+                        query_mode=query_mode,
+                        domain_query=domain_query,
+                    )
                     if request.intent.entities.get("view") == "people_aggregate"
                     else _organization_snapshot_answer(len(departments), items, field_stats)
                 ),
@@ -204,7 +304,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
     def _organization_snapshot_payload(self, request: ProviderRequest):
         company_id = request.context.runtime_scope.active_company_id
         cached = load_people_snapshot(company_id)
-        if _people_snapshot_has_content(cached):
+        if _people_snapshot_has_content(cached) and int(cached.get("_runtime_v5_snapshot_version") or 0) >= 3:
             cached = dict(cached)
             cached["_runtime_v5_cached"] = True
             cached["_runtime_v5_fetch_ms"] = 0
@@ -223,8 +323,34 @@ class FeishuPeopleProvider(FeishuResourceProvider):
         payload = _tool_payload(result)
         payload["_runtime_v5_fetch_ms"] = int((perf_counter() - started) * 1000)
         if _provider_status(result) == "success" and _people_snapshot_has_content(payload):
+            payload["_runtime_v5_snapshot_version"] = 3
+            payload["_runtime_v5_snapshot_source"] = "people_provider_refresh"
+            payload["_runtime_v5_saved_at"] = datetime.now(UTC).isoformat()
             save_people_snapshot(company_id, payload)
         return result, payload
+
+    def _augment_people_lookup_items(
+        self,
+        *,
+        request: ProviderRequest,
+        keyword: str,
+        items: tuple[dict[str, Any], ...],
+        query_field: str,
+    ) -> tuple[dict[str, Any], ...]:
+        if not query_field or _people_items_have_field(items, query_field):
+            return items
+        _, payload = self._organization_snapshot_payload(request)
+        users = payload.get("users") if isinstance(payload.get("users"), list) else []
+        snapshot_items = resolve_people_from_items(keyword, normalize_people_items(users)).items
+        if not snapshot_items:
+            return items
+        if not items:
+            return snapshot_items
+        merged: list[dict[str, Any]] = []
+        for item in items:
+            match = _matching_people_item(item, snapshot_items)
+            merged.append({**match, **item, **{key: value for key, value in match.items() if value and not item.get(key)}} if match else item)
+        return tuple(merged)
 
 
 class FeishuApprovalProvider(FeishuResourceProvider):
@@ -882,6 +1008,11 @@ class FeishuIMProvider(FeishuResourceProvider):
                 error=result.error or "",
             )
         if request.operation in {"send_message", "send_result"}:
+            if (
+                str(request.params.get("target_type") or "").strip() == "people_context"
+                and _normalized_im_delivery_mode(request.params.get("delivery_mode")) == "create_group_then_send"
+            ):
+                return self._execute_people_context_group_send(request)
             params_or_error = self._im_send_params(request)
             if isinstance(params_or_error, ProviderResult):
                 return params_or_error
@@ -936,10 +1067,136 @@ class FeishuIMProvider(FeishuResourceProvider):
         )
         return _provider_result_from_tool_result("im", result, fallback_result_type=request.operation)
 
-    def _im_send_params(self, request: ProviderRequest) -> dict[str, Any] | ProviderResult:
+    def _im_send_text(self, request: ProviderRequest) -> str:
         text = str(request.params.get("text") or "").strip()
         if not text and request.operation == "send_result":
             text = _message_text_from_previous_results(request.params.get("previous_results"))
+        return text.strip()
+
+    def _people_context_items(self, request: ProviderRequest) -> tuple[dict[str, Any], ...]:
+        targets = request.params.get("people_targets")
+        return tuple(item for item in targets if isinstance(item, dict)) if isinstance(targets, list) else ()
+
+    def _execute_people_context_group_send(self, request: ProviderRequest) -> ProviderResult:
+        text = self._im_send_text(request)
+        if not text:
+            return _missing_params_result(
+                source="im",
+                result_type="message_send",
+                operation=request.operation,
+                missing=("text",),
+                answer="发送消息还缺少消息内容。",
+                error="missing_message_text",
+            )
+        items = self._people_context_items(request)
+        if not items:
+            return _missing_params_result(
+                source="im",
+                result_type="message_send",
+                operation=request.operation,
+                missing=("people_targets",),
+                answer="上一轮人员结果里没有可用于发送的人员目标。",
+                error="missing_people_targets",
+            )
+        open_ids = tuple(
+            str(item.get("open_id") or item.get("user_id") or "").strip()
+            for item in items
+            if str(item.get("open_id") or item.get("user_id") or "").strip()
+        )
+        if not open_ids:
+            return _missing_params_result(
+                source="im",
+                result_type="message_send_people_context_group",
+                operation=request.operation,
+                missing=("people_open_ids",),
+                answer="这些人员结果里没有可用于建群的飞书 open_id。",
+                error="missing_people_open_ids",
+            )
+
+        chat_name = _people_context_group_chat_name(request, items)
+        create_result = self._execute_tool(
+            request,
+            tool_name="feishu_im_create_chat",
+            confirm_write=True,
+            params={
+                "name": chat_name,
+                "description": "由数字参谋根据上一轮人员结果创建",
+                "user_id_list": list(open_ids),
+                "chat_type": "private",
+                "chat_mode": "group",
+                "as": "bot",
+            },
+        )
+        create_status = _provider_status(create_result)
+        chat_id = _chat_id_from_tool_result(create_result)
+        if create_status != "success" or not chat_id:
+            return ProviderResult(
+                source="im",
+                status="error",
+                result_type="message_send_people_context_group",
+                count=0,
+                items=(),
+                metadata={
+                    "operation": request.operation,
+                    "target_type": "people_context",
+                    "delivery_mode": "create_group_then_send",
+                    "people_target_count": len(items),
+                    "tool_name": "feishu_im_create_chat",
+                    "chat_name": chat_name,
+                    "created_chat_id": chat_id,
+                    "substeps": {"create_chat": create_status},
+                    **_provider_error_metadata(create_result),
+                },
+                answer=_tool_failure_answer("群聊创建", create_result)
+                if create_status != "success"
+                else "群聊已创建，但没有拿到可继续发送消息的 chat_id。",
+                error=create_result.error or "missing_created_chat_id",
+            )
+
+        send_result = self._execute_tool(
+            request,
+            tool_name="feishu_im_send_message",
+            confirm_write=True,
+            params={"chat_id": chat_id, "text": text, "as": "bot"},
+        )
+        status = _provider_status(send_result)
+        return ProviderResult(
+            source="im",
+            status=status,
+            result_type="message_send_people_context_group",
+            count=1 if status == "success" else 0,
+            items=(
+                {
+                    "target": chat_name,
+                    "text": text,
+                    "resolved_chat_id": chat_id,
+                    "resolved_target_name": chat_name,
+                    "people_target_count": len(items),
+                    "delivery_mode": "create_group_then_send",
+                },
+            )
+            if status == "success"
+            else (),
+            metadata={
+                "operation": request.operation,
+                "target_type": "people_context",
+                "delivery_mode": "create_group_then_send",
+                "people_target_count": len(items),
+                "tool_name": "feishu_im_send_message",
+                "create_tool_name": "feishu_im_create_chat",
+                "chat_name": chat_name,
+                "resolved_chat_id": chat_id,
+                "execution_identity": "bot",
+                "execution_identity_source": "people_context_group_send_bot_identity",
+                "substeps": {"create_chat": create_status, "send_message": status},
+                **_provider_error_metadata(send_result),
+            },
+            answer="已创建群聊并发送消息。" if status == "success" else _tool_failure_answer("群内消息发送", send_result),
+            error=send_result.error or "",
+        )
+
+    def _im_send_params(self, request: ProviderRequest) -> dict[str, Any] | ProviderResult:
+        text = self._im_send_text(request)
         if not text:
             return _missing_params_result(
                 source="im",
@@ -951,6 +1208,33 @@ class FeishuIMProvider(FeishuResourceProvider):
             )
         target_type = str(request.params.get("target_type") or "").strip()
         params: dict[str, Any] = {"text": text, "as": request.execution_identity}
+        if target_type == "people_context":
+            items = self._people_context_items(request)
+            if not items:
+                return _missing_params_result(
+                    source="im",
+                    result_type="message_send",
+                    operation=request.operation,
+                    missing=("people_targets",),
+                    answer="上一轮人员结果里没有可用于发送的人员目标。",
+                    error="missing_people_targets",
+                )
+            return ProviderResult(
+                source="im",
+                status="partial",
+                result_type="message_send_people_context",
+                count=len(items),
+                items=items,
+                metadata={
+                    "operation": request.operation,
+                    "target_type": "people_context",
+                    "people_target_count": len(items),
+                    "requires_confirmation": True,
+                    "confirmation_reason": "batch_people_message_not_auto_executed",
+                },
+                answer=f"已识别上一轮人员结果中的 {len(items)} 个发送对象。批量发送消息需要进入确认流程，当前未直接发送。",
+                error="requires_batch_send_confirmation",
+            )
         if target_type in {"self", "current_chat"}:
             if request.context.chat_id:
                 params["chat_id"] = request.context.chat_id
@@ -2918,31 +3202,38 @@ class KnowledgeProvider(FeishuResourceProvider):
         seed_text = request.context.current_message
         company_profile_mode = _should_include_company_profile_context(seed_text) or request.intent.entities.get("knowledge_context") == "company_profile"
         if company_profile_mode:
+            document_items = _knowledge_document_items(self.db, request=request, company_id=company_id, seed_text=seed_text, context="company_profile")
             company_items = _company_profile_knowledge_items(self.db, company_id=company_id, seed_text=seed_text)
+            items = (*document_items, *company_items)
             return ProviderResult(
                 source="knowledge",
                 status="success",
                 result_type="company_profile_knowledge",
-                count=len(company_items),
-                items=company_items,
+                count=len(items),
+                items=items,
                 metadata={
                     "operation": request.operation,
                     "tool_name": self._OPERATIONS[request.operation][0],
                     "knowledge_context": "company_profile",
+                    "document_count": len(document_items),
                     "company_profile_count": len(company_items),
+                    "evidence_sources": sorted({str(item.get("source") or "") for item in items if str(item.get("source") or "").strip()}),
+                    "result_context_presentation": "summary",
                     "fact_count": 0,
                     "event_count": 0,
                 },
-                answer=_company_profile_knowledge_answer(company_items),
+                answer=_company_profile_knowledge_answer(items),
             )
         if request.operation == "risk_policy":
             seed_text = f"{seed_text} 风险 预警 异常 制度 流程 规范"
         keywords = _knowledge_keywords(seed_text)
+        document_items = _knowledge_document_items(self.db, request=request, company_id=company_id, seed_text=seed_text, context="general")
         facts = _knowledge_facts(self.db, company_id=company_id, keywords=keywords, limit=6)
         events = _knowledge_events(self.db, company_id=company_id, keywords=keywords, limit=6)
         company_items = _company_profile_knowledge_items(self.db, company_id=company_id, seed_text=seed_text)
         items = tuple(
             [
+                *document_items,
                 *company_items,
                 *(_knowledge_fact_item(item) for item in facts),
                 *(_knowledge_event_item(item) for item in events),
@@ -2959,6 +3250,7 @@ class KnowledgeProvider(FeishuResourceProvider):
                 "operation": request.operation,
                 "tool_name": self._OPERATIONS[request.operation][0],
                 "keywords": keywords,
+                "document_count": len(document_items),
                 "company_profile_count": len(company_items),
                 "fact_count": len(facts),
                 "event_count": len(events),
@@ -3077,8 +3369,99 @@ def _external_realtime_boundary_answer(category: str) -> str:
     return "这类问题需要外部实时信息能力；当前还没有接入实时联网查询，所以我不能可靠回答。"
 
 
+def _workevent_visibility_item(event: WorkEvent) -> dict[str, Any]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    raw_json = event.raw_json if isinstance(event.raw_json, dict) else {}
+    cognitive_fields = payload.get("cognitive_fields") if isinstance(payload.get("cognitive_fields"), dict) else {}
+    visibility_scope = str(getattr(event, "visibility_scope", "") or "company").strip().upper()
+    object_type = str(getattr(event, "object_type", "") or "workevent").strip()
+    object_id = str(getattr(event, "object_id", "") or getattr(event, "id", "") or "").strip()
+    allowed_user_ids = _string_sequence(getattr(event, "allowed_user_ids", None))
+    allowed_departments = _string_sequence(getattr(event, "allowed_departments", None))
+    event_payloads = (cognitive_fields, payload, raw_json)
+    owner_open_id = _first_payload_string(event_payloads, ("owner_open_id", "user_open_id", "actor_open_id"))
+    owner_user_id = _first_payload_string(event_payloads, ("owner_user_id", "user_id", "actor_user_id"))
+    owner_department_id = _first_payload_string(
+        event_payloads,
+        ("owner_department_id", "department_id", "owner_department"),
+    )
+    item: dict[str, Any] = {
+        "resource_plane": "cognitive",
+        "resource_type": object_type or str(event.business_domain or "workevent"),
+        "source_system": event.source or "digital_advisor",
+        "source_object_type": object_type,
+        "source_object_id": object_id,
+        "visibility_scope": visibility_scope,
+        "inherited_visibility_scope": visibility_scope,
+        "allowed_user_ids": allowed_user_ids,
+        "allowed_departments": allowed_departments,
+        "allowed_roles": _string_sequence(getattr(event, "allowed_roles", None)),
+        "source_event_ids": [str(event.id)],
+        "data_classification": event.data_classification,
+    }
+    if owner_open_id:
+        item["owner_open_id"] = owner_open_id
+    if owner_user_id:
+        item["owner_user_id"] = owner_user_id
+    if owner_department_id:
+        item["owner_department_id"] = owner_department_id
+    return item
+
+
+def _memory_visibility_item(fact: MemoryFact) -> dict[str, Any]:
+    payload = fact.payload if isinstance(fact.payload, dict) else {}
+    scope = str(fact.scope or "company").strip().lower()
+    if scope in {"personal", "user"}:
+        visibility_scope = "SELF"
+    elif scope == "chat":
+        visibility_scope = "SELF" if fact.user_open_id else "PRIVATE"
+    else:
+        visibility_scope = "COMPANY"
+    item: dict[str, Any] = {
+        "resource_plane": "cognitive",
+        "resource_type": "memory",
+        "source_system": "digital_advisor",
+        "source_object_type": "memory_fact",
+        "source_object_id": str(fact.id),
+        "visibility_scope": visibility_scope,
+        "inherited_visibility_scope": visibility_scope,
+        "allowed_user_ids": [fact.user_open_id] if visibility_scope == "SELF" and fact.user_open_id else [],
+    }
+    owner_open_id = str(fact.user_open_id or payload.get("owner_open_id") or payload.get("user_open_id") or "").strip()
+    owner_user_id = str(payload.get("owner_user_id") or payload.get("user_id") or "").strip()
+    owner_department_id = str(payload.get("owner_department_id") or payload.get("department_id") or "").strip()
+    if owner_open_id:
+        item["owner_open_id"] = owner_open_id
+    if owner_user_id:
+        item["owner_user_id"] = owner_user_id
+    if owner_department_id:
+        item["owner_department_id"] = owner_department_id
+    if fact.source_work_event_id:
+        item["source_event_ids"] = [str(fact.source_work_event_id)]
+    return item
+
+
+def _first_payload_string(payloads: tuple[dict[str, Any], ...], keys: tuple[str, ...]) -> str:
+    for payload in payloads:
+        for key in keys:
+            value = payload.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return ""
+
+
+def _string_sequence(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def _workevent_item(event: WorkEvent) -> dict[str, Any]:
     return {
+        **_workevent_visibility_item(event),
         "id": str(event.id),
         "title": event.title or event.event_type,
         "event_type": event.event_type,
@@ -3105,6 +3488,7 @@ def _workevent_answer(items: tuple[dict[str, Any], ...], *, risk_only: bool) -> 
 
 def _memory_item(fact: MemoryFact) -> dict[str, Any]:
     return {
+        **_memory_visibility_item(fact),
         "id": str(fact.id),
         "fact_type": fact.fact_type,
         "subject": fact.subject,
@@ -3132,6 +3516,167 @@ _BLOCKED_KNOWLEDGE_FACT_TYPES = {"compensation", "finance", "customer_or_order"}
 _BLOCKED_KNOWLEDGE_TERMS = ("薪资", "工资", "奖金", "现金流", "客户订单", "回款", "老板邮箱", "私密")
 _SENSITIVE_KNOWLEDGE_LEVELS = {"sensitive", "confidential", "secret", "private"}
 _KNOWLEDGE_EVENT_TERMS = ("wiki", "doc", "docx", "document", "knowledge", "知识", "制度", "流程", "规范", "模板")
+_COMPANY_PROFILE_DOCUMENT_TERMS = ("公司介绍", "公司简介", "企业介绍", "企业简介", "主营业务", "主要业务", "业务范围", "产品介绍", "客户类型", "官网")
+_GENERAL_KNOWLEDGE_DOCUMENT_TERMS = ("制度", "流程", "规范", "手册", "模板", "SOP", "说明", "指南", "知识", "文档", "资料", "项目")
+_READABLE_DOCUMENT_TYPES = {"doc", "docx", "document"}
+
+
+def _text_contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _knowledge_document_items(
+    db: Session,
+    *,
+    request: ProviderRequest,
+    company_id: Any,
+    seed_text: str,
+    context: str,
+    limit: int = 3,
+) -> tuple[dict[str, Any], ...]:
+    if not company_id:
+        return ()
+    app_config = _active_feishu_app_config(db, company_id)
+    if app_config is None:
+        return ()
+    service = FeishuDriveService(app_config)
+    candidates = _registered_knowledge_resource_candidates(db, company_id=company_id, seed_text=seed_text, context=context, limit=limit * 3)
+    if len(candidates) < limit:
+        candidates.extend(_drive_knowledge_candidates(service, seed_text=seed_text, context=context, limit=limit * 3))
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        key = (str(candidate.get("document_type") or ""), str(candidate.get("document_id") or ""))
+        if not key[1] or key in seen:
+            continue
+        seen.add(key)
+        item = _read_knowledge_document_candidate(service, candidate, seed_text=seed_text, context=context)
+        if item:
+            items.append(item)
+        if len(items) >= limit:
+            break
+    return tuple(items)
+
+
+def _registered_knowledge_resource_candidates(
+    db: Session,
+    *,
+    company_id: Any,
+    seed_text: str,
+    context: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    query = (
+        select(Resource)
+        .where(Resource.company_id == company_id)
+        .where(Resource.enabled.is_(True))
+        .where(Resource.resource_type.in_(["drive_file", "doc", "wiki"]))
+        .order_by(Resource.updated_at.desc())
+        .limit(limit * 4)
+    )
+    resources = list(db.scalars(query).all())
+    candidates = []
+    for resource in resources:
+        config = resource.config_json if isinstance(resource.config_json, dict) else {}
+        document_type = str(config.get("document_type") or _document_type_for_token(resource.resource_id) or "").strip().lower()
+        candidate = {
+            "title": resource.resource_name or resource.resource_id,
+            "document_id": resource.resource_id,
+            "document_type": document_type,
+            "source": "registered_resource",
+            "resource_id": str(resource.id),
+            "resource_type": resource.resource_type,
+            "config": config,
+        }
+        score = _knowledge_document_score(candidate, seed_text=seed_text, context=context)
+        if score > 0 and document_type in _READABLE_DOCUMENT_TYPES:
+            candidates.append((score, candidate))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [candidate for _, candidate in candidates[:limit]]
+
+
+def _drive_knowledge_candidates(
+    service: FeishuDriveService,
+    *,
+    seed_text: str,
+    context: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    try:
+        payload = _run_async(service.list_files(page_size=min(max(limit, 1), 50)))
+    except Exception:
+        return []
+    data = _feishu_response_data(payload)
+    raw_items = _items_from_payload(data if isinstance(data, dict) else payload)
+    candidates = []
+    for raw in raw_items:
+        item = _drive_file_item(raw)
+        document_type = str(item.get("type") or _document_type_for_token(str(item.get("token") or "")) or "").strip().lower()
+        candidate = {
+            "title": item.get("name") or item.get("token") or "",
+            "document_id": item.get("token") or "",
+            "document_type": document_type,
+            "source": "drive_list",
+            "resource_type": "drive_file",
+            "raw": raw,
+        }
+        score = _knowledge_document_score(candidate, seed_text=seed_text, context=context)
+        if score > 0 and document_type in _READABLE_DOCUMENT_TYPES:
+            candidates.append((score, candidate))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [candidate for _, candidate in candidates[:limit]]
+
+
+def _knowledge_document_score(candidate: dict[str, Any], *, seed_text: str, context: str) -> int:
+    title = str(candidate.get("title") or "").lower()
+    seed = str(seed_text or "").lower()
+    terms = _COMPANY_PROFILE_DOCUMENT_TERMS if context == "company_profile" else _GENERAL_KNOWLEDGE_DOCUMENT_TERMS
+    score = sum(3 for term in terms if term.lower() in title)
+    keywords = _knowledge_keywords(seed)
+    score += sum(1 for keyword in keywords if keyword and keyword.lower() in title)
+    if context == "company_profile" and _text_contains_any(title, ("合同", "库存", "采购", "crm", "资产", "订单", "台账")):
+        score -= 3
+    return score
+
+
+def _read_knowledge_document_candidate(
+    service: FeishuDriveService,
+    candidate: dict[str, Any],
+    *,
+    seed_text: str,
+    context: str,
+) -> dict[str, Any] | None:
+    document_id = str(candidate.get("document_id") or "").strip()
+    document_type = str(candidate.get("document_type") or "").strip().lower()
+    if not document_id or document_type not in _READABLE_DOCUMENT_TYPES:
+        return None
+    try:
+        payload = _run_async(service.get_document_content(document_id=document_id, document_type=document_type))
+    except Exception:
+        return None
+    if not payload.get("available"):
+        return None
+    content = str(payload.get("content_text") or "").strip()
+    if not content:
+        return None
+    if context == "company_profile" and not _document_content_matches_company_profile(content, title=str(candidate.get("title") or "")):
+        return None
+    return {
+        "kind": "knowledge_document",
+        "title": str(candidate.get("title") or document_id),
+        "summary": _short_text(content, 260),
+        "source": str(candidate.get("source") or "drive"),
+        "resource_type": str(candidate.get("resource_type") or "drive_file"),
+        "document_id": document_id,
+        "document_type": document_type,
+        "content_preview": _short_text(content, 1200),
+        "evidence_type": "document_content",
+    }
+
+
+def _document_content_matches_company_profile(content: str, *, title: str) -> bool:
+    text = f"{title}\n{content}".lower()
+    return _text_contains_any(text, tuple(term.lower() for term in _COMPANY_PROFILE_DOCUMENT_TERMS))
 
 
 def _company_profile_knowledge_items(db: Session, *, company_id: Any, seed_text: str) -> tuple[dict[str, Any], ...]:
@@ -3164,7 +3709,21 @@ def _company_profile_knowledge_items(db: Session, *, company_id: Any, seed_text:
 
 def _company_profile_knowledge_answer(items: tuple[dict[str, Any], ...]) -> str:
     if not items:
-        return "公司档案里暂时还没有可用的企业画像。"
+        return "暂时没有从公司档案、云文档、Wiki 或 Drive 中找到可用的公司介绍资料。"
+    document_items = [item for item in items if item.get("kind") == "knowledge_document"]
+    if document_items:
+        lines = [f"从正式知识资料中找到 {len(document_items)} 条公司介绍依据："]
+        for index, item in enumerate(document_items[:3], start=1):
+            title = str(item.get("title") or "未命名文档").strip()
+            summary = str(item.get("summary") or "").strip()
+            lines.append(f"{index}. {title}" + (f"｜{summary}" if summary else ""))
+        profile_items = [item for item in items if item.get("kind") == "company_profile"]
+        if profile_items:
+            profile_summary = str(profile_items[0].get("summary") or "").strip()
+            if profile_summary and "暂时还没有沉淀" not in profile_summary:
+                lines.append(f"企业画像补充：{profile_summary}")
+        lines.append("说明：以上只来自已登记或当前应用可见的正式知识资料，不使用邮件或底层日志拼凑。")
+        return "\n".join(lines)
     item = items[0]
     title = str(item.get("title") or "当前公司").strip()
     summary = str(item.get("summary") or "").strip()
@@ -3253,6 +3812,7 @@ def _knowledge_events(
 
 def _knowledge_fact_item(fact: MemoryFact) -> dict[str, Any]:
     return {
+        **_memory_visibility_item(fact),
         "kind": "fact",
         "title": fact.subject,
         "summary": _short_text(fact.content, 180),
@@ -3266,6 +3826,7 @@ def _knowledge_fact_item(fact: MemoryFact) -> dict[str, Any]:
 
 def _knowledge_event_item(event: WorkEvent) -> dict[str, Any]:
     return {
+        **_workevent_visibility_item(event),
         "kind": "event",
         "title": event.title or event.event_type,
         "summary": _short_text(event.content_text, 180),
@@ -3286,6 +3847,8 @@ def _knowledge_answer(items: tuple[dict[str, Any], ...], *, risk_policy: bool) -
         summary = str(item.get("summary") or "").strip()
         if item.get("kind") == "company_profile":
             kind = "企业画像"
+        elif item.get("kind") == "knowledge_document":
+            kind = "正式文档"
         else:
             kind = "知识事实" if item.get("kind") == "fact" else "文档事件"
         lines.append(f"{index}. {kind}｜{title}" + (f"｜{summary}" if summary else ""))
@@ -3386,6 +3949,7 @@ def _web_event_item(event: WorkEvent) -> dict[str, Any]:
     raw_json = event.raw_json if isinstance(event.raw_json, dict) else {}
     url = str(payload.get("url") or payload.get("link") or raw_json.get("url") or raw_json.get("link") or "").strip()
     return {
+        **_workevent_visibility_item(event),
         "kind": "external_web",
         "title": event.title or event.event_type,
         "summary": _short_text(event.content_text, 180),
@@ -4631,6 +5195,7 @@ def _items_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
         "message_list",
         "threads",
         "mails",
+        "files",
     ):
         value = payload.get(key)
         if isinstance(value, list):
@@ -4644,37 +5209,18 @@ def _items_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _user_item(user: dict[str, Any]) -> dict[str, Any]:
-    department_names = user.get("department_names")
-    department_ids = user.get("department_ids")
-    gender = user.get("gender") or user.get("gender_name") or user.get("sex") or ""
-    return {
-        "name": user.get("name") or user.get("english_name") or user.get("open_id") or "",
-        "department": ", ".join(str(item) for item in department_names if item) if isinstance(department_names, list) else "",
-        "department_ids": ", ".join(str(item) for item in department_ids if item) if isinstance(department_ids, list) else "",
-        "leader": user.get("leader") or user.get("manager") or user.get("leader_name") or user.get("manager_name") or "",
-        "title": user.get("title") or user.get("job_title") or "",
-        "gender": str(gender or "").strip(),
-        "email": user.get("email") or "",
-        "mobile": user.get("mobile") or "",
-        "open_id": user.get("open_id") or "",
-    }
+    return normalize_people_item(user)
 
 
 def _people_items_from_snapshot(payload: dict[str, Any] | None, keyword: str) -> tuple[dict[str, Any], ...]:
+    return _people_resolve_from_snapshot(payload, keyword).items
+
+
+def _people_resolve_from_snapshot(payload: dict[str, Any] | None, keyword: str):
     if not isinstance(payload, dict):
-        return ()
+        return resolve_people_from_items(keyword, ())
     users = payload.get("users") if isinstance(payload.get("users"), list) else []
-    normalized = keyword.strip().lower()
-    if not normalized:
-        return ()
-    return tuple(
-        item
-        for item in (_user_item(user) for user in users if isinstance(user, dict))
-        if normalized in str(item.get("name") or "").lower()
-        or normalized in str(item.get("email") or "").lower()
-        or normalized in str(item.get("mobile") or "").lower()
-        or normalized in str(item.get("title") or "").lower()
-    )
+    return resolve_people_from_items(keyword, normalize_people_items(users))
 
 
 def _approval_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -4730,10 +5276,26 @@ def _task_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _people_search_answer(keyword: str, items: tuple[dict[str, Any], ...]) -> str:
+def _people_search_answer(
+    keyword: str,
+    items: tuple[dict[str, Any], ...],
+    *,
+    question: str = "",
+    match_type: str = "",
+    requested_fields: tuple[str, ...] = (),
+) -> str:
     if not items:
-        return f"没有找到与「{keyword}」匹配的人员。"
-    lines = [f"找到 {len(items)} 位与「{keyword}」相关的人员："]
+        return f"我在当前可读通讯录里没找到「{keyword}」。你可以换成姓名全称、手机号或邮箱再查一次。"
+    if match_type == "near_identity_candidate":
+        names = "、".join(str(item.get("name") or "").strip() for item in items[:3] if str(item.get("name") or "").strip())
+        if names:
+            return f"我没有精确找到「{keyword}」，通讯录里相近的是：{names}。你是不是指其中一位？"
+        return f"我没有精确找到「{keyword}」，但找到了一些相近人员；请确认姓名后我再查。"
+    if len(items) == 1:
+        focused = _focused_people_answer(items[0], question=question, requested_fields=requested_fields)
+        if focused:
+            return focused
+    lines = [f"我在通讯录里找到 {len(items)} 位和「{keyword}」相关的人："]
     for item in items[:10]:
         name = str(item.get("name") or "未知")
         title = str(item.get("title") or "").strip()
@@ -4745,10 +5307,190 @@ def _people_search_answer(keyword: str, items: tuple[dict[str, Any], ...]) -> st
     return "\n".join(lines)
 
 
+def _people_lookup_context_metadata(
+    items: tuple[dict[str, Any], ...],
+    *,
+    keyword: str,
+    query_field: str = "",
+    query_fields: tuple[str, ...] = (),
+    match_type: str = "",
+    intent_entities: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolution = _people_identity_resolution(match_type, items)
+    fields = query_fields or ((query_field,) if query_field else ())
+    query = domain_query_payload(intent_entities)
+    output_mode = str(query.get("output_mode") or "")
+    presentation = "summary" if len(items) == 1 and fields and resolution == "exact" and output_mode != "detail" else "detail"
+    item = items[0] if len(items) == 1 and isinstance(items[0], dict) else {}
+    visible_fields = tuple(field for field in ("title", "mobile", "email", "gender") if _people_item_field_value(item, field))
+    sensitive_fields = tuple(field for field in ("mobile", "email") if _people_item_field_value(item, field))
+    field_reliability = {
+        "title": "source" if str(item.get("title") or item.get("job_title") or "").strip() else "missing",
+        "mobile": "source" if str(item.get("mobile") or "").strip() else "missing",
+        "email": "source" if str(item.get("email") or "").strip() else "missing",
+        "gender": "source" if _reliable_people_gender(item) else "missing",
+    } if item else {}
+    return {
+        "result_context_presentation": presentation,
+        "identity_resolution": resolution,
+        "resource_scope": "organization",
+        "domain_query": query,
+        "sensitive_fields_present": sensitive_fields,
+        "field_reliability": field_reliability,
+        "people_context_frame": {
+            "current_person": str(item.get("name") or keyword or "").strip(),
+            "current_requested_field": query_field,
+            "current_requested_fields": fields,
+            "identity_resolution": resolution,
+            "visible_fields": visible_fields,
+        },
+    }
+
+
+def _people_identity_resolution(match_type: str, items: tuple[dict[str, Any], ...]) -> str:
+    if match_type in {"exact", "exact_identity", "exact_name", "exact_email", "exact_mobile"}:
+        return "exact"
+    if match_type in {"near_identity_candidate", "near_candidate", "fuzzy"}:
+        return "near_candidate"
+    if len(items) == 1:
+        return "exact"
+    if items:
+        return "multiple"
+    return "unresolved"
+
+
+def _people_query_field_from_request(request: ProviderRequest) -> str:
+    entities = request.intent.entities if isinstance(request.intent.entities, dict) else {}
+    value = str(entities.get("people_query_field") or "").strip()
+    if value:
+        return value
+    return _people_query_field_from_text(request.context.current_message or request.intent.canonical_question)
+
+
+def _people_query_fields_from_request(request: ProviderRequest) -> tuple[str, ...]:
+    entities = request.intent.entities if isinstance(request.intent.entities, dict) else {}
+    fields = domain_query_fields(entities)
+    if fields:
+        return fields
+    field = _people_query_field_from_request(request)
+    return (field,) if field else ()
+
+
+def _people_query_field_from_text(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    if any(token in compact for token in ("电话", "号码", "手机号", "手机")):
+        return "mobile"
+    if "邮箱" in compact:
+        return "email"
+    if any(token in compact for token in ("职位", "岗位", "职务")):
+        return "title"
+    if any(token in compact for token in ("男还是女", "女还是男", "男性还是女性", "性别")):
+        return "gender"
+    return ""
+
+
+def _people_items_have_field(items: tuple[dict[str, Any], ...], query_field: str) -> bool:
+    if not items:
+        return False
+    return all(_people_item_field_value(item, query_field) for item in items)
+
+
+def _people_item_field_value(item: dict[str, Any], query_field: str) -> str:
+    if query_field == "mobile":
+        return str(item.get("mobile") or "").strip()
+    if query_field == "email":
+        return str(item.get("email") or "").strip()
+    if query_field == "title":
+        return str(item.get("title") or item.get("job_title") or "").strip()
+    if query_field == "gender":
+        return _reliable_people_gender(item)
+    return ""
+
+
+def _reliable_people_gender(item: dict[str, Any]) -> str:
+    if str(item.get("gender_source") or "").strip() != "source":
+        return ""
+    return normalize_gender(item.get("gender_normalized") or item.get("gender"))
+
+
+def _matching_people_item(item: dict[str, Any], candidates: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    for key in ("open_id", "user_id", "email", "mobile", "name"):
+        value = str(item.get(key) or "").strip()
+        if not value:
+            continue
+        for candidate in candidates:
+            if str(candidate.get(key) or "").strip() == value:
+                return candidate
+    return {}
+
+
+def _focused_people_answer(item: dict[str, Any], *, question: str = "", requested_fields: tuple[str, ...] = ()) -> str:
+    name = str(item.get("name") or "这位同事").strip()
+    requested_fields = requested_fields or _people_query_fields_from_text(question)
+    if not requested_fields:
+        return ""
+    parts: list[str] = []
+    missing: list[str] = []
+    if "gender" in requested_fields:
+        gender = _reliable_people_gender(item)
+        if gender == "male":
+            parts.append("性别是男性")
+        elif gender == "female":
+            parts.append("性别是女性")
+        else:
+            missing.append("可靠性别字段")
+    if "title" in requested_fields:
+        title = str(item.get("title") or item.get("job_title") or "").strip()
+        department = str(item.get("department") or "").strip()
+        if title and department:
+            parts.append(f"{'是' if requested_fields == ('title',) else '职位是'}{department}的{title}")
+        elif title:
+            parts.append(f"{'岗位是' if requested_fields == ('title',) else '职位是'}{title}")
+        else:
+            missing.append("职位")
+    if "mobile" in requested_fields:
+        mobile = str(item.get("mobile") or "").strip()
+        if mobile:
+            parts.append(f"手机号是 {mobile}")
+        else:
+            missing.append("手机号")
+    if "email" in requested_fields:
+        email = str(item.get("email") or "").strip()
+        if email:
+            parts.append(f"邮箱是 {email}")
+        else:
+            missing.append("邮箱")
+    if parts and missing:
+        return f"{name}的" + "，".join(parts) + f"；当前可读通讯录没有提供{ '、'.join(missing) }。"
+    if parts:
+        if requested_fields == ("title",) and len(parts) == 1 and parts[0].startswith(("是", "岗位是")):
+            return f"{name}{parts[0]}。"
+        return f"{name}的" + "，".join(parts) + "。"
+    if missing:
+        if "可靠性别字段" in missing:
+            return f"我查到了{name}，但当前可读通讯录没有提供可靠性别字段，我不会根据名字判断。"
+        return f"我查到了{name}，但当前可读通讯录没有提供{ '、'.join(missing) }。"
+    return ""
+
+
+def _people_query_fields_from_text(text: str) -> tuple[str, ...]:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    fields: list[str] = []
+    if any(token in compact for token in ("男还是女", "女还是男", "男性还是女性", "性别")):
+        fields.append("gender")
+    if any(token in compact for token in ("岗位", "职位", "职务")):
+        fields.append("title")
+    if any(token in compact for token in ("电话", "号码", "手机号", "手机")):
+        fields.append("mobile")
+    if "邮箱" in compact:
+        fields.append("email")
+    return tuple(fields)
+
+
 def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...]) -> str:
     if not items:
-        return f"没有找到「{keyword}」相关部门成员。"
-    lines = [f"「{keyword}」相关成员 {len(items)} 人："]
+        return f"我在当前可读通讯录里没找到「{keyword}」相关成员。可能是部门名称不一致，也可能这个部门不在当前授权范围里。"
+    lines = [f"「{keyword}」我查到了 {len(items)} 人："]
     for index, item in enumerate(items[:30], start=1):
         name = str(item.get("name") or "未知")
         title = str(item.get("title") or "").strip()
@@ -4759,15 +5501,40 @@ def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...]) 
     return "\n".join(lines)
 
 
+def _organization_resolution_metadata(resolution) -> dict[str, Any]:
+    return {
+        "query": getattr(resolution, "query", ""),
+        "normalized_query": getattr(resolution, "normalized_query", ""),
+        "resolved_type": getattr(resolution, "resolved_type", ""),
+        "resolved_id": getattr(resolution, "resolved_id", ""),
+        "resolved_name": getattr(resolution, "resolved_name", ""),
+        "confidence": getattr(resolution, "confidence", 0.0),
+        "reason": getattr(resolution, "reason", ""),
+        "needs_clarification": getattr(resolution, "needs_clarification", False),
+        "candidates": [
+            {
+                "target_type": item.target_type,
+                "target_id": item.target_id,
+                "name": item.name,
+                "confidence": item.confidence,
+                "reason": item.reason,
+            }
+            for item in getattr(resolution, "candidates", ())
+        ],
+    }
+
+
+def _organization_resolution_failure_answer(keyword: str, resolution) -> str:
+    candidates = getattr(resolution, "candidates", ()) or ()
+    if candidates:
+        names = "、".join(str(item.name) for item in candidates[:5] if str(item.name).strip())
+        if names:
+            return f"我没有唯一匹配到「{keyword}」这个组织对象。比较接近的是：{names}。你指的是哪一个？"
+    return f"我没有在 Organization Foundation 里找到「{keyword}」这个组织对象。需要先同步或补充组织别名后再查。"
+
+
 def _department_item_matches(item: dict[str, Any], keyword: str) -> bool:
-    normalized = keyword.replace("部门", "").replace("团队", "").replace("中心", "").replace("小组", "").strip()
-    if not normalized:
-        return True
-    haystack = " ".join(
-        str(item.get(key) or "")
-        for key in ("department", "department_ids", "name", "title")
-    )
-    return normalized in haystack or keyword in haystack
+    return item in filter_people_by_department((item,), keyword)
 
 
 def _task_list_answer(items: tuple[dict[str, Any], ...], *, query: str = "") -> str:
@@ -5399,20 +6166,61 @@ def _field_presence_stats(items: tuple[dict[str, Any], ...]) -> dict[str, int]:
     }
 
 
+def _department_member_stats(departments: list[Any]) -> dict[str, int | str]:
+    department_items = [item for item in departments if isinstance(item, dict)]
+    top_level = [
+        item
+        for item in department_items
+        if str(item.get("parent_department_id") or "").strip() in {"", "0"}
+    ]
+    primary_counts = [_positive_int(item.get("primary_member_count")) for item in top_level]
+    member_counts = [_positive_int(item.get("member_count")) for item in top_level]
+    primary_total = sum(primary_counts)
+    member_total = sum(member_counts)
+    if primary_total > 0:
+        return {
+            "reported_member_count": primary_total,
+            "reported_member_count_basis": "top_level_primary_member_count",
+        }
+    if member_total > 0:
+        return {
+            "reported_member_count": member_total,
+            "reported_member_count_basis": "top_level_member_count",
+        }
+    all_member_counts = [_positive_int(item.get("member_count")) for item in department_items]
+    max_member_count = max(all_member_counts, default=0)
+    return {
+        "reported_member_count": max_member_count,
+        "reported_member_count_basis": "max_department_member_count" if max_member_count else "",
+    }
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(number, 0)
+
+
 def _organization_snapshot_answer(
     department_count: int,
     items: tuple[dict[str, Any], ...],
     field_stats: dict[str, int],
 ) -> str:
-    total = field_stats.get("total", len(items))
-    lines = [f"已读取组织架构：{department_count} 个部门，{total} 人。"]
-    if total:
+    visible_total = field_stats.get("total", len(items))
+    reported_total = int(field_stats.get("reported_member_count") or 0)
+    if reported_total and reported_total != visible_total:
+        lines = [f"已读取组织架构：{department_count} 个部门，部门统计口径约 {reported_total} 人，当前可展开明细 {visible_total} 人。"]
+    else:
+        lines = [f"已读取组织架构：{department_count} 个部门，{visible_total} 人。"]
+    if visible_total:
         lines.append(
             "字段完整度："
-            f"邮箱 {field_stats.get('email', 0)}/{total}，"
-            f"手机号 {field_stats.get('mobile', 0)}/{total}，"
-            f"职位 {field_stats.get('title', 0)}/{total}，"
-            f"直属上级 {field_stats.get('leader', 0)}/{total}。"
+            f"邮箱 {field_stats.get('email', 0)}/{visible_total}，"
+            f"手机号 {field_stats.get('mobile', 0)}/{visible_total}，"
+            f"职位 {field_stats.get('title', 0)}/{visible_total}，"
+            f"直属上级 {field_stats.get('leader', 0)}/{visible_total}。"
         )
     return "\n".join(lines)
 
@@ -5421,42 +6229,173 @@ def _people_aggregate_answer(
     department_count: int,
     items: tuple[dict[str, Any], ...],
     field_stats: dict[str, int],
+    *,
+    question: str = "",
+    query_mode: str = "",
+    domain_query: dict[str, Any] | None = None,
 ) -> str:
-    total = field_stats.get("total", len(items))
-    lines = [f"按当前可读通讯录数据，公司共有 {total} 人，覆盖 {department_count} 个部门。"]
-    if total:
-        title_count = field_stats.get("title", 0)
-        gender_known = field_stats.get("gender", 0)
-        lines.append(f"字段可见度：职位 {title_count}/{total}，性别 {gender_known}/{total}。")
-        if gender_known:
-            gender_parts = [
-                f"男性 {field_stats.get('male', 0)} 人",
-                f"女性 {field_stats.get('female', 0)} 人",
-            ]
-            other = field_stats.get("gender_other", 0)
-            if other:
-                gender_parts.append(f"其他/未标准化 {other} 人")
-            lines.append("性别分布：" + "，".join(gender_parts) + "。")
-        else:
-            lines.append("当前可读字段里没有性别数据，所以不能可靠统计男/女比例。")
-    lines.append("说明：这里只读取通讯录组织事实，不读取任务、日程或审批数据。")
+    visible_total = field_stats.get("total", len(items))
+    reported_total = int(field_stats.get("reported_member_count") or 0)
+    total = reported_total or visible_total
+    mode = query_mode or _people_query_mode_from_text(question)
+    filters = domain_query.get("filters") if isinstance(domain_query, dict) and isinstance(domain_query.get("filters"), dict) else {}
+    if filters.get("field_present") == "mobile":
+        filtered_items = tuple(item for item in items if str(item.get("mobile") or "").strip())
+        lines = [f"当前可读通讯录里有手机号字段的人员有 {len(filtered_items)} 位。"]
+        if mode in {"list", "gender_list", "title_list"}:
+            lines.extend(_people_name_lines(filtered_items))
+            if len(filtered_items) > 20:
+                lines.append("明细较多，后续可以在侧边栏 Webview 展开查看。")
+        return "\n".join(lines)
+    gender_filter = gender_filter_from_text(question)
+    if gender_filter:
+        filtered_items = _people_items_by_gender(items, gender_filter)
+        unknown_count = sum(1 for item in items if not _reliable_people_gender(item))
+        gender_label = "男性" if gender_filter == "male" else "女性"
+        lines = [f"公司通讯录里明确标注为{gender_label}的员工有 {len(filtered_items)} 位。"]
+        if unknown_count:
+            lines.append(f"另有 {unknown_count} 位没有可靠性别字段，我不按姓名推断。")
+        if mode == "gender_list":
+            lines.extend(_people_name_lines(filtered_items))
+            if len(filtered_items) > 20:
+                lines.append("明细较多，后续可以在侧边栏 Webview 展开查看。")
+        return "\n".join(lines)
+    title_filter = _people_title_filter_from_text(question)
+    if title_filter:
+        filtered_items = filter_people_by_title(items, title_filter)
+        lines = [f"公司里岗位/职位包含「{title_filter}」的同事有 {len(filtered_items)} 人。"]
+        if mode == "title_list":
+            lines.extend(_people_name_lines(filtered_items))
+            if len(filtered_items) > 20:
+                lines.append("明细较多，后续可以在侧边栏 Webview 展开查看。")
+        return "\n".join(lines)
+    if mode == "count_only":
+        return f"{total}人。"
+    if mode == "count":
+        return f"公司当前可读通讯录里是 {total} 人。"
+    if reported_total and reported_total != visible_total:
+        lines = [f"公司通讯录部门统计口径约 {reported_total} 人，我当前能展开到 {visible_total} 位人员明细，覆盖 {department_count} 个部门。"]
+    else:
+        lines = [f"公司通讯录里现在有 {total} 人，覆盖 {department_count} 个部门。"]
     return "\n".join(lines)
+
+
+def _people_query_mode_from_text(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or "").lower()).replace("多少个", "多少")
+    wants_list = any(token in compact for token in ("分别是谁", "都有谁", "名单", "列出", "全部显示", "有哪些"))
+    if any(token in compact for token in ("有谁的号码", "谁的号码", "有谁的电话", "谁的电话")):
+        return "list"
+    if "通讯录" in compact and any(token in compact for token in ("发我", "发下", "发我下", "给我", "给我下", "发一下")):
+        return "list"
+    if "数量" in compact and any(token in compact for token in ("只", "只需", "只要", "告诉我", "回答")):
+        return "count_only"
+    if any(token in compact for token in ("只需要回答", "只回答", "不用告诉", "不要告诉", "不用给我详情", "不要给我详情", "不用详情", "不要详情", "不用明细", "不要明细", "不用列", "不要列", "没必要告诉", "直接回答")):
+        return "count_only"
+    if any(token in compact for token in ("男生", "男性", "男的", "男员工", "女生", "女性", "女的", "女员工")):
+        return "gender_list" if wants_list else "gender_count"
+    if any(token in compact for token in ("岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+        return "title_list" if wants_list else "title_count"
+    if wants_list:
+        return "list"
+    return "count"
+
+
+def _people_field_projection_for_query_mode(query_mode: str) -> str:
+    if query_mode in {"numeric_only", "count", "count_only", "gender_count", "title_count"}:
+        return "count_only"
+    if query_mode in {"sidepanel", "list", "gender_list", "title_list"}:
+        return "name_only"
+    return ""
+
+
+def _apply_people_domain_filters(
+    items: tuple[dict[str, Any], ...],
+    *,
+    question: str,
+    domain_query: dict[str, Any] | None,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+    filters = domain_query.get("filters") if isinstance(domain_query, dict) and isinstance(domain_query.get("filters"), dict) else {}
+    filtered = items
+    metadata: dict[str, Any] = {}
+    gender = str(
+        filters.get("gender")
+        or (filters.get("value") if filters.get("filter") == "gender" else "")
+        or gender_filter_from_text(question)
+        or ""
+    ).strip()
+    if gender:
+        normalized_gender = normalize_gender(gender)
+        filtered = _people_items_by_gender(filtered, normalized_gender)
+        metadata["people_filter"] = {"filter": "gender", "value": normalized_gender}
+        metadata["unknown_gender_count"] = sum(1 for item in items if not _reliable_people_gender(item))
+    field_present = str(filters.get("field_present") or (filters.get("value") if filters.get("filter") == "field_present" else "") or "").strip()
+    if field_present:
+        filtered = tuple(item for item in filtered if _people_item_field_value(item, field_present))
+        metadata["people_filter"] = {"filter": "field_present", "value": field_present}
+    name_prefix = str(filters.get("name_prefix") or (filters.get("value") if filters.get("filter") == "name_prefix" else "") or "").strip()
+    if name_prefix:
+        filtered = tuple(item for item in filtered if str(item.get("name") or "").startswith(name_prefix))
+        metadata["people_filter"] = {"filter": "name_prefix", "value": name_prefix}
+    if filtered is not items:
+        metadata["filtered_user_count"] = len(filtered)
+    return filtered, metadata
+
+
+def _people_gender_filter(text: str) -> str:
+    return gender_filter_from_text(text)
+
+
+def _people_title_filter_from_text(text: str) -> str:
+    compact = re.sub(r"[\s，,。.!！；;：:]+", "", str(text or ""))
+    if not any(token in compact for token in ("岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+        return ""
+    keyword = compact
+    for token in ("公司", "全公司", "共有", "有多少个", "有多少位", "有多少", "多少个", "多少位", "多少", "几个", "哪些是", "谁是", "有哪些", "都有谁", "分别是谁", "人员", "员工", "岗位", "职位", "的", "？", "?"):
+        keyword = keyword.replace(token, "")
+    return keyword.strip()
+
+
+def _asks_people_list(text: str) -> bool:
+    return asks_people_list(text)
+
+
+def _people_items_by_gender(items: tuple[dict[str, Any], ...], gender: str) -> tuple[dict[str, Any], ...]:
+    normalized = normalize_gender(gender)
+    if not normalized:
+        return ()
+    return tuple(item for item in items if _reliable_people_gender(item) == normalized)
+
+
+def _people_name_lines(items: tuple[dict[str, Any], ...], *, limit: int = 50) -> list[str]:
+    return [f"{index}. {_format_people_brief(item)}" for index, item in enumerate(items[:limit], start=1)]
+
+
+def _format_people_brief(item: dict[str, Any]) -> str:
+    return format_people_brief(item)
+
+
+def _has_any_text(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
 
 
 def _gender_stats(items: tuple[dict[str, Any], ...]) -> dict[str, int]:
     stats = {"known": 0, "male": 0, "female": 0, "other": 0}
     for item in items:
-        value = str(item.get("gender") or "").strip().lower()
+        value = _normalized_gender(item.get("gender"))
         if not value:
             continue
         stats["known"] += 1
-        if value in {"1", "male", "m", "男", "男性", "男生"}:
+        if value == "male":
             stats["male"] += 1
-        elif value in {"2", "female", "f", "女", "女性", "女生"}:
+        elif value == "female":
             stats["female"] += 1
         else:
             stats["other"] += 1
     return stats
+
+
+def _normalized_gender(value: Any) -> str:
+    return normalize_gender(value)
 
 
 def _organization_base_fields() -> list[dict[str, str]]:
@@ -5640,8 +6579,10 @@ def _im_message_item(item: dict[str, Any]) -> dict[str, Any]:
 
 def _im_chat_list_answer(items: tuple[dict[str, Any], ...], *, query: str = "") -> str:
     if not items:
+        if not query:
+            return "当前没有查询到可见群聊。"
         return f"没有找到与「{query}」匹配的群聊。"
-    lines = [f"找到 {len(items)} 个与「{query}」相关的群聊："]
+    lines = [f"当前可见群聊 {len(items)} 个："] if not query else [f"找到 {len(items)} 个与「{query}」相关的群聊："]
     for index, item in enumerate(items[:10], start=1):
         name = str(item.get("name") or "未命名群聊")
         member_count = str(item.get("member_count") or "").strip()
@@ -5681,6 +6622,44 @@ def _im_target_label(params: dict[str, Any]) -> str:
     if params.get("user_id"):
         return "指定用户"
     return "未知对象"
+
+
+def _normalized_im_delivery_mode(value: Any) -> str:
+    text = str(value or "").strip()
+    compact = "".join(text.split()).lower()
+    if compact in {"bot_multi_notify", "user_multi_private", "create_group_then_send"}:
+        return compact
+    if any(token in compact for token in ("拉群", "建群", "建个群", "创建群", "群里发", "发到群")):
+        return "create_group_then_send"
+    if any(token in compact for token in ("机器人通知", "用机器人", "机器人发", "系统通知", "自动通知", "大飞哥通知")):
+        return "bot_multi_notify"
+    if any(token in compact for token in ("替我发", "用我", "以我的名义", "我发给", "分别发", "私聊发")):
+        return "user_multi_private"
+    return text
+
+
+def _people_context_group_chat_name(request: ProviderRequest, items: tuple[dict[str, Any], ...]) -> str:
+    explicit = str(request.params.get("chat_name") or request.params.get("group_name") or "").strip()
+    if explicit:
+        return explicit[:60]
+    names = [str(item.get("name") or item.get("display_name") or "").strip() for item in items]
+    names = [name for name in names if name]
+    if names:
+        suffix = "、".join(names[:3])
+        if len(names) > 3:
+            suffix = f"{suffix}等{len(names)}人"
+        return f"临时沟通群-{suffix}"[:60]
+    return f"临时沟通群-{len(items)}人"
+
+
+def _chat_id_from_tool_result(result) -> str:
+    payload = _tool_payload(result)
+    found = _first_nested_value(payload, ("chat_id", "open_chat_id", "chat_id_v2"))
+    if found:
+        return found
+    answer = str(getattr(result, "answer", "") or "")
+    match = re.search(r"\b(oc[_A-Za-z0-9-]+)\b", answer)
+    return match.group(1) if match else ""
 
 
 def _mail_tool_params(request: ProviderRequest) -> dict[str, Any]:

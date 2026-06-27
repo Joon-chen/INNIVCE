@@ -10,13 +10,14 @@ import tempfile
 from typing import Any
 from uuid import uuid4
 
+from app.core.config import settings
+from app.models.entities import Account, FeishuAppConfig
 from app.services.tools.base import ToolContext, ToolRequest
 from app.services.tools.providers.lark_cli import LARK_CLI_EXECUTION_CONTRACT
 from app.services.tools.providers.lark_cli import run_lark_cli_json as _run_lark_cli_json_base
 from app.services.tools.providers.lark_cli import run_lark_cli_json_loose as _run_lark_cli_json_loose_base
 from app.services.tools.providers.lark_cli import run_lark_cli_text as _run_lark_cli_text_base
-from sqlalchemy import or_, select
-from app.models.entities import Account, ExtractedItem, WorkEvent
+from sqlalchemy import select
 
 
 BITABLE_READONLY_FIELD_TYPES = {
@@ -31,6 +32,24 @@ BITABLE_READONLY_FIELD_TYPES = {
 }
 BITABLE_VIEW_TYPES = {"calendar", "gantt", "gallery", "grid", "kanban"}
 _CURRENT_CLI_PROFILE: ContextVar[str | None] = ContextVar("feishu_mcp_cli_profile", default=None)
+_TENANT_CONTACT_TOOL_NAMES = frozenset(
+    {
+        "feishu_contact_department_children",
+        "feishu_contact_department_users",
+        "feishu_contact_organization_snapshot",
+        "feishu_contact_scope_list",
+        "feishu_contact_user_get",
+        "feishu_contact_user_search",
+    }
+)
+_TENANT_IM_TOOL_NAMES = frozenset(
+    {
+        "feishu_im_chat_search",
+        "feishu_im_create_chat",
+        "feishu_im_send_message",
+    }
+)
+_TENANT_ACCESS_TOKEN_CACHE: dict[str, tuple[str, datetime]] = {}
 
 
 @dataclass(frozen=True)
@@ -59,16 +78,24 @@ def execute_feishu_mcp_tool(context: ToolContext, request: ToolRequest) -> str:
     handlers = _feishu_mcp_tool_handlers()
     handler = handlers.get(request.tool_name)
     if handler is not None:
+        if context is not None and request.tool_name in _TENANT_CONTACT_TOOL_NAMES:
+            return _execute_tenant_contact_tool(
+                context,
+                request,
+                fallback=lambda: _with_cli_profile(request, lambda: handler(request)),
+            )
+        if context is not None and request.tool_name in _TENANT_IM_TOOL_NAMES:
+            return _execute_tenant_im_tool(
+                context,
+                request,
+                fallback=lambda: _with_cli_profile(request, lambda: handler(request)),
+            )
         if request.tool_name == "feishu_approval_task_query" or request.tool_name.startswith("feishu_mail_") or request.tool_name == "mail_qa":
             if context is None:
                 return _with_cli_profile(request, lambda: handler(request))
             if request.tool_name == "feishu_approval_task_query":
                 return _with_cli_profile(request, lambda: _execute_approval_task_query_with_context(request, context))
             return _with_cli_profile(request, lambda: _execute_feishu_mail_tool(request, context))
-        if request.tool_name == "task_qa" and context is not None and isinstance(request.params.get("scope_filter"), dict):
-            return _execute_enterprise_task_query_with_context(request, context)
-        if request.tool_name == "calendar_qa" and context is not None and isinstance(request.params.get("scope_filter"), dict):
-            return _execute_enterprise_calendar_query_with_context(request, context)
         return _with_cli_profile(request, lambda: handler(request))
     return execute_feishu_mcp_realtime_tool(context, request)
 
@@ -421,83 +448,6 @@ def _execute_cli_task_read(request: ToolRequest) -> str:
     if titles:
         return f"飞书任务已通过 CLI 读取 {len(items)} 条：{', '.join(titles)}"
     return f"飞书任务已通过 CLI 读取 {len(items)} 条。"
-
-
-def _execute_enterprise_task_query_with_context(request: ToolRequest, context: ToolContext) -> str:
-    if context.db is None:
-        return _execute_cli_task_read(request)
-    params = request.params
-    scope_filter = params.get("scope_filter") if isinstance(params.get("scope_filter"), dict) else {}
-    limit = _enterprise_query_limit(params, default=20)
-    rows = list(
-        context.db.scalars(
-            select(ExtractedItem)
-            .where(ExtractedItem.company_id == context.company_id)
-            .where(ExtractedItem.item_type == "task")
-            .where(ExtractedItem.status.notin_({"closed", "done", "resolved", "completed"}))
-            .order_by(ExtractedItem.created_at.desc())
-            .limit(max(limit, 50))
-        ).all()
-    )
-    items = [_enterprise_task_payload(row) for row in rows if _enterprise_scope_matches(row, scope_filter)]
-    items = _filter_enterprise_items_by_keyword(items, params.get("query") or params.get("keyword"))[:limit]
-    payload = {
-        "items": items,
-        "source": "enterprise_query",
-        "scope_filter": scope_filter,
-        "query_boundary": "bot_enterprise_scope_filter",
-    }
-    if _raw_json_response_requested(params):
-        return _json_arg(payload)
-    if not items:
-        return "我暂时没有在企业数据里看到符合范围的开放任务。"
-    titles = [str(item.get("summary") or item.get("title") or item.get("guid") or "").strip() for item in items[:5]]
-    titles = [title for title in titles if title]
-    return f"我按企业范围查询到 {len(items)} 条任务：{', '.join(titles)}" if titles else f"我按企业范围查询到 {len(items)} 条任务。"
-
-
-def _execute_enterprise_calendar_query_with_context(request: ToolRequest, context: ToolContext) -> str:
-    if context.db is None:
-        return _execute_cli_calendar_agenda(request)
-    params = request.params
-    scope_filter = params.get("scope_filter") if isinstance(params.get("scope_filter"), dict) else {}
-    limit = _enterprise_query_limit(params, default=20)
-    terms = _enterprise_calendar_terms(request.question or request.normalized_command)
-    conditions = []
-    for term in terms:
-        pattern = f"%{term}%"
-        conditions.extend(
-            [
-                WorkEvent.event_type.ilike(pattern),
-                WorkEvent.title.ilike(pattern),
-                WorkEvent.content_text.ilike(pattern),
-                WorkEvent.business_domain.ilike(pattern),
-            ]
-        )
-    rows = list(
-        context.db.scalars(
-            select(WorkEvent)
-            .where(WorkEvent.company_id == context.company_id)
-            .where(or_(*conditions))
-            .order_by(WorkEvent.occurred_at.desc())
-            .limit(max(limit, 50))
-        ).all()
-    )
-    items = [_enterprise_calendar_payload(row) for row in rows if _enterprise_scope_matches(row, scope_filter)]
-    items = _filter_enterprise_items_by_keyword(items, params.get("query") or params.get("keyword"))[:limit]
-    payload = {
-        "items": items,
-        "source": "enterprise_query",
-        "scope_filter": scope_filter,
-        "query_boundary": "bot_enterprise_scope_filter",
-    }
-    if _raw_json_response_requested(params):
-        return _json_arg(payload)
-    if not items:
-        return "我暂时没有在企业数据里看到符合范围的日程。"
-    titles = [str(item.get("summary") or item.get("title") or item.get("event_id") or "").strip() for item in items[:5]]
-    titles = [title for title in titles if title]
-    return f"我按企业范围查询到 {len(items)} 条日程：{', '.join(titles)}" if titles else f"我按企业范围查询到 {len(items)} 条日程。"
 
 
 def _execute_mail_triage_with_context(request: ToolRequest, context: ToolContext) -> str:
@@ -1325,6 +1275,420 @@ def _run_contact_scope_list_payload(params: dict[str, Any]) -> Any:
     )
 
 
+def _execute_tenant_contact_tool(context: ToolContext, request: ToolRequest, *, fallback: Callable[[], str]) -> str:
+    app_config = _active_feishu_app_config(context)
+    if app_config is None:
+        return fallback()
+    params = request.params
+    if request.tool_name == "feishu_contact_department_children":
+        payload = _tenant_contact_department_children(app_config, params, department_id=str(params.get("department_id") or "0"))
+        return _format_contact_department_children(payload, params, source_label="Tenant Token")
+    if request.tool_name == "feishu_contact_department_users":
+        payload = _tenant_contact_department_users(app_config, params, department_id=str(params.get("department_id") or "0"))
+        return _format_contact_department_users(payload, params, source_label="Tenant Token")
+    if request.tool_name == "feishu_contact_scope_list":
+        payload = _tenant_contact_scope_list(app_config, params)
+        return _format_contact_scope_list(payload, params, source_label="Tenant Token")
+    if request.tool_name == "feishu_contact_user_get":
+        user_id = _required_cli_str(params, "user_id", aliases=("open_id",))
+        payload = _tenant_contact_user_get(app_config, params, user_id=user_id)
+        return _format_contact_user_get(payload, params, user_id=user_id, source_label="Tenant Token")
+    if request.tool_name == "feishu_contact_user_search":
+        return _execute_tenant_contact_user_search(app_config, request)
+    if request.tool_name == "feishu_contact_organization_snapshot":
+        return _execute_tenant_contact_organization_snapshot(app_config, request)
+    return fallback()
+
+
+def _execute_tenant_im_tool(context: ToolContext, request: ToolRequest, *, fallback: Callable[[], str]) -> str:
+    app_config = _active_feishu_app_config(context)
+    if app_config is None:
+        return fallback()
+    params = request.params
+    if request.tool_name == "feishu_im_chat_search":
+        query = str(params.get("query") or "").strip()
+        view = str(params.get("view") or "").strip()
+        if not query and view in {"count", "list"}:
+            payload = _tenant_im_chat_list(app_config, params)
+            return _format_im_chat_items(payload, params, source_label="Tenant Token", query="")
+        payload = _tenant_im_chat_search(app_config, params)
+        return _format_im_chat_items(payload, params, source_label="Tenant Token", query=query)
+    if request.tool_name == "feishu_im_create_chat":
+        payload = _tenant_im_create_chat(app_config, params)
+        return _format_im_create_chat(payload, params, source_label="Tenant Token")
+    if request.tool_name == "feishu_im_send_message":
+        payload = _tenant_im_send_message(app_config, params)
+        return _format_im_send_message(payload, params, source_label="Tenant Token")
+    return fallback()
+
+
+def _active_feishu_app_config(context: ToolContext) -> FeishuAppConfig | None:
+    db = getattr(context, "db", None)
+    if db is None or not callable(getattr(db, "scalar", None)):
+        return None
+    return db.scalar(
+        select(FeishuAppConfig)
+        .where(FeishuAppConfig.company_id == context.company_id)
+        .where(FeishuAppConfig.is_active.is_(True))
+    )
+
+
+def _tenant_access_token(app_config: FeishuAppConfig) -> str:
+    cache_key = str(app_config.app_id)
+    cached = _TENANT_ACCESS_TOKEN_CACHE.get(cache_key)
+    now = datetime.now(UTC)
+    if cached is not None:
+        token, expires_at = cached
+        if expires_at > now + timedelta(seconds=60):
+            return token
+    payload = _tenant_http_request(
+        app_config,
+        "POST",
+        "/open-apis/auth/v3/tenant_access_token/internal",
+        payload={"app_id": app_config.app_id, "app_secret": app_config.app_secret},
+        auth=False,
+        label="Feishu tenant token",
+    )
+    token = str(payload.get("tenant_access_token") or "").strip()
+    if not token:
+        raise RuntimeError("Feishu tenant token response did not include tenant_access_token.")
+    expires_in = int(payload.get("expire") or 7200)
+    _TENANT_ACCESS_TOKEN_CACHE[cache_key] = (token, now + timedelta(seconds=max(expires_in - 300, 60)))
+    return token
+
+
+def _tenant_http_request(
+    app_config: FeishuAppConfig,
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    auth: bool = True,
+    label: str = "Feishu API",
+) -> dict[str, Any]:
+    headers = {}
+    if auth:
+        headers["Authorization"] = f"Bearer {_tenant_access_token(app_config)}"
+    response = httpx.request(
+        method,
+        f"{settings.feishu_base_url.rstrip('/')}{path}",
+        params=params or {},
+        json=payload if method in {"POST", "PATCH", "DELETE"} else None,
+        headers=headers,
+        timeout=settings.request_timeout_seconds,
+    )
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"raw": response.text}
+    if response.status_code >= 400:
+        raise RuntimeError(f"{label} HTTP error {response.status_code}: {body}")
+    if not isinstance(body, dict) or body.get("code", 0) != 0:
+        code = body.get("code") if isinstance(body, dict) else "invalid_response"
+        message = body.get("message") or body.get("msg") if isinstance(body, dict) else str(body)
+        raise RuntimeError(f"{label} failed ({code}): {message}")
+    return body
+
+
+def _tenant_contact_department_children(app_config: FeishuAppConfig, params: dict[str, Any], *, department_id: str) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "department_id": department_id,
+        "department_id_type": str(params.get("department_id_type") or "department_id"),
+        "user_id_type": _cli_user_id_type(params, label="api contact department children"),
+        "page_size": _optional_cli_int(params, "page_size", default=50, minimum=1, maximum=50),
+    }
+    if params.get("fetch_child") is not None:
+        query["fetch_child"] = _optional_cli_flag(params, "fetch_child")
+    _maybe_set(query, "page_token", params.get("page_token"))
+    return _tenant_http_request(
+        app_config,
+        "GET",
+        "/open-apis/contact/v3/departments/" + department_id + "/children",
+        params=query,
+        label="Feishu contact department children",
+    )
+
+
+def _tenant_contact_department_users(app_config: FeishuAppConfig, params: dict[str, Any], *, department_id: str) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "department_id": department_id,
+        "department_id_type": str(params.get("department_id_type") or "department_id"),
+        "user_id_type": _cli_user_id_type(params, label="api contact department users"),
+        "page_size": _optional_cli_int(params, "page_size", default=50, minimum=1, maximum=50),
+    }
+    _maybe_set(query, "page_token", params.get("page_token"))
+    return _tenant_http_request(
+        app_config,
+        "GET",
+        "/open-apis/contact/v3/users/find_by_department",
+        params=query,
+        label="Feishu contact department users",
+    )
+
+
+def _tenant_contact_scope_list(app_config: FeishuAppConfig, params: dict[str, Any]) -> dict[str, Any]:
+    query = {
+        "department_id_type": str(params.get("department_id_type") or "open_department_id"),
+        "user_id_type": _cli_user_id_type(params, label="api contact scopes"),
+        "page_size": _optional_cli_int(params, "page_size", default=100, minimum=1, maximum=100),
+    }
+    _maybe_set(query, "page_token", params.get("page_token"))
+    return _tenant_http_request(app_config, "GET", "/open-apis/contact/v3/scopes", params=query, label="Feishu contact scopes")
+
+
+def _tenant_contact_user_get(app_config: FeishuAppConfig, params: dict[str, Any], *, user_id: str) -> dict[str, Any]:
+    query = {
+        "user_id_type": _cli_user_id_type(params, label="api contact user get"),
+        "department_id_type": str(params.get("department_id_type") or "open_department_id"),
+    }
+    return _tenant_http_request(
+        app_config,
+        "GET",
+        "/open-apis/contact/v3/users/" + user_id,
+        params=query,
+        label="Feishu contact user get",
+    )
+
+
+def _tenant_im_chat_list(app_config: FeishuAppConfig, params: dict[str, Any]) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "page_size": _optional_cli_int(params, "page_size", default=20, minimum=1, maximum=100),
+    }
+    _maybe_set(query, "page_token", params.get("page_token"))
+    return _tenant_http_request(
+        app_config,
+        "GET",
+        "/open-apis/im/v1/chats",
+        params=query,
+        label="Feishu IM chat list",
+    )
+
+
+def _tenant_im_chat_search(app_config: FeishuAppConfig, params: dict[str, Any]) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "query": str(params.get("query") or "").strip(),
+        "page_size": _optional_cli_int(params, "page_size", default=20, minimum=1, maximum=100),
+    }
+    _maybe_set(query, "page_token", params.get("page_token"))
+    _maybe_set(query, "owner_id", params.get("owner_id"))
+    _maybe_set(query, "user_id_type", params.get("user_id_type"))
+    return _tenant_http_request(
+        app_config,
+        "GET",
+        "/open-apis/im/v1/chats/search",
+        params=query,
+        label="Feishu IM chat search",
+    )
+
+
+def _tenant_im_create_chat(app_config: FeishuAppConfig, params: dict[str, Any]) -> dict[str, Any]:
+    name = _required_cli_str(params, "name")
+    payload: dict[str, Any] = {
+        "name": name,
+        "chat_mode": str(params.get("chat_mode") or "group").strip(),
+        "chat_type": str(params.get("chat_type") or params.get("type") or "private").strip(),
+    }
+    _maybe_set(payload, "description", params.get("description"))
+    users = _string_list_value(params.get("user_id_list") or params.get("users"))
+    if users:
+        payload["user_id_list"] = users
+    bots = _string_list_value(params.get("bot_id_list") or params.get("bots"))
+    if bots:
+        payload["bot_id_list"] = bots
+    _maybe_set(payload, "owner_id", params.get("owner_id") or params.get("owner"))
+    query = {"user_id_type": str(params.get("user_id_type") or "open_id")}
+    return _tenant_http_request(
+        app_config,
+        "POST",
+        "/open-apis/im/v1/chats",
+        params=query,
+        payload=payload,
+        label="Feishu IM chat create",
+    )
+
+
+def _tenant_im_send_message(app_config: FeishuAppConfig, params: dict[str, Any]) -> dict[str, Any]:
+    chat_id = str(params.get("chat_id") or "").strip()
+    receive_id = str(params.get("receive_id") or "").strip()
+    receive_id_type = str(params.get("receive_id_type") or "").strip()
+    user_id = str(params.get("user_id") or params.get("open_id") or "").strip()
+    if chat_id:
+        receive_id = chat_id
+        receive_id_type = "chat_id"
+    elif user_id:
+        receive_id = user_id
+        receive_id_type = str(params.get("user_id_type") or "open_id")
+    elif not receive_id or not receive_id_type:
+        raise ValueError("Feishu IM message create requires chat_id or user_id/open_id.")
+    text = str(params.get("text") or "").strip()
+    if not text:
+        raise ValueError("Feishu IM message create requires text.")
+    query = {"receive_id_type": receive_id_type}
+    _maybe_set(query, "uuid", params.get("idempotency_key") or params.get("uuid"))
+    return _tenant_http_request(
+        app_config,
+        "POST",
+        "/open-apis/im/v1/messages",
+        params=query,
+        payload={"receive_id": receive_id, "msg_type": "text", "content": _json_arg({"text": text})},
+        label="Feishu IM message create",
+    )
+
+
+def _format_im_chat_items(payload: Any, params: dict[str, Any], *, source_label: str, query: str) -> str:
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    items = data.get("items") if isinstance(data, dict) and isinstance(data.get("items"), list) else []
+    normalized = {
+        "available": True,
+        "source": source_label,
+        "query": query,
+        "items": items,
+        "chats": items,
+        "has_more": bool(data.get("has_more")) if isinstance(data, dict) else False,
+        "page_token": str(data.get("page_token") or "") if isinstance(data, dict) else "",
+    }
+    if _raw_json_response_requested(params):
+        return _json_arg(normalized)
+    titles = [_cli_im_title(item) for item in items[:5]]
+    titles = [title for title in titles if title]
+    if titles:
+        return f"飞书群聊已通过 {source_label} 读取 {len(items)} 个：{', '.join(titles)}"
+    return f"飞书群聊已通过 {source_label} 读取 {len(items)} 个。"
+
+
+def _format_im_create_chat(payload: Any, params: dict[str, Any], *, source_label: str) -> str:
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    chat_id = _cli_chat_id(payload)
+    if chat_id:
+        return f"飞书群已通过 {source_label} 创建：{chat_id}"
+    return f"飞书群已通过 {source_label} 创建。"
+
+
+def _format_im_send_message(payload: Any, params: dict[str, Any], *, source_label: str) -> str:
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    message_id = _cli_message_id(payload)
+    if message_id:
+        return f"飞书消息已通过 {source_label} 发送：{message_id}"
+    return f"飞书消息已通过 {source_label} 发送。"
+
+
+def _format_contact_department_children(payload: Any, params: dict[str, Any], *, source_label: str) -> str:
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    items = _cli_contact_items(payload, keys=("items", "departments"))
+    titles = [_cli_contact_title(item, ("name", "department_id", "open_department_id")) for item in items[:5]]
+    titles = [title for title in titles if title]
+    if titles:
+        return f"飞书通讯录子部门已通过 {source_label} 读取 {len(items)} 条：{', '.join(titles)}"
+    return f"飞书通讯录子部门已通过 {source_label} 读取 {len(items)} 条。"
+
+
+def _format_contact_department_users(payload: Any, params: dict[str, Any], *, source_label: str) -> str:
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    items = _cli_contact_items(payload, keys=("items", "users"))
+    titles = [_cli_contact_title(item, ("name", "en_name", "open_id", "user_id")) for item in items[:5]]
+    titles = [title for title in titles if title]
+    if titles:
+        return f"飞书通讯录部门用户已通过 {source_label} 读取 {len(items)} 条：{', '.join(titles)}"
+    return f"飞书通讯录部门用户已通过 {source_label} 读取 {len(items)} 条。"
+
+
+def _format_contact_scope_list(payload: Any, params: dict[str, Any], *, source_label: str) -> str:
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    department_count = len(data.get("department_ids") or [])
+    user_count = len(data.get("user_ids") or [])
+    group_count = len(data.get("group_ids") or [])
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    return f"飞书通讯录授权范围已通过 {source_label} 读取：部门 {department_count} 个，用户 {user_count} 个，用户组 {group_count} 个。"
+
+
+def _format_contact_user_get(payload: Any, params: dict[str, Any], *, user_id: str, source_label: str) -> str:
+    if _raw_json_response_requested(params):
+        return _json_arg(payload)
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    user = data.get("user") if isinstance(data, dict) else {}
+    if not isinstance(user, dict):
+        user = {}
+    title = _cli_contact_title(user, ("name", "en_name", "open_id", "user_id")) or user_id
+    email = str(user.get("email") or "").strip()
+    mobile = str(user.get("mobile") or "").strip()
+    detail = "，".join(item for item in (email, mobile) if item)
+    if detail:
+        return f"飞书通讯录用户已通过 {source_label} 读取：{title}（{detail}）"
+    return f"飞书通讯录用户已通过 {source_label} 读取：{title}"
+
+
+def _execute_tenant_contact_user_search(app_config: FeishuAppConfig, request: ToolRequest) -> str:
+    params = request.params
+    keyword = str(params.get("keyword") or params.get("query") or "").strip()
+    if not keyword:
+        keyword = request.question.replace("公司", "").replace("的", "").replace("是谁", "").replace("谁是", "").strip()
+    if not keyword:
+        return "请提供搜索关键词。"
+    snapshot_params = {**params, "response_format": "raw_json", "max_departments": 200, "max_users": 1000}
+    payload = json.loads(
+        _execute_tenant_contact_organization_snapshot(
+            app_config,
+            ToolRequest(
+                tool_name="feishu_contact_organization_snapshot",
+                question=request.question,
+                normalized_command=request.normalized_command,
+                params=snapshot_params,
+            ),
+        )
+    )
+    users = payload.get("users") if isinstance(payload, dict) else []
+    users = users if isinstance(users, list) else []
+    lowered = keyword.lower()
+    matches = [
+        user
+        for user in users
+        if isinstance(user, dict)
+        and (
+            lowered in str(user.get("name") or "").lower()
+            or lowered in str(user.get("en_name") or "").lower()
+            or lowered in str(user.get("title") or user.get("job_title") or "").lower()
+            or lowered in str(user.get("email") or "").lower()
+        )
+    ]
+    if _raw_json_response_requested(params):
+        return _json_arg({"result_type": "people_search", "keyword": keyword, "items": matches, "users": matches})
+    if not matches:
+        return f"未找到匹配 [{keyword}] 的用户。"
+    lines_out = [f"搜索 [{keyword}] 找到 {len(matches)} 人："]
+    for user in matches[:20]:
+        name = user.get("name") or "?"
+        title = user.get("title") or user.get("job_title") or ""
+        mobile = user.get("mobile") or ""
+        email = user.get("email") or ""
+        line = f"  {name}"
+        if title:
+            line += f" - {title}"
+        if mobile:
+            line += f" | {mobile}"
+        if email:
+            line += f" | {email}"
+        lines_out.append(line)
+    return chr(10).join(lines_out)
+
+
+def _execute_tenant_contact_organization_snapshot(app_config: FeishuAppConfig, request: ToolRequest) -> str:
+    params = request.params
+    return _execute_contact_organization_snapshot_with_runner(
+        params,
+        children=lambda item, department_id: _tenant_contact_department_children(app_config, item, department_id=department_id),
+        users=lambda item, department_id: _tenant_contact_department_users(app_config, item, department_id=department_id),
+        scope=lambda item: _tenant_contact_scope_list(app_config, item),
+        source_label="Tenant Token",
+    )
+
+
 
 def _execute_cli_contact_user_search(request: ToolRequest) -> str:
     """Search for users by keyword."""
@@ -1472,6 +1836,23 @@ def _execute_cli_contact_user_get(request: ToolRequest) -> str:
 
 def _execute_cli_contact_organization_snapshot(request: ToolRequest) -> str:
     params = request.params
+    return _execute_contact_organization_snapshot_with_runner(
+        params,
+        children=lambda item, department_id: _run_contact_department_children(item, department_id=department_id),
+        users=lambda item, department_id: _run_contact_department_users(item, department_id=department_id),
+        scope=_run_contact_scope_list_payload,
+        source_label="CLI",
+    )
+
+
+def _execute_contact_organization_snapshot_with_runner(
+    params: dict[str, Any],
+    *,
+    children: Callable[[dict[str, Any], str], Any],
+    users: Callable[[dict[str, Any], str], Any],
+    scope: Callable[[dict[str, Any]], Any],
+    source_label: str,
+) -> str:
     max_departments = _optional_cli_int(params, "max_departments", default=100, minimum=1, maximum=500)
     max_users = _optional_cli_int(params, "max_users", default=500, minimum=1, maximum=2000)
     root_department_id = str(params.get("root_department_id") or params.get("department_id") or "0")
@@ -1479,14 +1860,24 @@ def _execute_cli_contact_organization_snapshot(request: ToolRequest) -> str:
     users_by_open_id: dict[str, dict[str, Any]] = {}
     queue = [root_department_id]
     seen_departments = set(queue)
+    department_fetch_errors: list[dict[str, str]] = []
 
     snapshot_params = {**params, "department_id_type": "department_id", "user_id_type": "open_id", "page_size": 50}
     while queue and len(departments) < max_departments:
         department_id = queue.pop(0)
-        payload = _run_contact_department_children(snapshot_params, department_id=department_id)
-        for department in _cli_contact_items(payload, keys=("items", "departments")):
+        try:
+            department_items = _contact_paged_items(
+                lambda page_params, current_department_id=department_id: children(page_params, current_department_id),
+                snapshot_params,
+                keys=("items", "departments"),
+                max_items=max_departments - len(departments),
+            )
+        except Exception as exc:
+            department_fetch_errors.append({"department_id": department_id, "error": str(exc)[:200]})
+            continue
+        for department in department_items:
             departments.append(department)
-            child_id = str(department.get("department_id") or "").strip()
+            child_id = str(department.get("department_id") or department.get("open_department_id") or "").strip()
             if child_id and child_id not in seen_departments:
                 seen_departments.add(child_id)
                 queue.append(child_id)
@@ -1504,44 +1895,52 @@ def _execute_cli_contact_organization_snapshot(request: ToolRequest) -> str:
         root_department_id,
         *[str(item.get("department_id")) for item in departments if item.get("department_id")],
     ]
-    import concurrent.futures as _cf
-
     def _department_users(department_id: str) -> tuple[str, list[dict[str, Any]]]:
-        try:
-            payload = _run_contact_department_users(snapshot_params, department_id=department_id)
-            return department_id, _cli_contact_items(payload, keys=("items", "users"))
-        except Exception:
-            return department_id, []
+        return department_id, _contact_paged_items(
+            lambda page_params: users(page_params, department_id),
+            snapshot_params,
+            keys=("items", "users"),
+            max_items=max_users,
+        )
 
-    max_workers = min(12, max(1, len(user_department_ids)))
-    with _cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        user_results = pool.map(_department_users, user_department_ids)
-        for department_id, users in user_results:
+    user_fetch_errors: list[dict[str, str]] = []
+    for department_id in user_department_ids:
+        if len(users_by_open_id) >= max_users:
+            break
+        try:
+            department_id, department_users = _department_users(department_id)
+        except Exception as exc:
+            user_fetch_errors.append({"department_id": department_id, "error": str(exc)[:200]})
+            continue
+        for user in department_users:
+            open_id = str(user.get("open_id") or user.get("user_id") or "").strip()
+            if not open_id:
+                continue
+            existing = users_by_open_id.get(open_id) or {}
+            department_ids = set(existing.get("department_ids") or [])
+            department_ids.add(department_id)
+            users_by_open_id[open_id] = {
+                **existing,
+                **user,
+                "department_ids": sorted(department_ids),
+                "department_names": [
+                    department_names_by_id[item]
+                    for item in sorted(department_ids)
+                    if department_names_by_id.get(item)
+                ],
+            }
             if len(users_by_open_id) >= max_users:
                 break
-            for user in users:
-                open_id = str(user.get("open_id") or user.get("user_id") or "").strip()
-                if not open_id:
-                    continue
-                existing = users_by_open_id.get(open_id) or {}
-                department_ids = set(existing.get("department_ids") or [])
-                department_ids.add(department_id)
-                users_by_open_id[open_id] = {
-                    **existing,
-                    **user,
-                    "department_ids": sorted(department_ids),
-                    "department_names": [
-                        department_names_by_id[item]
-                        for item in sorted(department_ids)
-                        if department_names_by_id.get(item)
-                    ],
-                }
-                if len(users_by_open_id) >= max_users:
-                    break
-    if not departments and not users_by_open_id:
-        scoped_departments, scoped_users = _contact_snapshot_from_authorized_scope(params, max_departments=max_departments, max_users=max_users)
+    if not departments:
+        scoped_departments, scoped_users = _contact_snapshot_from_authorized_scope(
+            params,
+            max_departments=max_departments,
+            max_users=max_users,
+            scope=scope,
+            users=users,
+        )
         departments = scoped_departments
-        users_by_open_id = scoped_users
+        users_by_open_id = {**scoped_users, **users_by_open_id}
     if _raw_json_response_requested(params):
         return _json_arg(
             {
@@ -1551,9 +1950,12 @@ def _execute_cli_contact_organization_snapshot(request: ToolRequest) -> str:
                 "user_count": len(users_by_open_id),
                 "departments": departments,
                 "users": list(users_by_open_id.values()),
+                "department_fetch_errors": department_fetch_errors,
+                "user_fetch_errors": user_fetch_errors,
+                "_runtime_v5_snapshot_version": 3,
             }
         )
-    return f"飞书通讯录组织快照已通过 CLI 读取：部门 {len(departments)} 个，人员 {len(users_by_open_id)} 人。"
+    return f"飞书通讯录组织快照已通过 {source_label} 读取：部门 {len(departments)} 个，人员 {len(users_by_open_id)} 人。"
 
 
 def _contact_snapshot_from_authorized_scope(
@@ -1561,12 +1963,17 @@ def _contact_snapshot_from_authorized_scope(
     *,
     max_departments: int,
     max_users: int,
+    scope: Callable[[dict[str, Any]], Any] | None = None,
+    users: Callable[[dict[str, Any], str], Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    scope_payload = _run_contact_scope_list_payload(params)
-    data = scope_payload.get("data") if isinstance(scope_payload, dict) else {}
-    data = data if isinstance(data, dict) else {}
-    department_ids = [str(item).strip() for item in data.get("department_ids") or [] if str(item).strip()]
-    user_ids = [str(item).strip() for item in data.get("user_ids") or [] if str(item).strip()]
+    scope_runner = scope or _run_contact_scope_list_payload
+    users_runner = users or (lambda item, department_id: _run_contact_department_users(item, department_id=department_id))
+    department_ids, user_ids = _contact_authorized_scope_ids(
+        scope_runner,
+        params,
+        max_departments=max_departments,
+        max_users=max_users,
+    )
     departments = [{"open_department_id": item, "department_id": item} for item in department_ids[:max_departments]]
     users_by_open_id: dict[str, dict[str, Any]] = {item: {"open_id": item} for item in user_ids[:max_users]}
     if not department_ids or len(users_by_open_id) >= max_users:
@@ -1577,8 +1984,12 @@ def _contact_snapshot_from_authorized_scope(
 
     def _department_users(department_id: str) -> list[dict[str, Any]]:
         try:
-            payload = _run_contact_department_users(scoped_params, department_id=department_id)
-            return _cli_contact_items(payload, keys=("items", "users"))
+            return _contact_paged_items(
+                lambda page_params: users_runner(page_params, department_id),
+                scoped_params,
+                keys=("items", "users"),
+                max_items=max_users,
+            )
         except Exception:
             return []
 
@@ -1594,6 +2005,70 @@ def _contact_snapshot_from_authorized_scope(
                 if len(users_by_open_id) >= max_users:
                     break
     return departments, users_by_open_id
+
+
+def _contact_paged_items(
+    runner: Callable[[dict[str, Any]], Any],
+    params: dict[str, Any],
+    *,
+    keys: tuple[str, ...],
+    max_items: int,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    page_token = str(params.get("page_token") or "").strip()
+    seen_tokens: set[str] = set()
+    while len(items) < max_items:
+        page_params = {**params}
+        if page_token:
+            page_params["page_token"] = page_token
+        else:
+            page_params.pop("page_token", None)
+        payload = runner(page_params)
+        items.extend(_cli_contact_items(payload, keys=keys)[: max_items - len(items)])
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        next_token = str(data.get("page_token") or "").strip()
+        if not data.get("has_more") or not next_token or next_token in seen_tokens:
+            break
+        seen_tokens.add(next_token)
+        page_token = next_token
+    return items
+
+
+def _contact_authorized_scope_ids(
+    scope_runner: Callable[[dict[str, Any]], Any],
+    params: dict[str, Any],
+    *,
+    max_departments: int,
+    max_users: int,
+) -> tuple[list[str], list[str]]:
+    department_ids: list[str] = []
+    user_ids: list[str] = []
+    page_token = str(params.get("page_token") or "").strip()
+    seen_tokens: set[str] = set()
+    while len(department_ids) < max_departments or len(user_ids) < max_users:
+        page_params = {**params}
+        if page_token:
+            page_params["page_token"] = page_token
+        else:
+            page_params.pop("page_token", None)
+        scope_payload = scope_runner(page_params)
+        data = scope_payload.get("data") if isinstance(scope_payload, dict) else {}
+        data = data if isinstance(data, dict) else {}
+        for item in data.get("department_ids") or []:
+            value = str(item).strip()
+            if value and value not in department_ids and len(department_ids) < max_departments:
+                department_ids.append(value)
+        for item in data.get("user_ids") or []:
+            value = str(item).strip()
+            if value and value not in user_ids and len(user_ids) < max_users:
+                user_ids.append(value)
+        next_token = str(data.get("page_token") or "").strip()
+        if not data.get("has_more") or not next_token or next_token in seen_tokens:
+            break
+        seen_tokens.add(next_token)
+        page_token = next_token
+    return department_ids, user_ids
 
 
 def _execute_cli_task_update(request: ToolRequest) -> str:
@@ -2966,138 +3441,6 @@ def _calendar_agenda_title(item: Any) -> str | None:
         if value:
             return str(value)
     return None
-
-
-def _enterprise_query_limit(params: dict[str, Any], *, default: int) -> int:
-    value = params.get("page_limit") if params.get("page_limit") is not None else params.get("page_size")
-    if value is None:
-        value = params.get("limit")
-    return _optional_cli_int({"limit": value}, "limit", default=default, minimum=1, maximum=50)
-
-
-def _enterprise_scope_matches(row: Any, scope_filter: dict[str, Any]) -> bool:
-    scope = str(scope_filter.get("scope") or "self").strip()
-    if scope == "company":
-        return True
-    payload = getattr(row, "payload", None)
-    payload = payload if isinstance(payload, dict) else {}
-    if scope == "department":
-        department_id = str(scope_filter.get("department_id") or "").strip()
-        if not department_id:
-            return False
-        return department_id in _enterprise_row_values(row, payload, ("department_id", "owner_department_id", "department_ids", "allowed_departments"))
-    if scope in {"team", "project"}:
-        project_id = str(scope_filter.get("project_id") or "").strip()
-        if not project_id:
-            return False
-        return project_id in _enterprise_row_values(row, payload, ("project_id", "team_id", "project_ids", "team_ids"))
-    if scope in {"self", "person", "user"}:
-        actor_values = {
-            str(scope_filter.get("actor_open_id") or "").strip(),
-            str(scope_filter.get("actor_user_id") or "").strip(),
-            str(scope_filter.get("target_open_id") or "").strip(),
-            str(scope_filter.get("target_user_id") or "").strip(),
-        }
-        actor_values = {value for value in actor_values if value}
-        if not actor_values:
-            return False
-        row_values = _enterprise_row_values(
-            row,
-            payload,
-            (
-                "owner_open_id",
-                "assignee_open_id",
-                "creator_open_id",
-                "actor_open_id",
-                "open_id",
-                "owner_user_id",
-                "assignee_user_id",
-                "creator_user_id",
-                "actor_user_id",
-                "user_id",
-                "owner",
-                "actor",
-                "allowed_user_ids",
-            ),
-        )
-        return bool(actor_values & row_values)
-    return True
-
-
-def _enterprise_row_values(row: Any, payload: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
-    values: set[str] = set()
-    for key in keys:
-        for source in (payload, getattr(row, "raw_json", None) if isinstance(getattr(row, "raw_json", None), dict) else {}):
-            value = source.get(key) if isinstance(source, dict) else None
-            values.update(_enterprise_string_values(value))
-        value = getattr(row, key, None)
-        values.update(_enterprise_string_values(value))
-    return {value for value in values if value}
-
-
-def _enterprise_string_values(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    if isinstance(value, str):
-        return {value.strip()} if value.strip() else set()
-    if isinstance(value, (int, float)):
-        return {str(value)}
-    if isinstance(value, dict):
-        values: set[str] = set()
-        for item in value.values():
-            values.update(_enterprise_string_values(item))
-        return values
-    if isinstance(value, list):
-        values: set[str] = set()
-        for item in value:
-            values.update(_enterprise_string_values(item))
-        return values
-    return {str(value).strip()} if str(value).strip() else set()
-
-
-def _enterprise_task_payload(row: Any) -> dict[str, Any]:
-    payload = getattr(row, "payload", None)
-    payload = payload if isinstance(payload, dict) else {}
-    task_id = str(payload.get("task_guid") or payload.get("guid") or payload.get("task_id") or getattr(row, "id", "") or "").strip()
-    return {
-        "guid": task_id,
-        "task_guid": task_id,
-        "summary": getattr(row, "title", None) or payload.get("summary") or payload.get("title") or task_id,
-        "title": getattr(row, "title", None) or payload.get("title") or payload.get("summary") or task_id,
-        "status": getattr(row, "status", None) or payload.get("status") or "",
-        "owner": getattr(row, "owner", None) or payload.get("owner") or payload.get("owner_open_id") or "",
-        "due": getattr(row, "due_at", None) or payload.get("due") or payload.get("due_time") or "",
-        "url": payload.get("url") or payload.get("app_link") or payload.get("link") or "",
-        "raw": payload or {"id": str(getattr(row, "id", ""))},
-    }
-
-
-def _enterprise_calendar_payload(row: Any) -> dict[str, Any]:
-    payload = getattr(row, "payload", None)
-    payload = payload if isinstance(payload, dict) else {}
-    event_id = str(payload.get("event_id") or payload.get("id") or getattr(row, "object_id", "") or getattr(row, "external_id", "") or "").strip()
-    title = getattr(row, "title", None) or payload.get("summary") or payload.get("title") or event_id
-    return {
-        "event_id": event_id,
-        "summary": title,
-        "title": title,
-        "start": payload.get("start") or payload.get("start_time") or getattr(row, "occurred_at", None) or "",
-        "end": payload.get("end") or payload.get("end_time") or "",
-        "url": payload.get("url") or payload.get("app_link") or payload.get("link") or "",
-        "raw": payload or {"id": str(getattr(row, "id", ""))},
-    }
-
-
-def _filter_enterprise_items_by_keyword(items: list[dict[str, Any]], keyword: Any) -> list[dict[str, Any]]:
-    text = str(keyword or "").strip().lower()
-    if not text:
-        return items
-    return [item for item in items if text in _json_arg(item).lower()]
-
-
-def _enterprise_calendar_terms(question: str) -> list[str]:
-    dynamic = [term for term in ["今天", "今日", "明天", "本周", "客户", "项目", "评审"] if term in question]
-    return ["calendar", "meeting", "日程", "会议", "开会", "议程", "安排", *dynamic]
 
 
 def _execute_cli_bitable_record_create(request: ToolRequest) -> str:

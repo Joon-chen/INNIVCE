@@ -185,6 +185,8 @@ def validate_llm_command_intent(
         rule_intent=rule_intent.intent,
     ):
         return None
+    if intent == "task_query" and _should_keep_knowledge_query_route(candidate=candidate, rule_intent=rule_intent):
+        return None
     if should_force_self_scope(
         question=candidate.canonical_question or rule_intent.canonical_question,
         intent=intent,
@@ -316,6 +318,18 @@ def _can_override_rule_intent(*, candidate_intent: str, rule_intent: IntentResul
     if candidate_intent == rule_intent.intent:
         return True
     return rule_intent.intent in _LLM_OVERRIDEABLE_RULE_INTENTS or rule_intent.confidence < 0.72
+
+
+def _should_keep_knowledge_query_route(*, candidate: LLMCommandIntentCandidate, rule_intent: IntentResult) -> bool:
+    question = f"{candidate.canonical_question} {candidate.objective} {candidate.reason} {rule_intent.canonical_question}"
+    compact = re.sub(r"\s+", "", question.lower())
+    if not compact:
+        return False
+    if not any(term in compact for term in ("流程", "制度", "规范", "手册", "模板", "sop", "说明", "指南", "资料", "文档", "知识库", "wiki")):
+        return False
+    if any(term in compact for term in ("我的任务", "我的待办", "任务负荷", "待办负荷", "延期任务", "到期任务", "任务有哪些", "待办有哪些")):
+        return False
+    return rule_intent.intent == "general_query" or rule_intent.entities.get("foundation_route") == "knowledge.general"
 
 
 def _candidate_from_payload(data: dict[str, Any], *, fallback_question: str) -> LLMCommandIntentCandidate | None:
@@ -577,7 +591,7 @@ Routing:
 - Preference corrections => profile_update (address/style/tone/verbosity); do not change facts or permissions.
 - Slowness/wrong route/boundary => runtime_status or general_analysis.
 - Weather/news/websites/prices/laws/public current info => external_information_query.
-- Company profile/business => general_query + knowledge_context company_profile; headcount/gender/personnel composition => organization_snapshot; Workspace needs explicit task/calendar/project/workload/deadline/schedule signal.
+	- Company profile/business => general_query + knowledge_context company_profile; policy/process/SOP/templates/manuals/project documents/how-to knowledge => general_query + knowledge_context general. Workspace needs explicit task/calendar/project/workload/deadline/schedule signal.
 - people_lookup only for concrete person lookup. Missing scope/object/time => missing_params; never invent.
 
 Question:

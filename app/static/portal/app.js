@@ -27,7 +27,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("confirmSubmit").addEventListener("click", submitConfirmedAction);
   bootstrapFromChat(state.chatId).then(() => {
     if (sidepanelMode || params.get("autoload") === "1") {
-      loadApprovals();
+      loadResultContext({ allowApproval: params.get("view") === "result_context" }).then((loaded) => {
+        if (!loaded) loadApprovals();
+      });
     }
   });
 });
@@ -106,6 +108,152 @@ async function loadApprovals() {
       $("approvalDetail").textContent = "读取失败。";
     }
   }
+}
+
+async function loadResultContext({ allowApproval = false } = {}) {
+  if (!state.chatId) return false;
+  try {
+    const res = await fetch(`/api/portal/result-context?chat_id=${encodeURIComponent(state.chatId)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.available || !Array.isArray(data.items) || !data.items.length) return false;
+    const metadata = data.metadata && typeof data.metadata === "object" ? data.metadata : {};
+    const sidepanel = metadata.sidepanel_context && typeof metadata.sidepanel_context === "object" ? metadata.sidepanel_context : {};
+    const resultType = String(metadata.result_type || sidepanel.result_type || "");
+    if (!allowApproval && ["approval_list", "approval_query", "approval_detail"].includes(resultType)) return false;
+    state.items = data.items;
+    state.selectedIndex = state.initialIndex >= 0 && state.initialIndex < state.items.length ? state.initialIndex : 0;
+    state.resultContext = { answer: data.answer || "", metadata, sidepanel };
+    document.body.classList.add("result-context-mode");
+    renderResultContext();
+    const title = sidepanel.title || "结果明细";
+    document.title = title;
+    setStatus(`${title}，共 ${state.items.length} 条。`);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function renderResultContext() {
+  const sidepanel = state.resultContext?.sidepanel || {};
+  const title = sidepanel.title || "结果明细";
+  const listTitle = document.querySelector(".list .section-title");
+  const detailTitle = document.querySelector(".detail .section-title");
+  if (listTitle) listTitle.textContent = title;
+  if (detailTitle) detailTitle.textContent = "字段详情";
+  renderResultContextList();
+  renderResultContextDetail();
+}
+
+function renderResultContextList() {
+  const fields = resultContextFields();
+  $("approvalList").innerHTML = state.items.map((item, index) => {
+    const primary = resultContextPrimary(item, fields);
+    const secondary = fields.slice(1, 3).map((field) => resultContextValue(item, field)).filter(Boolean).join("｜");
+    return `
+      <button class="item ${index === state.selectedIndex ? "active" : ""}" data-index="${index}">
+        <strong>${escapeHtml(primary || `第 ${index + 1} 条`)}</strong>
+        <span>${escapeHtml(secondary || "查看字段详情")}</span>
+      </button>
+    `;
+  }).join("");
+  document.querySelectorAll(".item").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedIndex = Number(button.dataset.index);
+      renderResultContextList();
+      renderResultContextDetail();
+    });
+  });
+}
+
+function renderResultContextDetail() {
+  const item = state.items[state.selectedIndex];
+  if (!item) {
+    $("approvalDetail").className = "empty";
+    $("approvalDetail").textContent = "暂无明细。";
+    return;
+  }
+  const fields = resultContextFields(item);
+  $("approvalDetail").className = "";
+  $("approvalDetail").innerHTML = `
+    <div class="detail-body result-context-detail">
+      <h2>${escapeHtml(resultContextPrimary(item, fields) || `第 ${state.selectedIndex + 1} 条`)}</h2>
+      <div class="field-grid">
+        ${fields.map((field) => `
+          <div>
+            <span>${escapeHtml(resultContextFieldLabel(field))}</span>
+            <strong>${escapeHtml(resultContextValue(item, field) || "-")}</strong>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function resultContextFields(item = null) {
+  const sidepanelFields = state.resultContext?.sidepanel?.visible_fields;
+  const fields = Array.isArray(sidepanelFields) && sidepanelFields.length ? sidepanelFields : Object.keys(item || state.items[0] || {});
+  return fields.filter((field) => !internalResultContextField(field));
+}
+
+function internalResultContextField(field) {
+  const normalized = String(field || "").toLowerCase();
+  return normalized === "raw" || normalized.startsWith("_")
+    || [
+      "open_id",
+      "union_id",
+      "user_id",
+      "company_id",
+      "allowed_user_ids",
+      "source_object_id",
+      "source_event_ids",
+      "department_id",
+      "department_ids",
+      "department_id_list",
+      "gender_source",
+      "title_source",
+      "source_system",
+      "resource_plane",
+      "resource_type",
+      "index",
+    ].includes(normalized)
+    || normalized.endsWith("_open_id")
+    || normalized.endsWith("_user_id")
+    || normalized.endsWith("_company_id")
+    || normalized.endsWith("_source");
+}
+
+function resultContextPrimary(item, fields) {
+  for (const field of ["name", "title", "subject", "summary", "email", ...fields]) {
+    const value = resultContextValue(item, field);
+    if (value) return value;
+  }
+  return "";
+}
+
+function resultContextValue(item, field) {
+  const value = item?.[field];
+  if (value === null || value === undefined || value === "") return "";
+  if (Array.isArray(value)) return value.filter(Boolean).slice(0, 5).join("、");
+  if (typeof value === "object") return Object.entries(value).slice(0, 5).map(([key, val]) => `${key}: ${val}`).join("、");
+  return String(value);
+}
+
+function resultContextFieldLabel(field) {
+  return {
+    name: "姓名",
+    title: "职位",
+    department: "部门",
+    department_names: "部门",
+    departments: "部门",
+    email: "邮箱",
+    mobile: "手机",
+    phone: "电话",
+    gender: "性别",
+    subject: "主题",
+    summary: "摘要",
+    status: "状态",
+  }[field] || field;
 }
 
 async function loadCachedApprovals(appConfigId, openId) {
