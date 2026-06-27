@@ -41,6 +41,9 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
     explicit_intent = explicit_command_intent(question, context)
     if explicit_intent is not None:
         return explicit_intent
+    conversation_first = _conversation_first_primary_intent(question=question, context=context)
+    if conversation_first is not None:
+        return intent_with_domain_query(conversation_first, context)
     rule_intent = _recognize_intent_by_rules(question, context)
     force_llm = _requires_llm_command_triage(question=question, rule_intent=rule_intent)
     llm_intent = None
@@ -51,6 +54,62 @@ def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
     if force_llm and _should_degrade_on_llm_miss(rule_intent):
         return intent_with_domain_query(_degraded_command_triage_intent(question=question, rule_intent=rule_intent), context)
     return intent_with_domain_query(rule_intent, context)
+
+
+def _conversation_first_primary_intent(*, question: str, context: RuntimeContext) -> IntentResult | None:
+    if question.strip() != str(context.current_message or "").strip():
+        return None
+    if _reserved_non_v1_or_action_surface(question=question, context=context):
+        return None
+    try:
+        from app.services.runtime_v5.dialogue_resolver import build_conversation_first_frame, conversation_first_intent_result
+    except Exception:
+        return None
+    frame = build_conversation_first_frame(context)
+    if frame.domain not in {"People", "Knowledge", "Communication"}:
+        return None
+    if frame.domain == "Communication" and frame.intent != "message_send":
+        return None
+    if frame.question_type == "action" and frame.intent != "message_send":
+        return None
+    if frame.intent == "smalltalk":
+        return None
+    if frame.needs_clarification or frame.missing_slots:
+        return None
+    if frame.confidence < 0.72:
+        return None
+    return conversation_first_intent_result(context=context, frame=frame)
+
+
+def _reserved_non_v1_or_action_surface(*, question: str, context: RuntimeContext) -> bool:
+    """Keep V1 limited to read-only People/Knowledge while other domains migrate."""
+
+    compact = re.sub(r"\s+", "", str(question or "").lower())
+    if not compact:
+        return False
+    if context.result_context is not None:
+        metadata = context.result_context.metadata if isinstance(context.result_context.metadata, dict) else {}
+        if metadata.get("execution_status") == "clarification":
+            return True
+    if _is_im_send(compact):
+        return False
+    if _reserved_operational_surface(compact):
+        return True
+    if _has_any(compact, ("拉群", "建群", "群发")):
+        return True
+    if _has_any(compact, ("群", "群聊")) and not _has_any(compact, ("发给", "发到", "发送给", "发消息", "发送消息")):
+        return True
+    if context.session_context and any(str(key).startswith("runtime_v5_pending") for key in context.session_context):
+        return False
+    return False
+
+
+def _reserved_operational_surface(compact: str) -> bool:
+    if _has_any(compact, ("写封邮件", "写邮件", "发邮件", "邮件")) and _has_any(compact, ("给", "发", "写", "主题", "正文")):
+        return True
+    if _has_any(compact, ("邮件", "邮箱", "收件箱")):
+        return True
+    return _has_any(compact, ("任务", "待办", "审批", "日程", "会议", "开会", "安排"))
 
 
 def _requires_llm_command_triage(*, question: str, rule_intent: IntentResult) -> bool:
@@ -1331,20 +1390,23 @@ def _is_external_information_followup(text: str, context: RuntimeContext) -> boo
 
 def _contextual_followup_intent(*, question: str, text: str, context: RuntimeContext) -> IntentResult | None:
     compact = text.replace(" ", "")
+    if _rejects_recent_business_context(compact) or (_is_non_work_conversation(text) and not _embedded_people_lookup_parts(question)[0]):
+        return IntentResult(
+            question_type="query",
+            intent="smalltalk",
+            data_scope="self",
+            entities={"fallback_answer": "这是生活需求，不会继承上一轮业务上下文。"},
+            missing_params=(),
+            confidence=0.82,
+            canonical_question=question,
+        )
+    if _reserved_operational_surface(compact):
+        return None
     people_followup = _contextual_people_followup_intent(question=question, text=text, context=context)
     if people_followup is not None:
         return people_followup
     if not context.chat_id or not _looks_like_contextual_followup(compact):
         return None
-    if _rejects_recent_business_context(compact) or _is_non_work_conversation(text):
-        return IntentResult(
-            question_type="query",
-            intent="smalltalk",
-            data_scope="self",
-            missing_params=(),
-            confidence=0.82,
-            canonical_question=question,
-        )
     conversation = _load_conversation_context(context.chat_id)
     if not conversation.turns:
         return None

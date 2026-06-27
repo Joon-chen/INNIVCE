@@ -265,6 +265,78 @@ def test_conversation_first_department_followups_inherit_organization_collection
     assert intent.entities["domain_query"]["subject"] == {"type": "group", "department": expected_keyword}
 
 
+@pytest.mark.parametrize(
+    ("message", "result_context", "expected_intent", "expected_scope", "expected_keyword"),
+    (
+        ("有商务部这个部门吗", BUSINESS_GROUP_RESULT, "department_members", "department", "商务部"),
+        ("那商务部这个人叫什么", BUSINESS_GROUP_RESULT, "department_members", "department", "商务部"),
+        ("商务组多少人，分别叫什么。", None, "department_members", "department", "商务组"),
+        ("叫什么", BUSINESS_GROUP_RESULT, "department_members", "department", "商务组"),
+        ("公司的董事长是谁", None, "organization_snapshot", "organization", ""),
+    ),
+)
+def test_conversation_first_organization_resolver_regression_cases(
+    message: str,
+    result_context: ResultContext | None,
+    expected_intent: str,
+    expected_scope: str,
+    expected_keyword: str,
+) -> None:
+    plan = build_command_plan(context=_context(message, result_context=result_context))
+
+    assert plan.intent == expected_intent
+    assert plan.command_frame is not None
+    assert plan.command_frame.route_path == "conversation_first_v1"
+    assert plan.command_frame.scope == expected_scope
+    if expected_keyword:
+        assert plan.intent_result.entities["keyword"] == expected_keyword
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "公司有多少人，只答数字",
+        "公司有多少人，只要数字",
+        "公司有多少人，数字就行",
+    ),
+)
+def test_conversation_first_numeric_output_is_semantic_contract(message: str) -> None:
+    plan = build_command_plan(context=_context(message))
+
+    assert plan.intent == "organization_snapshot"
+    assert plan.command_frame is not None
+    assert plan.command_frame.params["output_contract"]["mode"] == "numeric_only"
+    assert plan.intent_result.entities["people_query_mode"] == "count_only"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_intent"),
+    (
+        ("我有多少封邮件", "mail_query"),
+        ("查看部门任务", "task_query"),
+        ("查看部门日程", "calendar_query"),
+        ("安排这些人明天下午3点到4点开会，主题：周报同步", "calendar_create"),
+    ),
+)
+def test_conversation_first_v1_does_not_steal_non_v1_domains(message: str, expected_intent: str) -> None:
+    result_context = ResultContext(
+        result_type="organization_snapshot",
+        count=2,
+        items=(
+            {"name": "张三", "open_id": "ou_zhang", "email": "zhangsan@example.com"},
+            {"name": "李四", "open_id": "ou_li", "email": "lisi@example.com"},
+        ),
+        metadata={"context_kind": "query_result", "entity_domain": "people"},
+        answer="上一轮人员结果。",
+    )
+
+    plan = build_command_plan(context=_context(message, result_context=result_context))
+
+    assert plan.intent == expected_intent
+    assert plan.command_frame is not None
+    assert plan.command_frame.route_path != "conversation_first_v1" or expected_intent == "message_send"
+
+
 def test_response_orchestrator_answers_people_count_without_template_or_card() -> None:
     context = _context("公司有多少人，只回答人数")
     command_plan = build_command_plan(context=context)

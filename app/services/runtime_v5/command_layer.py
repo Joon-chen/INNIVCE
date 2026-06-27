@@ -88,6 +88,10 @@ def _has_blocking_runtime_state(session_context: dict[str, Any]) -> bool:
 
 
 def _conversation_first_v1_supported(context: RuntimeContext, command_frame) -> bool:
+    from app.services.runtime_v5.intent import _reserved_non_v1_or_action_surface
+
+    if _reserved_non_v1_or_action_surface(question=context.current_message, context=context):
+        return False
     if command_frame.domain in {"People", "Knowledge"}:
         return not _non_conversation_first_action_requested(context)
     return _conversation_first_communication_allowed(context, command_frame)

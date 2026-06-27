@@ -193,6 +193,8 @@ def _conversation_people_answer(
         if name:
             return f"我找到了{name}。"
     if result_type in {"department_members", "organization_snapshot"}:
+        if mode in {"name_only", "full_list", "detail"}:
+            return _people_list_contract_answer(result_context=result_context, metadata=metadata, mode=mode)
         if surface == "sidepanel" or mode == "sidepanel" or field_projection in {"name_only", "detail"}:
             return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
         if mode == "numeric_only":
@@ -333,6 +335,23 @@ def _people_sidepanel_summary(*, result_context: ResultContext, metadata: dict[s
         label = "男性" if filters.get("value") == "male" else "女性" if filters.get("value") == "female" else "匹配"
         return f"我把这 {count} 位{label}员工整理好了，打开侧边栏可以看完整名单。"
     return f"我把 {count} 条人员结果整理好了，打开侧边栏可以看完整明细。"
+
+
+def _people_list_contract_answer(*, result_context: ResultContext, metadata: dict[str, Any], mode: str) -> str:
+    items = tuple(item for item in result_context.items if isinstance(item, dict))
+    count = int(result_context.count or len(items))
+    if not items:
+        return _human_readable_answer(result_context.answer) or "没有匹配到人员。"
+    if mode in {"full_list", "detail"} and count > 8:
+        return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
+    names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
+    if not names:
+        return _human_readable_answer(result_context.answer) or f"共 {count} 人。"
+    keyword = str(metadata.get("keyword") or "").strip()
+    subject = f"{keyword} " if keyword else ""
+    if len(names) == 1:
+        return f"{subject}这 1 位是：{names[0]}。"
+    return f"{subject}共 {count} 位：{'、'.join(names[:8])}。" if count <= 8 else _people_sidepanel_summary(result_context=result_context, metadata=metadata)
 
 
 def _with_command_enrichment(answer: str, *, intent: IntentResult) -> str:

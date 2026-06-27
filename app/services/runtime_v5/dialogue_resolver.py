@@ -112,7 +112,12 @@ def conversation_first_intent_result(
     if frame.intent == "message_send":
         action_entities, action_missing = _communication_action_entities(context)
         entities.update(action_entities)
-        missing_params = tuple(dict.fromkeys((*missing_params, *action_missing)))
+        merged_missing = [*missing_params, *action_missing]
+        if action_entities.get("target") or action_entities.get("target_type"):
+            merged_missing = [key for key in merged_missing if key not in {"target", "target_type"}]
+        if action_entities.get("text"):
+            merged_missing = [key for key in merged_missing if key != "text"]
+        missing_params = tuple(dict.fromkeys(merged_missing))
     entities["command_frame"] = command_frame_payload(frame)
     return IntentResult(
         question_type=frame.question_type,  # type: ignore[arg-type]
@@ -121,7 +126,7 @@ def conversation_first_intent_result(
         entities=entities,
         missing_params=missing_params,
         confidence=frame.confidence,
-        canonical_question=frame.user_goal or context.current_message,
+        canonical_question=_canonical_question_from_frame(frame=frame, context=context, entities=entities),
     )
 
 
@@ -155,11 +160,19 @@ def _intent(*, domain: str, semantic_frame: SemanticFrame, hints: ConversationHi
         return "message_send" if domain == "Communication" else "smalltalk"
     if domain == "People":
         parameters = semantic_frame.parameters
-        if parameters.get("person_name") and (parameters.get("field") or parameters.get("inherited_field_projection")):
+        previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
+        if semantic_frame.operation == "field_lookup" and _semantic_scope(semantic_frame) == "organization" and not parameters.get("person_name"):
+            return "organization_snapshot"
+        if (
+            previous_result.get("collection_type") == "department_people"
+            and semantic_frame.operation in {"list", "followup", "exists"}
+            and not parameters.get("field")
+        ):
+            return "department_members"
+        if parameters.get("person_name"):
             return "people_lookup"
         if parameters.get("current_object") and parameters.get("field"):
             return "people_lookup"
-        previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
         if (
             parameters.get("organization_unit")
             or hints.scope_hint == "department"
@@ -191,6 +204,8 @@ def _output_contract(*, semantic_frame: SemanticFrame, hints: ConversationHints)
     mode = semantic_frame.requested_output or "natural_text"
     if mode in {"count", "numeric_only"}:
         surface = "text"
+    elif mode in {"name_only", "full_list", "detail"}:
+        surface = "text"
     elif mode == "sidepanel":
         surface = "sidepanel"
     else:
@@ -198,7 +213,7 @@ def _output_contract(*, semantic_frame: SemanticFrame, hints: ConversationHints)
     return {
         "mode": mode,
         "surface": surface,
-        "list_delivery": "sidepanel" if surface == "sidepanel" else "summary_text",
+        "list_delivery": "sidepanel" if surface == "sidepanel" or mode in {"full_list", "detail"} else "summary_text",
         "template_policy": "no_standard_template_for_text",
     }
 
@@ -220,6 +235,14 @@ def _context_contract(*, state: ConversationState, semantic_frame: SemanticFrame
 def _scope(*, domain: str, semantic_frame: SemanticFrame) -> str:
     if domain == "Knowledge":
         return "company"
+    if domain == "Communication":
+        previous_result = semantic_frame.parameters.get("previous_result") if isinstance(semantic_frame.parameters.get("previous_result"), dict) else {}
+        if previous_result.get("result_type") == "organization_snapshot":
+            return "organization"
+        return "self"
+    previous_result = semantic_frame.parameters.get("previous_result") if isinstance(semantic_frame.parameters.get("previous_result"), dict) else {}
+    if domain == "People" and previous_result.get("collection_type") == "department_people" and semantic_frame.operation in {"list", "followup", "exists"}:
+        return "department"
     if semantic_frame.parameters.get("person_name"):
         return "person"
     scope = str(semantic_frame.parameters.get("scope_hint") or "")
@@ -232,6 +255,18 @@ def _scope(*, domain: str, semantic_frame: SemanticFrame) -> str:
     if domain == "People" and semantic_frame.operation in {"list", "count", "followup"}:
         return "organization"
     return "self"
+
+
+def _semantic_scope(semantic_frame: SemanticFrame) -> str:
+    scope = str(semantic_frame.parameters.get("scope_hint") or semantic_frame.target.get("scope") or "").strip()
+    if scope:
+        return scope
+    kind = str(semantic_frame.target.get("kind") or "").strip()
+    if kind == "organization_unit":
+        return "department"
+    if kind == "person":
+        return "person"
+    return ""
 
 
 def _operation_kind(semantic_frame: SemanticFrame) -> str:
@@ -293,19 +328,64 @@ def _entities_from_frame(frame: CommandFrame) -> dict[str, Any]:
     person_name = parameters.get("person_name") or (
         parameters.get("current_object", {}).get("name") if isinstance(parameters.get("current_object"), dict) else ""
     )
-    if person_name:
-        entities["keyword"] = person_name
-    elif frame.intent == "department_members":
+    if frame.intent == "department_members":
         target = semantic.get("target") if isinstance(semantic.get("target"), dict) else {}
         previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
         organization_unit = parameters.get("organization_unit") or previous_result.get("target_label") or target.get("value") or ""
         if organization_unit:
             entities["keyword"] = organization_unit
+    elif person_name:
+        entities["keyword"] = person_name
     if isinstance(parameters.get("filters"), dict):
         entities["people_filter"] = parameters["filters"]
     if frame.intent == "general_query":
         entities["knowledge_context"] = "company_profile" if semantic.get("operation") == "company_profile" else "general"
+        entities["foundation_route"] = "knowledge.general"
+    if frame.intent in {"department_members", "organization_snapshot"}:
+        entities["view"] = "people_aggregate" if frame.intent == "organization_snapshot" else "department_members"
+        entities["foundation_route"] = "people.aggregate" if frame.intent == "organization_snapshot" else "people.department_members"
+        mode = str(output_contract.get("mode") or "")
+        raw_message = str(frame.user_goal or "")
+        field = str(parameters.get("field") or "")
+        if _filters_include_gender(parameters):
+            entities["people_query_mode"] = "gender_list" if mode in {"name_only", "full_list", "detail", "sidepanel"} else "gender_count"
+        elif mode in {"name_only", "full_list", "detail", "sidepanel"} or _looks_like_title_field(field):
+            entities["people_query_mode"] = "title_list" if _looks_like_title_query(raw_message) else "list"
+        elif mode in {"numeric_only", "count", "short_answer"}:
+            entities["people_query_mode"] = "title_count" if _looks_like_title_query(raw_message) else "count_only"
+    if frame.intent == "people_lookup":
+        entities["foundation_route"] = "people.person"
     return entities
+
+
+def _filters_include_gender(parameters: dict[str, Any]) -> bool:
+    filters = parameters.get("filters") if isinstance(parameters.get("filters"), dict) else {}
+    return bool(filters.get("gender") or filters.get("filter") == "gender")
+
+
+def _canonical_question_from_frame(*, frame: CommandFrame, context: RuntimeContext, entities: dict[str, Any]) -> str:
+    if frame.intent != "people_lookup":
+        return frame.user_goal or context.current_message
+    keyword = str(entities.get("keyword") or "").strip()
+    field = str(entities.get("people_query_field") or "").strip()
+    if keyword and field:
+        field_text = {
+            "mobile": "手机号",
+            "email": "邮箱",
+            "title": "岗位",
+            "gender": "性别",
+            "profile": "信息",
+        }.get(field, "信息")
+        return f"{keyword}的{field_text}"
+    return frame.user_goal or context.current_message
+
+
+def _looks_like_title_query(message: str) -> bool:
+    return any(token in str(message or "") for token in ("董事长", "负责人", "岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发"))
+
+
+def _looks_like_title_field(value: str) -> bool:
+    return _looks_like_title_query(value)
 
 
 def _domain_query(
@@ -322,34 +402,40 @@ def _domain_query(
     field = semantic_frame.parameters.get("field")
     if isinstance(field, str) and field:
         fields.append(field)
-    subject = (
-        {
-            "type": "group",
-            "department": semantic_frame.parameters.get("organization_unit")
-            or semantic_frame.parameters.get("previous_result_target")
+    if domain == "People" and intent == "organization_snapshot":
+        subject: Any = {"type": "organization"}
+    else:
+        subject = (
+            {
+                "type": "group",
+                "department": semantic_frame.parameters.get("organization_unit")
+                or semantic_frame.parameters.get("previous_result_target")
+                or semantic_frame.target.get("value")
+                or "",
+            }
+            if domain == "People" and intent == "department_members"
+            else semantic_frame.parameters.get("person_name")
+            or (
+                semantic_frame.parameters.get("current_object", {}).get("name")
+                if isinstance(semantic_frame.parameters.get("current_object"), dict)
+                else ""
+            )
             or semantic_frame.target.get("value")
-            or "",
-        }
-        if domain == "People" and intent == "department_members"
-        else semantic_frame.parameters.get("person_name")
-        or (
-            semantic_frame.parameters.get("current_object", {}).get("name")
-            if isinstance(semantic_frame.parameters.get("current_object"), dict)
-            else ""
+            or ""
         )
-        or semantic_frame.target.get("value")
-        or ""
-    )
+    filters = semantic_frame.parameters.get("filters") if isinstance(semantic_frame.parameters.get("filters"), dict) else {}
+    if domain == "People" and intent == "organization_snapshot" and _looks_like_title_field(str(field or "")):
+        filters = {**filters, "query_mode": "title_list"}
     return {
         "domain": domain.lower(),
         "operation_kind": operation_kind,
         "subject": subject,
-        "filters": semantic_frame.parameters.get("filters") if isinstance(semantic_frame.parameters.get("filters"), dict) else {},
+        "filters": filters,
         "fields": fields,
         "scope": scope,
         "context_ref": context_contract,
         "output_mode": "answer" if fields else output_contract["mode"],
-        "presentation_hint": "sidepanel" if output_contract["surface"] == "sidepanel" else "text",
+        "presentation_hint": "" if operation_kind == "send" else ("sidepanel" if output_contract["surface"] == "sidepanel" else "text"),
         "risk_hint": "high" if operation_kind == "send" else "low",
         "evidence_requirement": "source_field" if fields else "",
     }
@@ -370,7 +456,7 @@ def _resource_boundary(*, domain: str, scope: str) -> str:
 def _domain_reason(*, domain: str, intent: str, semantic_frame: SemanticFrame) -> str:
     if domain == "People" and intent == "people_lookup":
         return "foundation_route:people.person"
-    if domain == "People" and semantic_frame.parameters.get("scope_hint") == "department":
+    if domain == "People" and intent == "department_members":
         return "foundation_route:people.department_members"
     if domain == "People":
         return "foundation_route:people.organization_snapshot"

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+import json
+import os
 import re
 from typing import Any
 
+from app.core.config import settings
+from app.services.llm.gateway import LLMGateway
+from app.services.llm.routing_policy import llm_route_for_task
 from app.services.runtime_v5.conversation_hints import ConversationHints
 from app.services.runtime_v5.conversation_state import ConversationState
 
@@ -44,6 +50,16 @@ def understand_semantics(
     output contract must stay limited to semantic understanding.
     """
 
+    frame = _deterministic_semantic_frame(message=message, state=state, hints=hints)
+    return _llm_semantic_frame(message=message, state=state, hints=hints, fallback=frame) or frame
+
+
+def _deterministic_semantic_frame(
+    *,
+    message: str,
+    state: ConversationState,
+    hints: ConversationHints,
+) -> SemanticFrame:
     speech_act = _speech_act(hints=hints, state=state)
     topic = _topic(hints=hints, state=state)
     operation = _operation(hints=hints, speech_act=speech_act)
@@ -59,6 +75,167 @@ def understand_semantics(
         parameters=parameters,
         confidence=0.72 if ambiguities else _confidence(hints=hints, state=state),
         ambiguities=ambiguities,
+    )
+
+
+def _llm_semantic_frame(
+    *,
+    message: str,
+    state: ConversationState,
+    hints: ConversationHints,
+    fallback: SemanticFrame,
+) -> SemanticFrame | None:
+    if _running_tests() or not settings.bot_llm_semantics_enabled:
+        return None
+    if not _should_try_llm_semantics(fallback=fallback, state=state, hints=hints):
+        return None
+    prompt = _semantic_prompt(message=message, state=state, hints=hints, fallback=fallback)
+    timeout_seconds = max(0.5, llm_route_for_task("command_intent").latency_budget_ms / 1000.0)
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="semantic-frame-llm")
+    future = executor.submit(lambda: LLMGateway().complete_task_text(prompt, task_type="command_intent", temperature=0.0))
+    try:
+        raw = future.result(timeout=timeout_seconds) or ""
+    except TimeoutError:
+        future.cancel()
+        return None
+    except Exception:
+        return None
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    payload = _parse_json_object(raw)
+    if not payload:
+        return None
+    frame = _semantic_frame_from_payload(payload=payload, message=message, state=state, fallback=fallback)
+    if frame is None:
+        return None
+    return frame
+
+
+def _should_try_llm_semantics(*, fallback: SemanticFrame, state: ConversationState, hints: ConversationHints) -> bool:
+    if fallback.speech_act in {"confirm", "cancel"}:
+        return False
+    if hints.is_action_request:
+        return False
+    if state.previous_result_reference.result_type:
+        return True
+    return fallback.topic in {"people", "knowledge", "conversation"} and fallback.confidence < 0.9
+
+
+def _semantic_prompt(
+    *,
+    message: str,
+    state: ConversationState,
+    hints: ConversationHints,
+    fallback: SemanticFrame,
+) -> str:
+    state_payload = {
+        "active_domain": state.active_domain,
+        "active_topic": state.active_topic,
+        "active_object": state.active_object,
+        "active_collection": state.active_collection,
+        "previous_result": {
+            "result_type": state.previous_result_reference.result_type,
+            "collection_type": state.previous_result_reference.collection_type,
+            "target_label": state.previous_result_reference.target_label,
+            "count": state.previous_result_reference.count,
+            "filters": state.previous_result_reference.filters,
+            "field_projection": state.previous_result_reference.field_projection,
+        },
+        "pending_confirmation": bool(state.pending_confirmation.kind),
+        "pending_clarification": bool(state.pending_clarification.kind),
+    }
+    return f"""Role: Conversation First Semantic Understanding. JSON only.
+You only understand the current user message using conversation state.
+Do not choose capability, provider, runtime, permission, credential, or policy.
+
+Allowed output:
+{{
+  "speech_act": "ask|followup|request_action|confirm|cancel|answer",
+  "topic": "people|knowledge|communication|conversation",
+  "operation": "ask|count|list|field_lookup|company_profile|knowledge_query|action_request|followup|exists",
+  "requested_output": "natural_text|numeric_only|short_answer|count|name_only|full_list|detail|sidepanel",
+  "target": {{"kind": "person|organization_unit|collection|field|previous_result|unknown", "value": "", "reference": ""}},
+  "parameters": {{"organization_unit": "", "person_name": "", "field": "", "filters": {{}}, "previous_result_target": ""}},
+  "confidence": 0.0,
+  "ambiguities": []
+}}
+
+Rules:
+- If the message is short or referential and previous_result exists, prefer previous_result instead of treating it as a new query.
+- If unsure between two concrete meanings, put the ambiguity in ambiguities instead of guessing.
+- Normalize varied wording into requested_output; do not copy phrasing such as "只答数字" literally.
+- For organization phrases like "有商务部这个部门吗", target.value should be "商务部".
+
+ConversationState:
+{json.dumps(state_payload, ensure_ascii=False, default=str)}
+
+DeterministicFallback:
+{json.dumps(fallback.payload(), ensure_ascii=False, default=str)}
+
+UserMessage: {message}
+"""
+
+
+def _semantic_frame_from_payload(
+    *,
+    payload: dict[str, Any],
+    message: str,
+    state: ConversationState,
+    fallback: SemanticFrame,
+) -> SemanticFrame | None:
+    speech_act = _enum(payload.get("speech_act"), {"ask", "followup", "request_action", "confirm", "cancel", "answer"}, fallback.speech_act)
+    if speech_act == "confirm" and not state.pending_confirmation.kind and not state.pending_clarification.kind:
+        speech_act = fallback.speech_act if fallback.speech_act != "confirm" else "ask"
+    topic = _enum(payload.get("topic"), {"people", "knowledge", "communication", "conversation"}, fallback.topic)
+    operation = _enum(
+        payload.get("operation"),
+        {"ask", "count", "list", "field_lookup", "company_profile", "knowledge_query", "action_request", "followup", "exists"},
+        fallback.operation,
+    )
+    requested_output = _enum(
+        payload.get("requested_output"),
+        {"natural_text", "numeric_only", "short_answer", "count", "name_only", "full_list", "detail", "sidepanel"},
+        fallback.requested_output,
+    )
+    raw_target = payload.get("target") if isinstance(payload.get("target"), dict) else {}
+    target = {str(key): value for key, value in raw_target.items() if key in {"kind", "value", "reference", "field"} and value not in {None, ""}}
+    raw_parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    parameters = dict(fallback.parameters)
+    for key in ("organization_unit", "person_name", "field", "previous_result_target"):
+        value = str(raw_parameters.get(key) or "").strip()
+        if value:
+            parameters[key] = value
+    if isinstance(raw_parameters.get("filters"), dict):
+        parameters["filters"] = raw_parameters["filters"]
+    parameters["raw_message"] = message
+    if state.previous_result_reference.collection_type and target.get("reference") == "previous_result":
+        parameters.setdefault(
+            "previous_result",
+            {
+                "result_type": state.previous_result_reference.result_type,
+                "collection_type": state.previous_result_reference.collection_type,
+                "count": state.previous_result_reference.count,
+                "target_label": state.previous_result_reference.target_label,
+                "filters": state.previous_result_reference.filters,
+                "field_projection": state.previous_result_reference.field_projection,
+            },
+        )
+        if state.previous_result_reference.target_label:
+            parameters.setdefault("previous_result_target", state.previous_result_reference.target_label)
+    confidence = _confidence_float(payload.get("confidence"), fallback.confidence)
+    if confidence < 0.55:
+        return None
+    ambiguities = tuple(str(item).strip() for item in payload.get("ambiguities", []) if str(item).strip()) if isinstance(payload.get("ambiguities"), list) else fallback.ambiguities
+    return SemanticFrame(
+        speech_act=speech_act,
+        topic=topic,
+        target=target or fallback.target,
+        operation=operation,
+        requested_output=requested_output,
+        parameters=parameters,
+        confidence=confidence,
+        ambiguities=ambiguities,
+        source="llm_semantic_understanding_v1",
     )
 
 
@@ -123,7 +300,7 @@ def _parameters(
     gender = _gender_filter(hints.target_hint)
     if gender:
         params["filters"] = {"gender": gender}
-    if operation in {"followup", "list"} and state.previous_result_reference.collection_type:
+    if operation in {"followup", "list", "action_request"} and state.previous_result_reference.collection_type:
         params["previous_result"] = {
             "result_type": state.previous_result_reference.result_type,
             "collection_type": state.previous_result_reference.collection_type,
@@ -143,7 +320,8 @@ def _parameters(
             params["person_name"] = current_name
             person_name = current_name
     if state.previous_result_reference.field_projection and person_name:
-        params["inherited_field_projection"] = state.previous_result_reference.field_projection
+        inherited = state.previous_result_reference.field_projection
+        params["inherited_field_projection"] = "title" if inherited == "job_title" else inherited
     if current_object:
         params["current_object"] = state.active_object
     return params
@@ -210,8 +388,8 @@ def _requested_field(target_hint: str) -> str:
         "手机号": "mobile",
         "号码": "mobile",
         "邮箱": "email",
-        "职位": "job_title",
-        "岗位": "job_title",
+        "职位": "title",
+        "岗位": "title",
         "性别": "gender",
     }
     return aliases.get(target_hint, "")
@@ -234,19 +412,57 @@ def _looks_like_organization_unit_hint(value: str) -> bool:
 
 def _person_candidate(message: str) -> str:
     compact = re.sub(r"\s+", "", str(message or ""))
+    compact = compact.strip("，,。.!！?？")
     has_field = any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "性别", "是男是女"))
+    if compact in {"我是谁", "你是谁"}:
+        return ""
     if any(token in compact for token in ("公司", "部门", "我们", "男生", "男性", "女生", "女性", "有谁")):
         return ""
     if compact.startswith(("他", "她")):
         return ""
     if not has_field and any(token in compact for token in ("多少", "几位", "几个")):
         return ""
-    match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})(?:的)?(?:电话|手机号|号码|邮箱|职位|岗位|性别|是男是女).*", compact)
+    compact_for_name = re.sub(r"^(那|那么|还有)", "", compact)
+    match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})(?:的)?(?:电话|手机号|号码|邮箱|职位|岗位|性别|是男是女).*", compact_for_name)
     if match:
         return match.group("name").removesuffix("的")
+    if not any(token in compact for token in ("公司", "部门", "我们", "你", "我")):
+        match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})是谁$", compact)
+        if match:
+            return match.group("name")
     if compact.startswith(("那", "那么")):
         name = re.sub(r"^(那|那么)", "", compact)
-        name = re.sub(r"呢$", "", name)
+        name = re.sub(r"(的)?(你有吗|有吗|有么|有没有|呢)$", "", name)
         return name if 2 <= len(name) <= 4 else ""
     match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})呢$", compact)
     return match.group("name") if match else ""
+
+
+def _parse_json_object(raw: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    match = re.search(r"\{.*\}", text, re.S)
+    if match:
+        text = match.group(0)
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _enum(value: Any, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else fallback
+
+
+def _confidence_float(value: Any, fallback: float) -> float:
+    try:
+        return max(0.0, min(float(value), 1.0))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _running_tests() -> bool:
+    return bool(os.getenv("PYTEST_CURRENT_TEST"))
