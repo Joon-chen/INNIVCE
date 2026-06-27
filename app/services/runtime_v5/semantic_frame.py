@@ -112,6 +112,8 @@ def _parameters(
         params["target_hint"] = hints.target_hint
     if hints.scope_hint:
         params["scope_hint"] = hints.scope_hint
+    if hints.scope_hint == "department" and hints.target_hint:
+        params["organization_unit"] = hints.target_hint
     person_name = _person_candidate(message)
     if person_name:
         params["person_name"] = person_name

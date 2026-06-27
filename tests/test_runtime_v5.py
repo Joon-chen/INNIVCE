@@ -245,6 +245,26 @@ def test_runtime_v5_department_people_questions_route_to_department_members() ->
         assert plan.sources == ("people",)
 
 
+def test_conversation_first_department_count_preserves_organization_scope_and_keyword() -> None:
+    cases = (
+        ("商务部有多少人", "商务部"),
+        ("商务部多少人", "商务部"),
+        ("商务组有哪些人", "商务组"),
+        ("半导体事业部多少人", "半导体事业部"),
+        ("公司财务部门有多少人？", "财务部门"),
+    )
+    for question, keyword in cases:
+        plan = build_command_plan(context=_context(question))
+
+        assert plan.intent == "department_members"
+        assert plan.intent_result.data_scope == "department"
+        assert plan.intent_result.entities["keyword"] == keyword
+        assert plan.command_frame is not None
+        assert plan.command_frame.domain == "People"
+        assert plan.command_frame.params["domain_query"]["subject"] == {"type": "group", "department": keyword}
+        assert plan.planner_result.sources == ("people",)
+
+
 def test_runtime_v5_people_provider_uses_organization_foundation_for_department_members(monkeypatch) -> None:
     def fake_resolve_department_members(db, *, company_id, query):
         return SimpleNamespace(

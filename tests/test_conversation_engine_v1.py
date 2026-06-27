@@ -103,8 +103,8 @@ CASES = [
     ("姓王的有多少位", PEOPLE_RESULT, "People", "People", "ask", "count", "organization_snapshot", "organization", True, False, "instant", "47"),
     ("有哪些工程师", None, "", "People", "ask", "list", "organization_snapshot", "organization", True, False, "instant", "工程师"),
     ("工程师有多少人", None, "", "People", "ask", "count", "organization_snapshot", "organization", True, False, "instant", "工程师"),
-    ("研发部有哪些人", None, "", "People", "ask", "list", "organization_snapshot", "department", True, False, "instant", "研发"),
-    ("财务部多少人", None, "", "People", "ask", "count", "organization_snapshot", "department", True, False, "instant", "财务"),
+    ("研发部有哪些人", None, "", "People", "ask", "list", "department_members", "department", True, False, "instant", "研发"),
+    ("财务部多少人", None, "", "People", "ask", "count", "department_members", "department", True, False, "instant", "财务"),
     ("有谁的号码", None, "", "People", "ask", "field_lookup", "people_lookup", "person", True, False, "instant", "确认对象"),
     ("公司是做什么的", None, "", "Knowledge", "ask", "company_profile", "general_query", "company", True, False, "instant", "公司"),
     ("公司主营业务是什么", None, "", "Knowledge", "ask", "company_profile", "general_query", "company", True, False, "instant", "主营业务"),
@@ -435,6 +435,8 @@ def _sample_reply(command_frame, *, allowed: bool) -> str:
         if "第" in raw:
             return "第一个/第3个详情应该从上一轮结果中打开。"
         return "47人。"
+    if command_frame.intent == "department_members":
+        return f"会按组织范围处理：{raw}。"
     if command_frame.intent == "people_lookup":
         if command_frame.missing_slots:
             return "需要你确认对象后再查。"

@@ -136,6 +136,9 @@ def _requested_output_hint(*, compact: str) -> str:
 
 
 def _target_hint(*, text: str, compact: str) -> str:
+    organization_unit = _organization_unit_candidate(compact)
+    if organization_unit:
+        return organization_unit
     if any(token in compact for token in ("男生", "男性")):
         return "male"
     if any(token in compact for token in ("女生", "女性")):
@@ -145,6 +148,15 @@ def _target_hint(*, text: str, compact: str) -> str:
             return field
     match = re.search(r"[\u4e00-\u9fff]{2,4}", text)
     return match.group(0) if match else ""
+
+
+def _organization_unit_candidate(compact: str) -> str:
+    match = re.search(
+        r"(?:公司)?(?P<unit>[\u4e00-\u9fffA-Za-z0-9]{1,30}(?:事业部|部门|中心|团队|小组|组|部))"
+        r"(?=(?:有|都|里|内|多少|几|哪些|有哪些|成员|人员|同事|名单|$))",
+        compact,
+    )
+    return match.group("unit") if match else ""
 
 
 def _scope_hint(*, compact: str, state: ConversationState) -> str:

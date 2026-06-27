@@ -159,12 +159,12 @@ def _intent(*, domain: str, semantic_frame: SemanticFrame, hints: ConversationHi
             return "people_lookup"
         if parameters.get("current_object") and parameters.get("field"):
             return "people_lookup"
+        if hints.scope_hint == "department" or parameters.get("organization_unit"):
+            return "department_members"
         if semantic_frame.operation in {"count", "list", "followup"}:
             return "organization_snapshot"
         if semantic_frame.operation == "field_lookup":
             return "people_lookup"
-        if hints.scope_hint == "department":
-            return "department_members"
         return "organization_snapshot"
     if domain == "Knowledge":
         return "general_query"
@@ -289,6 +289,11 @@ def _entities_from_frame(frame: CommandFrame) -> dict[str, Any]:
     )
     if person_name:
         entities["keyword"] = person_name
+    elif frame.intent == "department_members":
+        target = semantic.get("target") if isinstance(semantic.get("target"), dict) else {}
+        organization_unit = parameters.get("organization_unit") or target.get("value") or ""
+        if organization_unit:
+            entities["keyword"] = organization_unit
     if isinstance(parameters.get("filters"), dict):
         entities["people_filter"] = parameters["filters"]
     if frame.intent == "general_query":
@@ -310,17 +315,22 @@ def _domain_query(
     field = semantic_frame.parameters.get("field")
     if isinstance(field, str) and field:
         fields.append(field)
-    return {
-        "domain": domain.lower(),
-        "operation_kind": operation_kind,
-        "subject": semantic_frame.parameters.get("person_name")
+    subject = (
+        {"type": "group", "department": semantic_frame.parameters.get("organization_unit") or semantic_frame.target.get("value") or ""}
+        if domain == "People" and intent == "department_members"
+        else semantic_frame.parameters.get("person_name")
         or (
             semantic_frame.parameters.get("current_object", {}).get("name")
             if isinstance(semantic_frame.parameters.get("current_object"), dict)
             else ""
         )
         or semantic_frame.target.get("value")
-        or "",
+        or ""
+    )
+    return {
+        "domain": domain.lower(),
+        "operation_kind": operation_kind,
+        "subject": subject,
         "filters": semantic_frame.parameters.get("filters") if isinstance(semantic_frame.parameters.get("filters"), dict) else {},
         "fields": fields,
         "scope": scope,
