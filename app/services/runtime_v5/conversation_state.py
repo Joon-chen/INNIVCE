@@ -11,6 +11,7 @@ class PreviousResultReference:
     result_type: str = ""
     domain: str = ""
     topic: str = ""
+    target_label: str = ""
     object_type: str = ""
     collection_type: str = ""
     count: int = 0
@@ -99,6 +100,7 @@ def _previous_result_reference(result_context: ResultContext | None) -> Previous
         result_type=result_context.result_type,
         domain=domain,
         topic=_topic_for_result_type(result_context.result_type, domain=domain),
+        target_label=_target_label(result_context=result_context, metadata=metadata),
         object_type=_object_type(result_context=result_context, domain=domain),
         collection_type=collection_type,
         count=int(result_context.count or len(result_context.items or ())),
@@ -190,6 +192,7 @@ def _active_collection(result_ref: PreviousResultReference) -> dict[str, Any]:
         "type": result_ref.collection_type,
         "domain": result_ref.domain,
         "topic": result_ref.topic,
+        "target_label": result_ref.target_label,
         "count": result_ref.count,
         "filters": result_ref.filters,
     }
@@ -257,6 +260,8 @@ def _topic_for_result_type(result_type: str, *, domain: str) -> str:
 
 
 def _object_type(*, result_context: ResultContext, domain: str) -> str:
+    if result_context.result_type == "department_members":
+        return ""
     if domain == "People" and result_context.count == 1:
         return "person"
     if domain == "Knowledge" and result_context.count == 1:
@@ -274,6 +279,8 @@ def _field_projection(metadata: dict[str, Any]) -> str:
 
 
 def _object_payload(*, result_context: ResultContext, metadata: dict[str, Any], domain: str) -> dict[str, Any]:
+    if result_context.result_type == "department_members":
+        return {}
     if domain != "People" or result_context.count != 1 or not result_context.items:
         return {}
     item = result_context.items[0] if isinstance(result_context.items[0], dict) else {}
@@ -290,6 +297,8 @@ def _object_payload(*, result_context: ResultContext, metadata: dict[str, Any], 
 
 
 def _collection_type(*, result_context: ResultContext, metadata: dict[str, Any], domain: str) -> str:
+    if domain == "People" and result_context.result_type == "department_members":
+        return "department_people"
     if domain == "People" and result_context.count != 1:
         people_filter = metadata.get("people_filter") if isinstance(metadata.get("people_filter"), dict) else {}
         if people_filter.get("filter") == "gender":
@@ -297,6 +306,23 @@ def _collection_type(*, result_context: ResultContext, metadata: dict[str, Any],
         return "company_people"
     if domain == "Knowledge" and result_context.count:
         return "knowledge_results"
+    return ""
+
+
+def _target_label(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
+    for key in ("keyword", "query"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            return value
+    resolution = metadata.get("organization_resolution") if isinstance(metadata.get("organization_resolution"), dict) else {}
+    for key in ("resolved_name", "query", "normalized_query"):
+        value = str(resolution.get(key) or "").strip()
+        if value:
+            return value
+    if result_context.result_type == "department_members" and result_context.answer:
+        text = str(result_context.answer or "")
+        if text.startswith("「") and "」" in text:
+            return text.split("」", 1)[0].removeprefix("「").strip()
     return ""
 
 

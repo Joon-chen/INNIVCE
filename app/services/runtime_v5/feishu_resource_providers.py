@@ -6282,7 +6282,7 @@ def _people_aggregate_answer(
 
 def _people_query_mode_from_text(text: str) -> str:
     compact = re.sub(r"\s+", "", str(text or "").lower()).replace("多少个", "多少")
-    wants_list = any(token in compact for token in ("分别是谁", "都有谁", "名单", "列出", "全部显示", "有哪些"))
+    wants_list = any(token in compact for token in ("是谁", "谁是", "分别是谁", "都有谁", "名单", "列出", "全部显示", "有哪些"))
     if any(token in compact for token in ("有谁的号码", "谁的号码", "有谁的电话", "谁的电话")):
         return "list"
     if "通讯录" in compact and any(token in compact for token in ("发我", "发下", "发我下", "给我", "给我下", "发一下")):
@@ -6293,7 +6293,7 @@ def _people_query_mode_from_text(text: str) -> str:
         return "count_only"
     if any(token in compact for token in ("男生", "男性", "男的", "男员工", "女生", "女性", "女的", "女员工")):
         return "gender_list" if wants_list else "gender_count"
-    if any(token in compact for token in ("岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+    if any(token in compact for token in ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
         return "title_list" if wants_list else "title_count"
     if wants_list:
         return "list"
@@ -6347,10 +6347,10 @@ def _people_gender_filter(text: str) -> str:
 
 def _people_title_filter_from_text(text: str) -> str:
     compact = re.sub(r"[\s，,。.!！；;：:]+", "", str(text or ""))
-    if not any(token in compact for token in ("岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+    if not any(token in compact for token in ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
         return ""
     keyword = compact
-    for token in ("公司", "全公司", "共有", "有多少个", "有多少位", "有多少", "多少个", "多少位", "多少", "几个", "哪些是", "谁是", "有哪些", "都有谁", "分别是谁", "人员", "员工", "岗位", "职位", "的", "？", "?"):
+    for token in ("公司", "全公司", "共有", "有多少个", "有多少位", "有多少", "多少个", "多少位", "多少", "几个", "哪些是", "是谁", "谁是", "有哪些", "都有谁", "分别是谁", "分别", "人员", "员工", "岗位", "职位", "的", "？", "?"):
         keyword = keyword.replace(token, "")
     return keyword.strip()
 

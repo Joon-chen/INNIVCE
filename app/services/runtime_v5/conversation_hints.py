@@ -29,7 +29,30 @@ class ConversationHints:
 
 _CONFIRMATION_WORDS = {"是", "是的", "对", "对的", "确认", "可以", "好的", "嗯"}
 _CANCEL_WORDS = {"不用", "不用了", "取消", "算了", "先不用", "不要了"}
-_FOLLOWUP_MARKERS = ("呢", "他", "她", "哪个", "哪些", "哪", "那个", "那位", "这个", "这些", "那些", "刚才", "上面", "继续", "展开", "补全", "全部", "第")
+_FOLLOWUP_MARKERS = (
+    "呢",
+    "他",
+    "她",
+    "谁",
+    "是谁",
+    "分别是谁",
+    "叫什么名字",
+    "哪个",
+    "哪些",
+    "哪",
+    "那个",
+    "那位",
+    "这个",
+    "这些",
+    "那些",
+    "刚才",
+    "上面",
+    "继续",
+    "展开",
+    "补全",
+    "全部",
+    "第",
+)
 _ACTION_MARKERS = ("发给", "发送", "发消息", "发到", "通知", "拉群", "建群", "发邮件", "群发")
 _KNOWLEDGE_MARKERS = (
     "公司是做什么",
@@ -112,6 +135,8 @@ def _operation_hint(*, compact: str, state: ConversationState) -> str:
         return "company_profile"
     if any(token in compact for token in ("制度", "流程", "文档", "资料", "知识库")):
         return "knowledge_query"
+    if state.previous_result_reference.collection_type and any(token in compact for token in ("是谁", "分别是谁", "叫什么名字", "哪些人", "有哪些人")):
+        return "list"
     if any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "是男是女", "性别")):
         return "field_lookup"
     if any(token in compact for token in ("哪", "名单", "列出", "展开", "全部", "补全", "继续")):
@@ -146,17 +171,37 @@ def _target_hint(*, text: str, compact: str) -> str:
     for field in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "性别"):
         if field in compact:
             return field
+    if _is_generic_organization_reference(compact):
+        return ""
     match = re.search(r"[\u4e00-\u9fff]{2,4}", text)
     return match.group(0) if match else ""
 
 
 def _organization_unit_candidate(compact: str) -> str:
-    match = re.search(
+    matches = re.findall(
         r"(?:公司)?(?P<unit>[\u4e00-\u9fffA-Za-z0-9]{1,30}(?:事业部|部门|中心|团队|小组|组|部))"
-        r"(?=(?:有|都|里|内|多少|几|哪些|有哪些|成员|人员|同事|名单|$))",
+        r"(?=(?:的|有|都|里|内|多少|几|哪些|有哪些|成员|人员|同事|名单|叫|名字|吗|$))",
         compact,
     )
-    return match.group("unit") if match else ""
+    for raw in reversed(matches):
+        unit = _clean_organization_unit(raw)
+        if unit:
+            return unit
+    return ""
+
+
+def _clean_organization_unit(value: str) -> str:
+    unit = str(value or "").strip()
+    for prefix in ("我问的是", "问的是", "我说的是", "说的是", "查一下", "查看", "帮我查", "这个", "那个", "有这个", "公司"):
+        while unit.startswith(prefix):
+            unit = unit.removeprefix(prefix).strip()
+    if unit in {"部", "组", "部门", "小组", "这个部", "这个组", "这个部门", "那个部", "那个组", "那个部门", "有这个部", "有这个组", "有这个部门"}:
+        return ""
+    return unit
+
+
+def _is_generic_organization_reference(compact: str) -> bool:
+    return any(token in compact for token in ("这个部门", "那个部门", "有这个部门", "这个组", "那个组", "有这个组"))
 
 
 def _scope_hint(*, compact: str, state: ConversationState) -> str:

@@ -67,6 +67,28 @@ KNOWLEDGE_RESULT = ResultContext(
     metadata={"entity_domain": "Knowledge"},
     answer="找到公司介绍资料。",
 )
+BUSINESS_GROUP_RESULT = ResultContext(
+    result_type="department_members",
+    count=1,
+    items=({"name": "汤冠男", "job_title": "部门高级经理"},),
+    metadata={
+        "entity_domain": "People",
+        "keyword": "商务组",
+        "organization_resolution": {"resolved_name": "商务组"},
+    },
+    answer="「商务组」我查到了 1 人：\n1. 汤冠男",
+)
+ADMIN_GROUP_RESULT = ResultContext(
+    result_type="department_members",
+    count=3,
+    items=({"name": "李慧玲"}, {"name": "杜玉娟"}, {"name": "王亚莉"}),
+    metadata={
+        "entity_domain": "People",
+        "keyword": "行政组",
+        "organization_resolution": {"resolved_name": "行政组"},
+    },
+    answer="「行政组」我查到了 3 人。",
+)
 PENDING_SEND = {
     "runtime_v5_pending_action": {
         "intent": "message_send",
@@ -209,6 +231,38 @@ def test_command_layer_uses_conversation_first_for_people_and_knowledge() -> Non
         assert plan.intent == expected_intent
         assert plan.command_frame is not None
         assert plan.command_frame.route_path == "conversation_first_v1"
+
+
+@pytest.mark.parametrize(
+    ("message", "result_context", "expected_keyword"),
+    (
+        ("是谁", BUSINESS_GROUP_RESULT, "商务组"),
+        ("我问的是商务组的人叫什么名字。", BUSINESS_GROUP_RESULT, "商务组"),
+        ("有这个部门吗", BUSINESS_GROUP_RESULT, "商务组"),
+        ("分别是谁", ADMIN_GROUP_RESULT, "行政组"),
+    ),
+)
+def test_conversation_first_department_followups_inherit_organization_collection(
+    message: str,
+    result_context: ResultContext,
+    expected_keyword: str,
+) -> None:
+    context = _context(message, result_context=result_context)
+
+    state = build_conversation_state(context)
+    hints = build_conversation_hints(message, state)
+    semantic_frame = understand_semantics(message=message, state=state, hints=hints)
+    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=hints)
+    intent = conversation_first_intent_result(context=context, frame=command_frame)
+
+    assert state.previous_result_reference.collection_type == "department_people"
+    assert state.previous_result_reference.target_label == expected_keyword
+    assert semantic_frame.parameters["previous_result"]["target_label"] == expected_keyword
+    assert command_frame.intent == "department_members"
+    assert command_frame.scope == "department"
+    assert command_frame.context_mode == "inherit_result_context"
+    assert intent.entities["keyword"] == expected_keyword
+    assert intent.entities["domain_query"]["subject"] == {"type": "group", "department": expected_keyword}
 
 
 def test_response_orchestrator_answers_people_count_without_template_or_card() -> None:

@@ -159,7 +159,12 @@ def _intent(*, domain: str, semantic_frame: SemanticFrame, hints: ConversationHi
             return "people_lookup"
         if parameters.get("current_object") and parameters.get("field"):
             return "people_lookup"
-        if hints.scope_hint == "department" or parameters.get("organization_unit"):
+        previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
+        if (
+            parameters.get("organization_unit")
+            or hints.scope_hint == "department"
+            or previous_result.get("collection_type") == "department_people"
+        ):
             return "department_members"
         if semantic_frame.operation in {"count", "list", "followup"}:
             return "organization_snapshot"
@@ -204,6 +209,7 @@ def _context_contract(*, state: ConversationState, semantic_frame: SemanticFrame
         "active_topic": state.active_topic,
         "previous_result_type": state.previous_result_reference.result_type,
         "previous_collection": state.previous_result_reference.collection_type,
+        "previous_target_label": state.previous_result_reference.target_label,
         "previous_count": state.previous_result_reference.count,
         "pending_confirmation": bool(state.pending_confirmation.kind),
         "pending_clarification": bool(state.pending_clarification.kind),
@@ -219,7 +225,7 @@ def _scope(*, domain: str, semantic_frame: SemanticFrame) -> str:
     scope = str(semantic_frame.parameters.get("scope_hint") or "")
     if scope in {"organization", "company_people", "filtered_people"}:
         return "organization"
-    if scope == "department":
+    if scope in {"department", "department_people"}:
         return "department"
     if scope == "person" or semantic_frame.operation == "field_lookup":
         return "person"
@@ -291,7 +297,8 @@ def _entities_from_frame(frame: CommandFrame) -> dict[str, Any]:
         entities["keyword"] = person_name
     elif frame.intent == "department_members":
         target = semantic.get("target") if isinstance(semantic.get("target"), dict) else {}
-        organization_unit = parameters.get("organization_unit") or target.get("value") or ""
+        previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
+        organization_unit = parameters.get("organization_unit") or previous_result.get("target_label") or target.get("value") or ""
         if organization_unit:
             entities["keyword"] = organization_unit
     if isinstance(parameters.get("filters"), dict):
@@ -316,7 +323,13 @@ def _domain_query(
     if isinstance(field, str) and field:
         fields.append(field)
     subject = (
-        {"type": "group", "department": semantic_frame.parameters.get("organization_unit") or semantic_frame.target.get("value") or ""}
+        {
+            "type": "group",
+            "department": semantic_frame.parameters.get("organization_unit")
+            or semantic_frame.parameters.get("previous_result_target")
+            or semantic_frame.target.get("value")
+            or "",
+        }
         if domain == "People" and intent == "department_members"
         else semantic_frame.parameters.get("person_name")
         or (

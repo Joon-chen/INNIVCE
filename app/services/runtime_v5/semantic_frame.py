@@ -112,7 +112,7 @@ def _parameters(
         params["target_hint"] = hints.target_hint
     if hints.scope_hint:
         params["scope_hint"] = hints.scope_hint
-    if hints.scope_hint == "department" and hints.target_hint:
+    if hints.scope_hint == "department" and _looks_like_organization_unit_hint(hints.target_hint):
         params["organization_unit"] = hints.target_hint
     person_name = _person_candidate(message)
     if person_name:
@@ -128,9 +128,12 @@ def _parameters(
             "result_type": state.previous_result_reference.result_type,
             "collection_type": state.previous_result_reference.collection_type,
             "count": state.previous_result_reference.count,
+            "target_label": state.previous_result_reference.target_label,
             "filters": state.previous_result_reference.filters,
             "field_projection": state.previous_result_reference.field_projection,
         }
+        if state.previous_result_reference.target_label:
+            params["previous_result_target"] = state.previous_result_reference.target_label
         if state.previous_result_reference.filters and "filters" not in params:
             params["filters"] = _normalized_previous_filters(state.previous_result_reference.filters)
     current_object = state.active_object if state.previous_result_reference.object_type == "person" else {}
@@ -220,6 +223,13 @@ def _gender_filter(target_hint: str) -> str:
     if target_hint == "female":
         return "female"
     return ""
+
+
+def _looks_like_organization_unit_hint(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or text in {"这个", "那个", "这些", "那些", "谁", "是谁", "分别是谁"}:
+        return False
+    return bool(re.search(r"(事业部|部门|中心|团队|小组|组|部)$", text))
 
 
 def _person_candidate(message: str) -> str:

@@ -1250,6 +1250,25 @@ def test_runtime_v5_people_lookup_embedded_in_non_work_sentence_wins() -> None:
     assert "Conversation" in {candidate["domain"] for candidate in trace["candidates"]}
 
 
+def test_runtime_v5_people_identity_question_strips_identity_suffix() -> None:
+    question = "戴留兴是谁"
+    intent = recognize_intent(question, _context(question))
+
+    assert intent.intent == "people_lookup"
+    assert intent.entities["keyword"] == "戴留兴"
+    assert intent.entities["domain_query"]["subject"] == {"type": "person", "name": "戴留兴"}
+
+
+def test_runtime_v5_people_role_question_routes_to_title_list() -> None:
+    question = "公司董事长是谁"
+    intent = recognize_intent(question, _context(question))
+
+    assert intent.intent == "organization_snapshot"
+    assert intent.entities["people_query_mode"] == "title_list"
+    assert intent.entities["domain_query"]["filters"] == {"query_mode": "title_list"}
+    assert intent.entities["domain_query"]["subject"] == {"type": "organization"}
+
+
 def test_runtime_v5_people_pronoun_followup_requires_clarification_for_multi_result() -> None:
     result_context = ResultContext(
         result_type="people_search",

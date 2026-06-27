@@ -2083,6 +2083,8 @@ def _is_people_aggregate_query(text: str) -> bool:
             "女生",
             "男性",
             "女性",
+            "董事长",
+            "负责人",
             "岗位",
             "职位",
             "工程师",
@@ -2097,7 +2099,11 @@ def _is_people_aggregate_query(text: str) -> bool:
             "研发",
         ),
     )
-    metric_signal = _has_any(
+    role_identity_signal = _has_any(compact, ("是谁", "谁是")) and _has_any(
+        compact,
+        ("董事长", "负责人", "岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发"),
+    )
+    metric_signal = role_identity_signal or _has_any(
         compact,
         (
             "多少",
@@ -2133,7 +2139,7 @@ def _is_people_aggregate_query(text: str) -> bool:
 
 def _people_query_mode(text: str) -> str:
     compact = re.sub(r"\s+", "", str(text or "").lower()).replace("多少个", "多少")
-    wants_list = _has_any(compact, ("分别是谁", "都有谁", "名单", "列出", "全部显示", "有哪些"))
+    wants_list = _has_any(compact, ("是谁", "谁是", "分别是谁", "都有谁", "名单", "列出", "全部显示", "有哪些"))
     if _has_any(compact, ("有谁的号码", "谁的号码", "有谁的电话", "谁的电话")):
         return "list"
     if "通讯录" in compact and _has_any(compact, ("发我", "发下", "发我下", "给我", "给我下", "发一下")):
@@ -2144,7 +2150,7 @@ def _people_query_mode(text: str) -> str:
         return "count_only"
     if _has_any(compact, ("男生", "男性", "男的", "男员工", "女生", "女性", "女的", "女员工")):
         return "gender_list" if wants_list else "gender_count"
-    if _has_any(compact, ("岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+    if _has_any(compact, ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
         return "title_list" if wants_list else "title_count"
     if wants_list:
         return "list"
@@ -2176,6 +2182,9 @@ def _people_keyword(question: str) -> str:
         return embedded_keyword
     keyword = question
     for token in (
+        "是谁",
+        "谁是",
+        "谁担任",
         "公司",
         "那",
         "那么",
@@ -2188,9 +2197,6 @@ def _people_keyword(question: str) -> str:
         "是多少",
         "多少",
         "号码",
-        "是谁",
-        "谁是",
-        "谁担任",
         "是什么岗位",
         "是什么职位",
         "什么岗位",
