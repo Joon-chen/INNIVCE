@@ -871,6 +871,14 @@ def _result_context_semantic_metadata(result_metadata: dict) -> dict:
         "visible_user_count",
         "filtered_user_count",
         "unknown_gender_count",
+        "organization_foundation",
+        "organization_resolution",
+        "display_member_count",
+        "unique_member_count",
+        "direct_member_count",
+        "source_member_count",
+        "child_member_counts",
+        "count_basis",
     )
     return {key: result_metadata[key] for key in allowed if key in result_metadata}
 
@@ -1074,6 +1082,14 @@ def _result_context_kind(result_type: str) -> str:
 
 
 def _result_context_display_count(result_type: str, provider_results: list[ProviderResult], item_count: int) -> int:
+    for result in reversed(provider_results):
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        try:
+            display_member_count = int(metadata.get("display_member_count") or 0)
+        except (TypeError, ValueError):
+            display_member_count = 0
+        if result.status == "success" and result.result_type == result_type and display_member_count > 0:
+            return display_member_count
     if _result_context_kind(result_type) != "action_receipt":
         return item_count
     for result in reversed(provider_results):

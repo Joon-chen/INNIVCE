@@ -421,6 +421,40 @@ def test_runtime_v5_person_phone_question_after_people_result_starts_new_lookup(
     assert result.composed.result_context.result_type == "people_search"
 
 
+def test_runtime_v5_preserves_provider_membership_count_basis_in_result_context() -> None:
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"list_department_members": ("feishu_contact_organization_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="department_members",
+                count=7,
+                items=tuple({"name": name} for name in ("戴留兴", "缪瀛", "余莲莲", "张盛", "卢敏阳", "张瑞云", "王悦")),
+                metadata={
+                    "entity_domain": "People",
+                    "organization_foundation": True,
+                    "organization_resolution": {"query": "半导体事业部", "resolved_name": "半导体事业部"},
+                    "display_member_count": 9,
+                    "unique_member_count": 7,
+                    "count_basis": "direct_members_plus_child_department_member_counts",
+                },
+                answer="半导体事业部目前 7 人。",
+            )
+
+    result = run_runtime_v5(
+        context=_context("半导体事业部有多少人"),
+        providers={"people": PeopleProvider()},
+    )
+
+    assert result.composed.answer == "按组织架构展示口径是 9 人；去重后是 7 位同事。"
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.metadata["display_member_count"] == 9
+    assert result.composed.result_context.metadata["unique_member_count"] == 7
+
+
 def test_people_provider_contract_applies_domain_query_filters_to_items_and_count() -> None:
     items = (
         {"name": "张三", "gender_normalized": "male", "gender_source": "source", "mobile": "1"},
