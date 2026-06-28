@@ -63,6 +63,35 @@ def test_organization_resolver_uses_alias_as_standard_org_truth() -> None:
     assert resolution.needs_clarification is False
 
 
+def test_organization_resolver_alias_returns_target_name_not_alias_text() -> None:
+    directory = OrganizationDirectory(
+        departments=(
+            {
+                "id": "group_business",
+                "target_type": ORG_TARGET_GROUP,
+                "name": "商务组",
+                "normalized_name": normalize_organization_name("商务组"),
+            },
+        ),
+        aliases=(
+            {
+                "alias": "商务部",
+                "normalized_alias": normalize_organization_name("商务部"),
+                "target_type": ORG_TARGET_GROUP,
+                "target_id": "group_business",
+                "confidence": 0.98,
+            },
+        ),
+    )
+
+    resolution = resolve_organization_object("商务部有几人", directory, target_types=(ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP))
+
+    assert resolution.resolved_type == ORG_TARGET_GROUP
+    assert resolution.resolved_department_id == "group_business"
+    assert resolution.resolved_name == "商务组"
+    assert resolution.reason == "alias_exact"
+
+
 def test_organization_resolver_uses_unit_suffix_as_generic_org_candidate() -> None:
     directory = organization_directory_from_payload(
         {

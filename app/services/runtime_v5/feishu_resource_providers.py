@@ -202,7 +202,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                         "organization_foundation": True,
                         "organization_resolution": _organization_resolution_metadata(resolution),
                     },
-                    answer=_department_members_answer(keyword, items)
+                    answer=_department_members_answer(keyword, items, resolution=resolution)
                     if resolution.resolved_department_id
                     else _organization_resolution_failure_answer(keyword, resolution),
                     error="" if resolution.resolved_department_id else "organization_resolution_not_resolved",
@@ -5487,10 +5487,21 @@ def _people_query_fields_from_text(text: str) -> tuple[str, ...]:
     return tuple(fields)
 
 
-def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...]) -> str:
+def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...], *, resolution: Any | None = None) -> str:
+    resolved_name = _organization_resolved_name(resolution)
+    display_name = resolved_name or keyword
+    correction = ""
+    if resolved_name and keyword and resolved_name != keyword:
+        correction = f"我没有找到叫「{keyword}」的组织，按组织解析匹配到的是「{resolved_name}」。"
     if not items:
+        if correction:
+            return f"{correction}但我在当前可读通讯录里没有看到「{display_name}」成员。"
         return f"我在当前可读通讯录里没找到「{keyword}」相关成员。可能是部门名称不一致，也可能这个部门不在当前授权范围里。"
-    lines = [f"「{keyword}」我查到了 {len(items)} 人："]
+    if len(items) == 1:
+        name = str(items[0].get("name") or "未知").strip() or "未知"
+        prefix = correction if correction else ""
+        return f"{prefix}「{display_name}」目前 1 位，是{name}。"
+    lines = [f"{correction}「{display_name}」我查到了 {len(items)} 人：".strip()]
     for index, item in enumerate(items[:30], start=1):
         name = str(item.get("name") or "未知")
         title = str(item.get("title") or "").strip()
@@ -5499,6 +5510,14 @@ def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...]) 
         suffix = "，".join(part for part in (title, f"邮箱：{email}" if email else "", f"手机：{mobile}" if mobile else "") if part)
         lines.append(f"{index}. {name}" + (f"（{suffix}）" if suffix else ""))
     return "\n".join(lines)
+
+
+def _organization_resolved_name(resolution: Any | None) -> str:
+    if resolution is None:
+        return ""
+    if isinstance(resolution, dict):
+        return str(resolution.get("resolved_name") or "").strip()
+    return str(getattr(resolution, "resolved_name", "") or "").strip()
 
 
 def _organization_resolution_metadata(resolution) -> dict[str, Any]:

@@ -77,7 +77,9 @@ def normalize_organization_name(value: Any) -> str:
         "请问",
         "帮我查",
         "查一下",
+        "有几人",
         "有多少人",
+        "几人",
         "多少人",
         "都有谁",
         "分别是谁",
@@ -419,7 +421,7 @@ def _alias_candidates(
             OrganizationCandidate(
                 target_type=target_type,
                 target_id=str(item.get("target_id") or ""),
-                name=str(item.get("name") or item.get("alias") or ""),
+                name=_alias_target_name(item, directory) or str(item.get("name") or item.get("alias") or ""),
                 confidence=confidence,
                 reason=reason,
                 metadata={"source": "alias"},
@@ -549,6 +551,22 @@ def _dedupe_candidates(candidates: tuple[OrganizationCandidate, ...]) -> tuple[O
         if existing is None or item.confidence > existing.confidence:
             best[key] = item
     return tuple(sorted(best.values(), key=lambda item: item.confidence, reverse=True))
+
+
+def _alias_target_name(item: dict[str, Any], directory: OrganizationDirectory) -> str:
+    target_type = str(item.get("target_type") or "")
+    target_id = str(item.get("target_id") or "")
+    if not target_id:
+        return ""
+    if target_type in {ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP}:
+        for department in directory.departments:
+            if str(department.get("id") or department.get("source_department_id") or "") == target_id:
+                return str(department.get("name") or "").strip()
+    if target_type == ORG_TARGET_USER:
+        for user in directory.users:
+            if str(user.get("id") or user.get("open_id") or "") == target_id:
+                return str(user.get("name") or "").strip()
+    return ""
 
 
 def _department_record(item: dict[str, Any]) -> dict[str, Any]:

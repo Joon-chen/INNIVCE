@@ -174,6 +174,8 @@ def _target_hint(*, text: str, compact: str) -> str:
     organization_unit = _organization_unit_candidate(compact)
     if organization_unit:
         return organization_unit
+    if any(token in compact for token in ("是男是女", "男还是女", "女还是男", "男性还是女性")):
+        return "性别"
     if any(token in compact for token in ("男生", "男性")):
         return "male"
     if any(token in compact for token in ("女生", "女性")):

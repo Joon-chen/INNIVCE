@@ -70,7 +70,7 @@ KNOWLEDGE_RESULT = ResultContext(
 BUSINESS_GROUP_RESULT = ResultContext(
     result_type="department_members",
     count=1,
-    items=({"name": "汤冠男", "job_title": "部门高级经理"},),
+    items=({"name": "汤冠男", "job_title": "部门高级经理", "gender_normalized": "female", "gender_source": "source"},),
     metadata={
         "entity_domain": "People",
         "keyword": "商务组",
@@ -263,6 +263,37 @@ def test_conversation_first_department_followups_inherit_organization_collection
     assert command_frame.context_mode == "inherit_result_context"
     assert intent.entities["keyword"] == expected_keyword
     assert intent.entities["domain_query"]["subject"] == {"type": "group", "department": expected_keyword}
+
+
+def test_conversation_first_department_alias_uses_resolved_org_context() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=1,
+        items=({"name": "汤冠男", "job_title": "部门高级经理"},),
+        metadata={
+            "entity_domain": "People",
+            "keyword": "商务部",
+            "organization_resolution": {"query": "商务部", "resolved_name": "商务组", "resolved_id": "dept_business"},
+        },
+        answer="我没有找到叫「商务部」的组织，按组织解析匹配到的是「商务组」。「商务组」目前 1 位，是汤冠男。",
+    )
+
+    state = build_conversation_state(_context("就 1 位对吧", result_context=result_context))
+
+    assert state.previous_result_reference.target_label == "商务组"
+    assert state.active_collection["target_label"] == "商务组"
+    assert state.active_object["name"] == "汤冠男"
+
+
+@pytest.mark.parametrize("message", ("是男是女", "我问你这 1 位同事是男还是女"))
+def test_conversation_first_single_department_member_field_followup_uses_active_person(message: str) -> None:
+    plan = build_command_plan(context=_context(message, result_context=BUSINESS_GROUP_RESULT))
+
+    assert plan.intent == "people_lookup"
+    assert plan.command_frame is not None
+    assert plan.command_frame.scope == "person"
+    assert plan.intent_result.entities["keyword"] == "汤冠男"
+    assert plan.intent_result.entities["people_query_field"] == "gender"
 
 
 @pytest.mark.parametrize(

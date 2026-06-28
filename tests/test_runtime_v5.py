@@ -273,10 +273,10 @@ def test_runtime_v5_people_provider_uses_organization_foundation_for_department_
                 normalized_query="商务部",
                 resolved_type="department",
                 resolved_id="dept_business",
-                resolved_name="商务部",
+                resolved_name="商务组",
                 resolved_department_id="dept_business",
                 confidence=0.96,
-                reason="name_exact",
+                reason="unit_suffix_match",
                 needs_clarification=False,
                 candidates=(),
             ),
@@ -285,8 +285,8 @@ def test_runtime_v5_people_provider_uses_organization_foundation_for_department_
                     "name": "张三",
                     "open_id": "ou_zhang",
                     "title": "商务经理",
-                    "department": "商务部",
-                    "department_names": ["商务部"],
+                    "department": "商务组",
+                    "department_names": ["商务组"],
                 },
             ),
         )
@@ -322,6 +322,9 @@ def test_runtime_v5_people_provider_uses_organization_foundation_for_department_
     assert result.items[0]["name"] == "张三"
     assert result.metadata["organization_foundation"] is True
     assert result.metadata["organization_resolution"]["resolved_id"] == "dept_business"
+    assert "商务部" in result.answer
+    assert "商务组" in result.answer
+    assert "张三" in result.answer
 
 
 def test_runtime_v5_people_provider_does_not_fallback_to_snapshot_when_org_resolution_is_ambiguous(monkeypatch) -> None:

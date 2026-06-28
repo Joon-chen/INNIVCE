@@ -260,8 +260,6 @@ def _topic_for_result_type(result_type: str, *, domain: str) -> str:
 
 
 def _object_type(*, result_context: ResultContext, domain: str) -> str:
-    if result_context.result_type == "department_members":
-        return ""
     if domain == "People" and result_context.count == 1:
         return "person"
     if domain == "Knowledge" and result_context.count == 1:
@@ -279,8 +277,6 @@ def _field_projection(metadata: dict[str, Any]) -> str:
 
 
 def _object_payload(*, result_context: ResultContext, metadata: dict[str, Any], domain: str) -> dict[str, Any]:
-    if result_context.result_type == "department_members":
-        return {}
     if domain != "People" or result_context.count != 1 or not result_context.items:
         return {}
     item = result_context.items[0] if isinstance(result_context.items[0], dict) else {}
@@ -310,11 +306,14 @@ def _collection_type(*, result_context: ResultContext, metadata: dict[str, Any],
 
 
 def _target_label(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
+    resolution = metadata.get("organization_resolution") if isinstance(metadata.get("organization_resolution"), dict) else {}
+    resolved_name = str(resolution.get("resolved_name") or "").strip()
+    if result_context.result_type == "department_members" and resolved_name:
+        return resolved_name
     for key in ("keyword", "query"):
         value = str(metadata.get(key) or "").strip()
         if value:
             return value
-    resolution = metadata.get("organization_resolution") if isinstance(metadata.get("organization_resolution"), dict) else {}
     for key in ("resolved_name", "query", "normalized_query"):
         value = str(resolution.get(key) or "").strip()
         if value:
