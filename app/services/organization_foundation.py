@@ -196,15 +196,37 @@ def resolve_department_members(
         department_id = UUID(resolution.resolved_department_id)
     except ValueError:
         return OrganizationMembersResult(resolution=resolution, items=())
+    root_department = db.scalar(
+        select(OrganizationDepartment)
+        .where(OrganizationDepartment.company_id == company_id)
+        .where(OrganizationDepartment.id == department_id)
+        .where(OrganizationDepartment.status == "active")
+    )
+    if root_department is None:
+        return OrganizationMembersResult(resolution=resolution, items=())
+    subtree_departments = _department_subtree(db, company_id=company_id, root=root_department)
+    subtree_ids = tuple(department.id for department in subtree_departments)
+    departments_by_id = {department.id: department for department in subtree_departments}
     rows = db.execute(
         select(OrganizationMembership, OrganizationUser)
         .join(OrganizationUser, OrganizationUser.id == OrganizationMembership.organization_user_id)
         .where(OrganizationMembership.company_id == company_id)
-        .where(OrganizationMembership.organization_department_id == department_id)
+        .where(OrganizationMembership.organization_department_id.in_(subtree_ids))
         .where(OrganizationMembership.status == "active")
         .where(OrganizationUser.status == "active")
     ).all()
-    items = tuple(_member_item(user, membership=membership, resolution=resolution) for membership, user in rows)
+    items = _dedupe_member_items(
+        tuple(
+            _member_item(
+                user,
+                membership=membership,
+                resolution=resolution,
+                department=departments_by_id.get(membership.organization_department_id),
+            )
+            for membership, user in rows
+        ),
+        root_department_name=root_department.name,
+    )
     return OrganizationMembersResult(resolution=resolution, items=items)
 
 
@@ -567,6 +589,35 @@ def _alias_target_name(item: dict[str, Any], directory: OrganizationDirectory) -
     return ""
 
 
+def _department_subtree(
+    db: Session,
+    *,
+    company_id: UUID,
+    root: OrganizationDepartment,
+) -> tuple[OrganizationDepartment, ...]:
+    departments = db.scalars(
+        select(OrganizationDepartment)
+        .where(OrganizationDepartment.company_id == company_id)
+        .where(OrganizationDepartment.status == "active")
+    ).all()
+    by_parent: dict[str, list[OrganizationDepartment]] = {}
+    for department in departments:
+        parent_id = str(department.parent_source_department_id or "")
+        by_parent.setdefault(parent_id, []).append(department)
+
+    result: list[OrganizationDepartment] = []
+    queue = [root]
+    seen: set[UUID] = set()
+    while queue:
+        department = queue.pop(0)
+        if department.id in seen:
+            continue
+        seen.add(department.id)
+        result.append(department)
+        queue.extend(by_parent.get(str(department.source_department_id or ""), ()))
+    return tuple(result)
+
+
 def _department_record(item: dict[str, Any]) -> dict[str, Any]:
     source_department_id = str(item.get("department_id") or item.get("open_department_id") or item.get("id") or "").strip()
     name = str(item.get("name") or item.get("department_name") or source_department_id).strip()
@@ -648,7 +699,10 @@ def _member_item(
     *,
     membership: OrganizationMembership,
     resolution: OrganizationResolution,
+    department: OrganizationDepartment | None = None,
 ) -> dict[str, Any]:
+    department_name = department.name if department is not None else resolution.resolved_name
+    department_id = str(department.id) if department is not None else resolution.resolved_department_id
     return {
         "name": user.name,
         "open_id": user.open_id,
@@ -656,14 +710,33 @@ def _member_item(
         "email": user.email or "",
         "mobile": user.mobile or "",
         "title": user.job_title or "",
-        "department": resolution.resolved_name,
-        "department_names": [resolution.resolved_name] if resolution.resolved_name else [],
-        "department_ids": [resolution.resolved_department_id] if resolution.resolved_department_id else [],
+        "department": department_name,
+        "department_names": [department_name] if department_name else [],
+        "department_ids": [department_id] if department_id else [],
         "is_primary_department": membership.is_primary,
         "source_system": user.source_system,
         "resource_plane": "foundation",
         "resource_type": "organization_user",
     }
+
+
+def _dedupe_member_items(
+    items: tuple[dict[str, Any], ...],
+    *,
+    root_department_name: str,
+) -> tuple[dict[str, Any], ...]:
+    best: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = str(item.get("open_id") or item.get("user_id") or item.get("name") or "").strip()
+        if not key:
+            continue
+        existing = best.get(key)
+        if existing is None:
+            best[key] = item
+            continue
+        if str(item.get("department") or "") == root_department_name:
+            best[key] = item
+    return tuple(best.values())
 
 
 def _primary_subject_department(rows: list[tuple[OrganizationMembership, OrganizationDepartment]]) -> OrganizationDepartment | None:

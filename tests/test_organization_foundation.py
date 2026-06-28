@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+
 from app.services.organization_foundation import (
     ORG_TARGET_DEPARTMENT,
     ORG_TARGET_GROUP,
@@ -5,8 +8,47 @@ from app.services.organization_foundation import (
     OrganizationDirectory,
     normalize_organization_name,
     organization_directory_from_payload,
+    resolve_department_members,
     resolve_organization_object,
 )
+
+
+COMPANY_ID = UUID("091fb8ae-443d-49b2-9c67-5e5f1353f2d5")
+
+
+class _ScalarResult:
+    def __init__(self, items):
+        self._items = items
+
+    def all(self):
+        return self._items
+
+
+class _ExecuteResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _OrganizationSession:
+    def __init__(self, *, departments, users, root, rows):
+        self._scalar_results = [departments, users, []]
+        self._root = root
+        self._departments = departments
+        self._rows = rows
+
+    def scalars(self, _statement):
+        if self._scalar_results:
+            return _ScalarResult(self._scalar_results.pop(0))
+        return _ScalarResult(self._departments)
+
+    def scalar(self, _statement):
+        return self._root
+
+    def execute(self, _statement):
+        return _ExecuteResult(self._rows)
 
 
 def test_organization_resolver_resolves_department_and_group_without_string_fallback() -> None:
@@ -130,6 +172,91 @@ def test_organization_resolver_uses_bare_unit_stem_when_unique() -> None:
     assert it.resolved_department_id == "group_it"
     assert it.resolved_name == "IT组"
     assert it.reason == "unit_suffix_match"
+
+
+def test_resolve_department_members_includes_descendant_departments_and_dedupes_people() -> None:
+    division_id = uuid4()
+    product_id = uuid4()
+    project_id = uuid4()
+    leader_id = uuid4()
+    engineer_id = uuid4()
+    division = SimpleNamespace(
+        id=division_id,
+        company_id=COMPANY_ID,
+        source_system="feishu",
+        source_department_id="division_power",
+        open_department_id="",
+        parent_source_department_id="0",
+        name="半导体事业部",
+        normalized_name=normalize_organization_name("半导体事业部"),
+        unit_type=ORG_TARGET_DEPARTMENT,
+        status="active",
+        path_names=[],
+    )
+    product = SimpleNamespace(
+        id=product_id,
+        company_id=COMPANY_ID,
+        source_system="feishu",
+        source_department_id="dept_product",
+        open_department_id="",
+        parent_source_department_id="division_power",
+        name="产品部",
+        normalized_name=normalize_organization_name("产品部"),
+        unit_type=ORG_TARGET_DEPARTMENT,
+        status="active",
+        path_names=[],
+    )
+    project = SimpleNamespace(
+        id=project_id,
+        company_id=COMPANY_ID,
+        source_system="feishu",
+        source_department_id="dept_project",
+        open_department_id="",
+        parent_source_department_id="division_power",
+        name="项目部",
+        normalized_name=normalize_organization_name("项目部"),
+        unit_type=ORG_TARGET_DEPARTMENT,
+        status="active",
+        path_names=[],
+    )
+    leader = SimpleNamespace(
+        id=leader_id,
+        open_id="ou_leader",
+        source_user_id="",
+        name="戴留兴",
+        normalized_name=normalize_organization_name("戴留兴"),
+        email="",
+        mobile="",
+        job_title="总经理",
+        status="active",
+        source_system="feishu",
+    )
+    engineer = SimpleNamespace(
+        id=engineer_id,
+        open_id="ou_engineer",
+        source_user_id="",
+        name="缪瀛",
+        normalized_name=normalize_organization_name("缪瀛"),
+        email="",
+        mobile="",
+        job_title="助理测试工程师",
+        status="active",
+        source_system="feishu",
+    )
+    rows = [
+        (SimpleNamespace(organization_department_id=division_id, is_primary=True), leader),
+        (SimpleNamespace(organization_department_id=project_id, is_primary=False), leader),
+        (SimpleNamespace(organization_department_id=product_id, is_primary=True), engineer),
+    ]
+    db = _OrganizationSession(departments=[division, product, project], users=[leader, engineer], root=division, rows=rows)
+
+    result = resolve_department_members(db, company_id=COMPANY_ID, query="半导体事业部有多少人")
+
+    assert result is not None
+    assert result.resolution.resolved_name == "半导体事业部"
+    assert [item["name"] for item in result.items] == ["戴留兴", "缪瀛"]
+    assert result.items[0]["department"] == "半导体事业部"
+    assert result.items[1]["department"] == "产品部"
 
 
 def test_organization_resolver_does_not_guess_unit_suffix_when_ambiguous() -> None:
