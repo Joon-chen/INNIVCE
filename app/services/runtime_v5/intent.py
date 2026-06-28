@@ -2297,7 +2297,7 @@ def _embedded_people_lookup_parts(question: str) -> tuple[str, str]:
     compact = re.sub(r"\s+", "", str(question or ""))
     if _has_any(compact, ("我是谁", "你是谁", "你知道我", "我现在", "我在这个公司", "我在公司", "收件箱", "邮件")):
         return "", ""
-    field_pattern = r"(?:电话号码|手机号|电话|号码|手机|邮箱|职位|岗位|职务)"
+    field_pattern = r"(?:电话号码|手机号|电话|号码|手机|邮箱|职位|岗位|职务|直属上级|上级|领导)"
     patterns = (
         rf"([\u4e00-\u9fffA-Za-z·.\-]{{2,16}})的({field_pattern})",
         rf"([\u4e00-\u9fffA-Za-z·.\-]{{2,8}})({field_pattern})",
@@ -2320,6 +2320,10 @@ def _clean_people_keyword_candidate(value: str) -> str:
     text = str(value or "").strip("，,。.!！?？")
     if any(token in text for token in ("谁", "我", "你")):
         return ""
+    if "是什么" in text:
+        text = text.split("是什么", 1)[0]
+    if any(token in text for token in ("岗位", "职位", "职务", "领导", "直属上级", "上级")):
+        text = re.split(r"(?:是|的|什么|岗位|职位|职务|领导|直属上级|上级)", text, maxsplit=1)[0]
     for token in ("那就把", "那你把", "请把", "帮我把", "把", "告诉我", "我让他", "让他", "给我", "发我", "查一下", "那", "那么", "还有"):
         text = text.replace(token, "")
     if any(token in text for token in ("公司", "通讯录", "你", "我")):
@@ -2337,6 +2341,8 @@ def _people_query_field(text: str) -> str:
         return "email"
     if _has_any(compact, ("职位", "岗位", "职务")):
         return "title"
+    if _has_any(compact, ("直属上级", "上级", "领导")):
+        return "leader"
     if _has_any(compact, ("男还是女", "女还是男", "男性还是女性", "性别")):
         return "gender"
     return ""

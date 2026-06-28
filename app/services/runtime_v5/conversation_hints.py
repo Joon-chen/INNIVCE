@@ -145,7 +145,7 @@ def _operation_hint(*, compact: str, state: ConversationState) -> str:
         return "ask"
     if state.previous_result_reference.collection_type and _asks_collection_identity(compact):
         return "list"
-    if any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "是男是女", "性别")):
+    if any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "领导", "直属上级", "上级", "是男是女", "性别")):
         return "field_lookup"
     if _asks_collection_identity(compact) or any(token in compact for token in ("哪", "名单", "列出", "展开", "全部", "补全", "继续")):
         return "list"
@@ -182,7 +182,7 @@ def _target_hint(*, text: str, compact: str) -> str:
         return "male"
     if any(token in compact for token in ("女生", "女性")):
         return "female"
-    for field in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "性别"):
+    for field in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "直属上级", "上级", "领导", "性别"):
         if field in compact:
             return field
     if _is_generic_organization_reference(compact):
@@ -334,7 +334,7 @@ def _looks_like_named_person_question(compact: str) -> bool:
         return False
     if compact.startswith(("分别", "全部", "哪些", "哪个", "哪位")):
         return False
-    return bool(re.search(r"^[\u4e00-\u9fff]{2,4}(的)?(电话|手机号|号码|邮箱|职位|岗位|性别|是男是女|是谁)", compact))
+    return bool(re.search(r"^[\u4e00-\u9fff]{2,4}(的)?(电话|手机号|号码|邮箱|职位|岗位|领导|直属上级|上级|性别|是男是女|是谁)", compact))
 
 
 def _is_self_or_assistant_identity_question(compact: str) -> bool:

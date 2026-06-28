@@ -457,6 +457,7 @@ def _canonical_question_from_frame(*, frame: CommandFrame, context: RuntimeConte
             "mobile": "手机号",
             "email": "邮箱",
             "title": "岗位",
+            "leader": "直属上级",
             "gender": "性别",
             "profile": "信息",
         }.get(field, "信息")

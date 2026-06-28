@@ -205,6 +205,12 @@ def _semantic_frame_from_payload(
         value = str(raw_parameters.get(key) or "").strip()
         if value:
             parameters[key] = value
+    if parameters.get("field"):
+        parameters["field"] = _canonical_people_field(str(parameters.get("field") or ""))
+    if target.get("field"):
+        target["field"] = _canonical_people_field(str(target.get("field") or ""))
+    if parameters.get("person_name"):
+        parameters["person_name"] = _canonical_person_name(str(parameters.get("person_name") or ""))
     if isinstance(raw_parameters.get("filters"), dict):
         parameters["filters"] = raw_parameters["filters"]
     parameters["raw_message"] = message
@@ -390,9 +396,49 @@ def _requested_field(target_hint: str) -> str:
         "邮箱": "email",
         "职位": "title",
         "岗位": "title",
+        "直属上级": "leader",
+        "上级": "leader",
+        "领导": "leader",
         "性别": "gender",
     }
     return aliases.get(target_hint, "")
+
+
+def _canonical_people_field(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "phone": "mobile",
+        "telephone": "mobile",
+        "mobile": "mobile",
+        "手机号": "mobile",
+        "电话": "mobile",
+        "号码": "mobile",
+        "email": "email",
+        "mail": "email",
+        "邮箱": "email",
+        "position": "title",
+        "job_title": "title",
+        "title": "title",
+        "role": "title",
+        "岗位": "title",
+        "职位": "title",
+        "leader": "leader",
+        "manager": "leader",
+        "supervisor": "leader",
+        "直属上级": "leader",
+        "上级": "leader",
+        "领导": "leader",
+        "gender": "gender",
+        "sex": "gender",
+        "性别": "gender",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _canonical_person_name(value: str) -> str:
+    text = str(value or "").strip("，,。.!！?？")
+    text = re.split(r"(?:是|的|什么|岗位|职位|职务|领导|直属上级|上级|电话|手机号|号码|邮箱|性别)", text, maxsplit=1)[0]
+    return text.strip()
 
 
 def _gender_filter(target_hint: str) -> str:
@@ -419,7 +465,7 @@ def _looks_like_organization_unit_hint(value: str) -> bool:
 def _person_candidate(message: str) -> str:
     compact = re.sub(r"\s+", "", str(message or ""))
     compact = compact.strip("，,。.!！?？")
-    has_field = any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "性别", "是男是女"))
+    has_field = any(token in compact for token in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "领导", "直属上级", "上级", "性别", "是男是女"))
     if compact in {"我是谁", "你是谁"}:
         return ""
     if any(token in compact for token in ("公司", "部门", "我们", "男生", "男性", "女生", "女性", "有谁")):
@@ -429,7 +475,7 @@ def _person_candidate(message: str) -> str:
     if not has_field and any(token in compact for token in ("多少", "几位", "几个")):
         return ""
     compact_for_name = re.sub(r"^(那|那么|还有)", "", compact)
-    match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})(?:的)?(?:电话|手机号|号码|邮箱|职位|岗位|性别|是男是女).*", compact_for_name)
+    match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})(?:的)?(?:电话|手机号|号码|邮箱|职位|岗位|领导|直属上级|上级|性别|是男是女).*", compact_for_name)
     if match:
         return match.group("name").removesuffix("的")
     if not any(token in compact for token in ("公司", "部门", "我们", "你", "我")):

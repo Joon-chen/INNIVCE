@@ -1138,6 +1138,79 @@ def test_runtime_v5_people_lookup_enriches_missing_requested_field_from_snapshot
     assert result.answer == "王云飞的手机号是 +8613800000000。"
 
 
+def test_runtime_v5_people_lookup_resolves_leader_name_from_organization_foundation(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.load_people_snapshot", lambda company_id: {})
+
+    class _ScalarResult:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class _FoundationDb:
+        def scalars(self, _statement):
+            return _ScalarResult(
+                [
+                    SimpleNamespace(
+                        open_id="ou_li",
+                        source_user_id="u_li",
+                        name="李慧玲",
+                        email="",
+                        mobile="",
+                        job_title="高级人事专员",
+                        metadata_json={"leader_user_id": "ou_du"},
+                    ),
+                    SimpleNamespace(
+                        open_id="ou_du",
+                        source_user_id="u_du",
+                        name="杜玉娟",
+                        email="",
+                        mobile="",
+                        job_title="行政主管",
+                        metadata_json={},
+                    ),
+                ]
+            )
+
+    class Provider(FeishuPeopleProvider):
+        def _execute_tool(
+            self,
+            request: ProviderRequest,
+            *,
+            tool_name: str,
+            params: dict | None = None,
+            confirm_write: bool = False,
+        ):
+            return SimpleNamespace(
+                status=ToolExecutionStatus.SUCCESS,
+                error="",
+                answer="",
+                structured_result={"response_payload": {"users": [{"open_id": "ou_li", "name": "李慧玲", "leader_user_id": "ou_du"}]}},
+            )
+
+    result = Provider(db=_FoundationDb()).execute(
+        ProviderRequest(
+            source="people",
+            operation="search_person",
+            intent=IntentResult(
+                question_type="query",
+                intent="people_lookup",
+                data_scope="person",
+                entities={"keyword": "李慧玲", "people_query_field": "leader"},
+                canonical_question="李慧玲的直属上级",
+            ),
+            planner=_command_plan("people_lookup", sources=("people",)),
+            context=_context("李慧玲的直属上级是谁"),
+            execution_identity="bot",
+            params={"keyword": "李慧玲"},
+        )
+    )
+
+    assert result.answer == "李慧玲的直属上级是杜玉娟。"
+    assert result.items[0]["leader"] == "杜玉娟"
+
+
 def test_runtime_v5_people_typo_match_asks_confirmation_without_answering_field(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.runtime_v5.feishu_resource_providers.load_people_snapshot",
@@ -1203,6 +1276,33 @@ def test_runtime_v5_people_contextual_field_switch_uses_previous_person() -> Non
     assert intent.entities["keyword"] == "陈俊"
     assert intent.entities["people_query_field"] == "title"
     assert intent.canonical_question == "陈俊的岗位"
+
+
+def test_runtime_v5_people_contextual_field_switch_uses_previous_person_for_leader() -> None:
+    result_context = ResultContext(
+        result_type="people_search",
+        count=1,
+        items=({"name": "李慧玲", "title": "高级人事专员"},),
+        metadata={"context_kind": "query_result", "entity_domain": "people", "people_query_field": "title"},
+        answer="李慧玲是高级人事专员。",
+    )
+
+    intent = recognize_intent("她的领导是哪位", _context("她的领导是哪位", result_context=result_context))
+
+    assert intent.intent == "people_lookup"
+    assert intent.entities["keyword"] == "李慧玲"
+    assert intent.entities["people_query_field"] == "leader"
+    assert intent.entities["domain_query"]["fields"] == ["leader"]
+    assert intent.canonical_question == "李慧玲的直属上级"
+
+
+def test_runtime_v5_people_single_question_can_request_title_and_leader() -> None:
+    question = "李慧玲是什么岗位，他的领导是谁"
+    intent = recognize_intent(question, _context(question))
+
+    assert intent.intent == "people_lookup"
+    assert intent.entities["keyword"] == "李慧玲"
+    assert intent.entities["domain_query"]["fields"] == ["title", "leader"]
 
 
 def test_runtime_v5_people_contextual_pronoun_switches_to_phone() -> None:

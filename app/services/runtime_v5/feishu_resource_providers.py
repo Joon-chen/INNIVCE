@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Company, FeishuAppConfig, MemoryFact, Resource, Snapshot, WorkEvent
+from app.models.entities import Company, FeishuAppConfig, MemoryFact, OrganizationUser, Resource, Snapshot, WorkEvent
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -126,6 +126,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
             capability = "people.resolve_identity" if request.operation == "resolve_identity" else "people.search_person"
             if cached_items:
                 cached_items = self._augment_people_lookup_items(request=request, keyword=keyword, items=cached_items, query_field=query_field)
+                cached_items = _enrich_people_items_from_foundation(self.db, cached_items, company_id=request.context.runtime_scope.active_company_id)
                 match_type = cached_result.match_type
                 return ProviderResult(
                     source="people",
@@ -162,6 +163,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
             users = payload.get("users") or payload.get("items") or []
             items = tuple(_user_item(user) for user in users if isinstance(user, dict)) if isinstance(users, list) else ()
             items = self._augment_people_lookup_items(request=request, keyword=keyword, items=items, query_field=query_field)
+            items = _enrich_people_items_from_foundation(self.db, items, company_id=request.context.runtime_scope.active_company_id)
             return ProviderResult(
                 source="people",
                 status=_provider_status(result),
@@ -5223,6 +5225,72 @@ def _people_resolve_from_snapshot(payload: dict[str, Any] | None, keyword: str):
     return resolve_people_from_items(keyword, normalize_people_items(users))
 
 
+def _enrich_people_items_from_foundation(db: Session | None, items: tuple[dict[str, Any], ...], *, company_id: Any) -> tuple[dict[str, Any], ...]:
+    if db is None or not items or not company_id:
+        return items
+    keys = {
+        str(value).strip()
+        for item in items
+        for value in (
+            item.get("open_id"),
+            item.get("user_id"),
+            item.get("name"),
+            item.get("leader_user_id"),
+        )
+        if str(value or "").strip()
+    }
+    if not keys:
+        return items
+    users = db.scalars(
+        select(OrganizationUser)
+        .where(OrganizationUser.company_id == company_id)
+        .where(OrganizationUser.status == "active")
+        .where(
+            or_(
+                OrganizationUser.open_id.in_(keys),
+                OrganizationUser.source_user_id.in_(keys),
+                OrganizationUser.name.in_(keys),
+            )
+        )
+    ).all()
+    by_key: dict[str, OrganizationUser] = {}
+    for user in users:
+        for value in (user.open_id, user.source_user_id, user.name):
+            key = str(value or "").strip()
+            if key:
+                by_key[key] = user
+    enriched: list[dict[str, Any]] = []
+    for item in items:
+        current = by_key.get(str(item.get("open_id") or "").strip()) or by_key.get(str(item.get("user_id") or "").strip()) or by_key.get(str(item.get("name") or "").strip())
+        metadata = current.metadata_json if current is not None and isinstance(current.metadata_json, dict) else {}
+        leader_id = str(item.get("leader_user_id") or metadata.get("leader_user_id") or "").strip()
+        leader = by_key.get(leader_id)
+        leader_name = str(item.get("leader") or item.get("leader_name") or "").strip()
+        if leader is not None:
+            leader_name = leader.name
+        next_item = dict(item)
+        if current is not None:
+            next_item.setdefault("open_id", current.open_id)
+            next_item.setdefault("user_id", current.source_user_id or "")
+            if not next_item.get("title"):
+                next_item["title"] = current.job_title or ""
+            if not next_item.get("job_title"):
+                next_item["job_title"] = current.job_title or ""
+            if not next_item.get("email"):
+                next_item["email"] = current.email or ""
+            if not next_item.get("mobile"):
+                next_item["mobile"] = current.mobile or ""
+            if metadata.get("employee_no"):
+                next_item["employee_no"] = str(metadata.get("employee_no") or "")
+        if leader_id:
+            next_item["leader_user_id"] = leader_id
+        if leader_name:
+            next_item["leader"] = leader_name
+            next_item["leader_name"] = leader_name
+        enriched.append(next_item)
+    return tuple(enriched)
+
+
 def _approval_item(item: dict[str, Any]) -> dict[str, Any]:
     detail = item.get("instance_detail") if isinstance(item.get("instance_detail"), dict) else {}
     fields = dict(approval_form_fields(detail.get("form"), max_fields=50))
@@ -5322,12 +5390,13 @@ def _people_lookup_context_metadata(
     output_mode = str(query.get("output_mode") or "")
     presentation = "summary" if len(items) == 1 and fields and resolution == "exact" and output_mode != "detail" else "detail"
     item = items[0] if len(items) == 1 and isinstance(items[0], dict) else {}
-    visible_fields = tuple(field for field in ("title", "mobile", "email", "gender") if _people_item_field_value(item, field))
+    visible_fields = tuple(field for field in ("title", "mobile", "email", "leader", "gender") if _people_item_field_value(item, field))
     sensitive_fields = tuple(field for field in ("mobile", "email") if _people_item_field_value(item, field))
     field_reliability = {
         "title": "source" if str(item.get("title") or item.get("job_title") or "").strip() else "missing",
         "mobile": "source" if str(item.get("mobile") or "").strip() else "missing",
         "email": "source" if str(item.get("email") or "").strip() else "missing",
+        "leader": "foundation" if _people_item_field_value(item, "leader") else "missing",
         "gender": "source" if _reliable_people_gender(item) else "missing",
     } if item else {}
     return {
@@ -5384,6 +5453,8 @@ def _people_query_field_from_text(text: str) -> str:
         return "email"
     if any(token in compact for token in ("职位", "岗位", "职务")):
         return "title"
+    if any(token in compact for token in ("直属上级", "上级", "领导")):
+        return "leader"
     if any(token in compact for token in ("男还是女", "女还是男", "男性还是女性", "性别")):
         return "gender"
     return ""
@@ -5402,6 +5473,8 @@ def _people_item_field_value(item: dict[str, Any], query_field: str) -> str:
         return str(item.get("email") or "").strip()
     if query_field == "title":
         return str(item.get("title") or item.get("job_title") or "").strip()
+    if query_field == "leader":
+        return str(item.get("leader") or item.get("leader_name") or "").strip()
     if query_field == "gender":
         return _reliable_people_gender(item)
     return ""
@@ -5448,6 +5521,12 @@ def _focused_people_answer(item: dict[str, Any], *, question: str = "", requeste
             parts.append(f"{'岗位是' if requested_fields == ('title',) else '职位是'}{title}")
         else:
             missing.append("职位")
+    if "leader" in requested_fields:
+        leader = str(item.get("leader") or item.get("leader_name") or "").strip()
+        if leader:
+            parts.append(f"直属上级是{leader}")
+        else:
+            missing.append("直属上级")
     if "mobile" in requested_fields:
         mobile = str(item.get("mobile") or "").strip()
         if mobile:
@@ -5480,6 +5559,8 @@ def _people_query_fields_from_text(text: str) -> tuple[str, ...]:
         fields.append("gender")
     if any(token in compact for token in ("岗位", "职位", "职务")):
         fields.append("title")
+    if any(token in compact for token in ("直属上级", "上级", "领导")):
+        fields.append("leader")
     if any(token in compact for token in ("电话", "号码", "手机号", "手机")):
         fields.append("mobile")
     if "邮箱" in compact:
@@ -5492,16 +5573,22 @@ def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...], 
     display_name = resolved_name or keyword
     correction = ""
     if resolved_name and keyword and resolved_name != keyword:
-        correction = f"我没有找到叫「{keyword}」的组织，按组织解析匹配到的是「{resolved_name}」。"
+        requested_name = _organization_requested_name(keyword, resolved_name)
+        correction = f"你说的「{requested_name}」我按组织结构匹配到「{resolved_name}」。" if requested_name != resolved_name else ""
     if not items:
         if correction:
             return f"{correction}但我在当前可读通讯录里没有看到「{display_name}」成员。"
         return f"我在当前可读通讯录里没找到「{keyword}」相关成员。可能是部门名称不一致，也可能这个部门不在当前授权范围里。"
     if len(items) == 1:
         name = str(items[0].get("name") or "未知").strip() or "未知"
-        prefix = correction if correction else ""
-        return f"{prefix}「{display_name}」目前 1 位，是{name}。"
-    lines = [f"{correction}「{display_name}」我查到了 {len(items)} 人：".strip()]
+        if correction:
+            return f"{correction}目前只有 {name} 1 位。"
+        return f"{display_name}目前 1 位，是{name}。"
+    names = "、".join(str(item.get("name") or "未知").strip() or "未知" for item in items[:30])
+    header = f"{correction}{display_name}目前 {len(items)} 人" if correction else f"{display_name}目前 {len(items)} 人"
+    if names and len(items) <= 30:
+        return f"{header}：{names}。"
+    lines = [f"{header}："]
     for index, item in enumerate(items[:30], start=1):
         name = str(item.get("name") or "未知")
         title = str(item.get("title") or "").strip()
@@ -5510,6 +5597,23 @@ def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...], 
         suffix = "，".join(part for part in (title, f"邮箱：{email}" if email else "", f"手机：{mobile}" if mobile else "") if part)
         lines.append(f"{index}. {name}" + (f"（{suffix}）" if suffix else ""))
     return "\n".join(lines)
+
+
+def _organization_requested_name(keyword: str, resolved_name: str) -> str:
+    text = re.sub(r"\s+", "", str(keyword or ""))
+    resolved_stem = _organization_display_stem(resolved_name)
+    match = re.search(rf"({re.escape(resolved_stem)}(?:事业部|部门|中心|团队|小组|组|部)?)", text)
+    if match:
+        return match.group(1)
+    return str(keyword or "").strip() or resolved_name
+
+
+def _organization_display_stem(value: str) -> str:
+    text = str(value or "").strip()
+    for suffix in ("事业部", "部门", "中心", "小组", "团队", "部", "组"):
+        if text.endswith(suffix) and len(text) > len(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _organization_resolved_name(resolution: Any | None) -> str:

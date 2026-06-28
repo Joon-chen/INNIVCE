@@ -134,6 +134,8 @@ def _people_fields(text: str, *, entities: dict[str, Any]) -> tuple[str, ...]:
     compact = _compact(text)
     if any(token in compact for token in ("岗位", "职位", "职务")):
         fields.append("title")
+    if any(token in compact for token in ("直属上级", "上级", "领导")):
+        fields.append("leader")
     if any(token in compact for token in ("电话", "号码", "手机号", "手机")):
         fields.append("mobile")
     if "邮箱" in compact:
