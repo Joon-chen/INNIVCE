@@ -277,7 +277,19 @@ def resolve_organization_object(
             needs_clarification=True,
         )
 
-    candidates = (*alias_candidates, *suffix_candidates, *_near_candidates(normalized, directory, target_types=target_types))
+    contained_candidates = _contained_object_candidates(normalized, directory, target_types=target_types)
+    if len(contained_candidates) == 1 and contained_candidates[0].confidence >= 0.86:
+        return _resolved(query, normalized, contained_candidates[0], reason=contained_candidates[0].reason)
+    if len(contained_candidates) > 1:
+        return OrganizationResolution(
+            query=query,
+            normalized_query=normalized,
+            candidates=contained_candidates,
+            reason="object_contained_ambiguous",
+            needs_clarification=True,
+        )
+
+    candidates = (*alias_candidates, *contained_candidates, *suffix_candidates, *_near_candidates(normalized, directory, target_types=target_types))
     deduped = _dedupe_candidates(candidates)
     return OrganizationResolution(
         query=query,
@@ -367,6 +379,7 @@ def upsert_organization_snapshot(
         user = users_by_open_id.get(str(user_item.get("open_id") or "").strip())
         if user is None:
             continue
+        orders_by_department = user_item.get("orders_by_department_id") if isinstance(user_item.get("orders_by_department_id"), dict) else {}
         for index, source_department_id in enumerate(_string_list(user_item.get("department_ids"))):
             department = departments_by_source_id.get(source_department_id)
             if department is None:
@@ -386,8 +399,18 @@ def upsert_organization_snapshot(
                     source_payload={},
                 )
                 db.add(membership)
-            membership.is_primary = index == 0
+            order_metadata = orders_by_department.get(source_department_id) if isinstance(orders_by_department.get(source_department_id), dict) else {}
+            membership.is_primary = bool(order_metadata.get("is_primary_dept")) if order_metadata else index == 0
+            membership.role_in_department = _membership_role(user_item=user_item, department=department)
             membership.status = "active"
+            membership.source_payload = {
+                "source_department_id": source_department_id,
+                "department_name": department.name,
+                "department_path": _department_path_for_user(user_item, source_department_id),
+                "order": order_metadata,
+                "is_primary": membership.is_primary,
+                "role": membership.role_in_department,
+            }
             membership_count += 1
 
     run.status = "success"
@@ -486,6 +509,40 @@ def _exact_candidates(
                     )
                 )
     return tuple(candidates)
+
+
+def _contained_object_candidates(
+    normalized: str,
+    directory: OrganizationDirectory,
+    *,
+    target_types: tuple[str, ...],
+) -> tuple[OrganizationCandidate, ...]:
+    candidates: list[OrganizationCandidate] = []
+    if ORG_TARGET_DEPARTMENT in target_types or ORG_TARGET_GROUP in target_types:
+        for item in directory.departments:
+            item_normalized = str(item.get("normalized_name") or normalize_organization_name(item.get("name")))
+            if not item_normalized or item_normalized == normalized:
+                continue
+            item_stem = _organization_unit_stem(item_normalized)
+            if item_normalized in normalized:
+                confidence = 0.9
+                reason = "name_contained"
+            elif len(item_stem) >= 2 and item_stem in normalized:
+                confidence = 0.86
+                reason = "unit_stem_contained"
+            else:
+                continue
+            candidates.append(
+                OrganizationCandidate(
+                    target_type=str(item.get("target_type") or ORG_TARGET_DEPARTMENT),
+                    target_id=str(item.get("id") or item.get("source_department_id") or ""),
+                    name=str(item.get("name") or ""),
+                    confidence=confidence,
+                    reason=reason,
+                    metadata={"source": "department", "query_stem": item_stem},
+                )
+            )
+    return _dedupe_candidates(tuple(candidates))
 
 
 def _near_candidates(
@@ -633,7 +690,10 @@ def _department_record(item: dict[str, Any]) -> dict[str, Any]:
         "unit_type": _department_target_type(name),
         "path_names": _string_list(item.get("path_names") or item.get("department_names")),
         "path_source_department_ids": _string_list(item.get("path_source_department_ids") or item.get("department_ids")),
-        "leader_source_user_ids": _string_list(item.get("leader_source_user_ids") or item.get("leader_user_ids")),
+        "leader_source_user_ids": _department_leader_ids(item),
+        "member_count": _positive_int(item.get("member_count")),
+        "primary_member_count": _positive_int(item.get("primary_member_count")),
+        "order": str(item.get("order") or "").strip(),
         "source_payload": item,
     }
 
@@ -651,8 +711,13 @@ def _user_record(item: dict[str, Any]) -> dict[str, Any]:
         "email": str(item.get("email") or "").strip(),
         "mobile": str(item.get("mobile") or item.get("phone") or "").strip(),
         "job_title": str(item.get("title") or item.get("job_title") or "").strip(),
+        "employee_no": str(item.get("employee_no") or item.get("employee_id") or "").strip(),
+        "leader_user_id": str(item.get("leader_user_id") or item.get("manager_user_id") or "").strip(),
+        "employee_type": item.get("employee_type"),
         "department_ids": _string_list(item.get("department_ids")),
         "department_names": _string_list(item.get("department_names")),
+        "department_paths": _department_paths(item.get("department_paths")),
+        "orders_by_department_id": item.get("orders_by_department_id") if isinstance(item.get("orders_by_department_id"), dict) else {},
         "status": _user_status(item.get("status")),
         "source_payload": item,
     }
@@ -667,6 +732,7 @@ def _department_model_record(item: OrganizationDepartment) -> dict[str, Any]:
         "name": item.name,
         "normalized_name": item.normalized_name,
         "path_names": item.path_names or [],
+        "metadata": getattr(item, "metadata_json", None) or {},
     }
 
 
@@ -680,6 +746,7 @@ def _user_model_record(item: OrganizationUser) -> dict[str, Any]:
         "email": item.email,
         "mobile": item.mobile,
         "job_title": item.job_title,
+        "metadata": getattr(item, "metadata_json", None) or {},
     }
 
 
@@ -710,10 +777,13 @@ def _member_item(
         "email": user.email or "",
         "mobile": user.mobile or "",
         "title": user.job_title or "",
+        "employee_no": str((getattr(user, "metadata_json", None) or {}).get("employee_no") or ""),
+        "leader_user_id": str((getattr(user, "metadata_json", None) or {}).get("leader_user_id") or ""),
         "department": department_name,
         "department_names": [department_name] if department_name else [],
         "department_ids": [department_id] if department_id else [],
         "is_primary_department": membership.is_primary,
+        "role_in_department": getattr(membership, "role_in_department", None) or "",
         "source_system": user.source_system,
         "resource_plane": "foundation",
         "resource_type": "organization_user",
@@ -770,6 +840,14 @@ def _apply_department_record(model: OrganizationDepartment, item: dict[str, Any]
     model.path_source_department_ids = _string_list(item.get("path_source_department_ids"))
     model.leader_source_user_ids = _string_list(item.get("leader_source_user_ids"))
     model.source_payload = dict(item.get("source_payload") or {})
+    model.metadata_json = {
+        "member_count": _positive_int(item.get("member_count")),
+        "primary_member_count": _positive_int(item.get("primary_member_count")),
+        "order": str(item.get("order") or ""),
+        "leaders": model.leader_source_user_ids,
+        "path_names": model.path_names or [],
+        "path_source_department_ids": model.path_source_department_ids or [],
+    }
     model.last_synced_at = now
 
 
@@ -783,7 +861,15 @@ def _apply_user_record(model: OrganizationUser, item: dict[str, Any], *, now: da
     model.job_title = str(item.get("job_title") or "") or None
     model.status = str(item.get("status") or "active")
     model.source_payload = dict(item.get("source_payload") or {})
-    model.metadata_json = {"department_ids": _string_list(item.get("department_ids")), "department_names": _string_list(item.get("department_names"))}
+    model.metadata_json = {
+        "department_ids": _string_list(item.get("department_ids")),
+        "department_names": _string_list(item.get("department_names")),
+        "department_paths": _department_paths(item.get("department_paths")),
+        "orders_by_department_id": item.get("orders_by_department_id") if isinstance(item.get("orders_by_department_id"), dict) else {},
+        "employee_no": str(item.get("employee_no") or ""),
+        "leader_user_id": str(item.get("leader_user_id") or ""),
+        "employee_type": item.get("employee_type"),
+    }
     model.last_synced_at = now
 
 
@@ -792,6 +878,74 @@ def _department_target_type(name: str) -> str:
     if normalized.endswith("组"):
         return ORG_TARGET_GROUP
     return ORG_TARGET_DEPARTMENT
+
+
+def _membership_role(*, user_item: dict[str, Any], department: OrganizationDepartment) -> str:
+    user_keys = {
+        str(user_item.get("open_id") or "").strip(),
+        str(user_item.get("source_user_id") or user_item.get("user_id") or "").strip(),
+    }
+    leader_keys = {str(item or "").strip() for item in (department.leader_source_user_ids or [])}
+    if user_keys & leader_keys:
+        return "leader"
+    return "member"
+
+
+def _department_path_for_user(user_item: dict[str, Any], source_department_id: str) -> dict[str, list[str]]:
+    source_department_id = str(source_department_id or "").strip()
+    for item in _department_paths(user_item.get("department_paths")):
+        ids = _string_list(item.get("ids"))
+        if source_department_id and source_department_id in ids:
+            return item
+    return {"names": [], "ids": [source_department_id] if source_department_id else []}
+
+
+def _department_leader_ids(item: dict[str, Any]) -> list[str]:
+    values: list[Any] = [
+        item.get("leader_user_id"),
+        item.get("leader_open_id"),
+        item.get("leader_id"),
+    ]
+    values.extend(_string_list(item.get("leader_source_user_ids")))
+    values.extend(_string_list(item.get("leader_user_ids")))
+    leaders = item.get("leaders")
+    if isinstance(leaders, list):
+        for leader in leaders:
+            if isinstance(leader, dict):
+                values.extend(
+                    [
+                        leader.get("leaderID"),
+                        leader.get("leader_id"),
+                        leader.get("leader_user_id"),
+                        leader.get("user_id"),
+                        leader.get("open_id"),
+                    ]
+                )
+            else:
+                values.append(leader)
+    return _unique_strings(values)
+
+
+def _department_paths(value: Any) -> list[dict[str, list[str]]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, list[str]]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        names = _string_list(item.get("names") or item.get("path_names"))
+        ids = _string_list(item.get("ids") or item.get("path_source_department_ids"))
+        if names or ids:
+            result.append({"names": names, "ids": ids})
+    return result
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 def _user_status(value: Any) -> str:
@@ -827,3 +981,15 @@ def _string_list(value: Any) -> list[str]:
     if value in (None, ""):
         return []
     return [str(value).strip()]
+
+
+def _unique_strings(values: list[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result

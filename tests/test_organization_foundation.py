@@ -134,6 +134,52 @@ def test_organization_resolver_alias_returns_target_name_not_alias_text() -> Non
     assert resolution.reason == "alias_exact"
 
 
+def test_organization_directory_preserves_feishu_master_data_fields() -> None:
+    directory = organization_directory_from_payload(
+        {
+            "departments": [
+                {
+                    "department_id": "od_engineering",
+                    "parent_department_id": "0",
+                    "name": "工程中心",
+                    "member_count": 20,
+                    "primary_member_count": 1,
+                    "leaders": [{"leaderID": "ou_max"}],
+                    "path_names": ["工程中心"],
+                    "path_source_department_ids": ["od_engineering"],
+                }
+            ],
+            "users": [
+                {
+                    "open_id": "ou_max",
+                    "user_id": "u_max",
+                    "name": "戴留兴",
+                    "email": "mark.dai@example.com",
+                    "mobile": "+8618712345678",
+                    "employee_no": "Gs028",
+                    "leader_user_id": "ou_chen",
+                    "department_ids": ["od_engineering"],
+                    "department_names": ["工程中心"],
+                    "department_paths": [{"names": ["工程中心"], "ids": ["od_engineering"]}],
+                    "orders_by_department_id": {"od_engineering": {"is_primary_dept": True}},
+                    "title": "总经理",
+                }
+            ],
+        }
+    )
+
+    department = directory.departments[0]
+    user = directory.users[0]
+
+    assert department["leader_source_user_ids"] == ["ou_max"]
+    assert department["member_count"] == 20
+    assert department["primary_member_count"] == 1
+    assert department["path_names"] == ["工程中心"]
+    assert user["employee_no"] == "Gs028"
+    assert user["leader_user_id"] == "ou_chen"
+    assert user["department_paths"] == [{"names": ["工程中心"], "ids": ["od_engineering"]}]
+
+
 def test_organization_resolver_uses_unit_suffix_as_generic_org_candidate() -> None:
     directory = organization_directory_from_payload(
         {
@@ -148,6 +194,38 @@ def test_organization_resolver_uses_unit_suffix_as_generic_org_candidate() -> No
     assert resolution.resolved_department_id == "group_business"
     assert resolution.reason == "unit_suffix_match"
     assert resolution.needs_clarification is False
+
+
+def test_organization_resolver_extracts_known_object_from_full_sentence() -> None:
+    directory = organization_directory_from_payload(
+        {
+            "departments": [{"department_id": "division_power", "name": "半导体事业部"}],
+            "users": [],
+        }
+    )
+
+    resolution = resolve_organization_object("半导体事业部有几人，分别叫什么", directory, target_types=(ORG_TARGET_DEPARTMENT,))
+
+    assert resolution.resolved_type == ORG_TARGET_DEPARTMENT
+    assert resolution.resolved_department_id == "division_power"
+    assert resolution.resolved_name == "半导体事业部"
+    assert resolution.reason == "name_contained"
+
+
+def test_organization_resolver_uses_unique_unit_stem_inside_full_sentence() -> None:
+    directory = organization_directory_from_payload(
+        {
+            "departments": [{"department_id": "group_business", "name": "商务组"}],
+            "users": [],
+        }
+    )
+
+    resolution = resolve_organization_object("商务部有几人，是谁", directory, target_types=(ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP))
+
+    assert resolution.resolved_type == ORG_TARGET_GROUP
+    assert resolution.resolved_department_id == "group_business"
+    assert resolution.resolved_name == "商务组"
+    assert resolution.reason == "unit_stem_contained"
 
 
 def test_organization_resolver_uses_bare_unit_stem_when_unique() -> None:

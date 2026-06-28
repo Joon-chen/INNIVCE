@@ -68,7 +68,7 @@ from app.services.feishu.approval_cards import approval_card_action_value, appro
 from app.services.feishu.approval_attachments import ApprovalAttachmentReadResult, FeishuApprovalAttachmentService, extract_attachment_text
 from app.services.feishu.bitable import FeishuBitableService
 from app.services.feishu.calendar import FeishuCalendarService
-from app.services.feishu.contact import FeishuContactService
+from app.services.feishu.contact import FeishuContactService, build_department_paths, merge_user_department_membership
 from app.services.feishu.drive import FeishuDriveService
 from app.services.feishu.im import dedupe_chat_candidates, extract_chat_items
 from app.services.feishu.mail import FeishuMailService
@@ -1299,7 +1299,49 @@ def test_feishu_contact_snapshot_merges_user_department_names() -> None:
 
     assert result["department_count"] == 1
     assert result["user_count"] == 1
+    assert result["departments"][0]["path_names"] == ["销售部"]
+    assert result["departments"][0]["path_source_department_ids"] == ["od_sales"]
     assert result["users"][0]["department_names"] == ["销售部"]
+
+
+def test_feishu_contact_snapshot_builds_department_paths_and_membership_metadata() -> None:
+    departments = [
+        {"department_id": "od_engineering", "parent_department_id": "0", "name": "工程中心"},
+        {"department_id": "od_hardware", "parent_department_id": "od_engineering", "name": "硬件部"},
+    ]
+    paths = build_department_paths(departments)
+
+    merged = merge_user_department_membership(
+        existing={},
+        user={
+            "open_id": "ou_max",
+            "name": "戴留兴",
+            "department_ids": ["od_engineering", "od_hardware"],
+            "orders": [
+                {
+                    "department_id": "od_hardware",
+                    "is_primary_dept": True,
+                    "department_order": 2,
+                    "user_order": 10,
+                },
+                {
+                    "department_id": "od_engineering",
+                    "is_primary_dept": False,
+                    "department_order": 1,
+                    "user_order": 20,
+                },
+            ],
+        },
+        department_id="od_hardware",
+        department_names_by_id={"od_engineering": "工程中心", "od_hardware": "硬件部"},
+        department_paths=paths,
+    )
+
+    assert paths["od_hardware"] == {"names": ["工程中心", "硬件部"], "ids": ["od_engineering", "od_hardware"]}
+    assert merged["department_ids"] == ["od_hardware", "od_engineering"]
+    assert merged["department_names"] == ["硬件部", "工程中心"]
+    assert merged["department_paths"][0] == {"names": ["工程中心", "硬件部"], "ids": ["od_engineering", "od_hardware"]}
+    assert merged["orders_by_department_id"]["od_hardware"]["is_primary_dept"] is True
 
 
 def test_feishu_calendar_service_lists_primary_events_with_epoch_seconds() -> None:
