@@ -12,6 +12,7 @@ from app.services.llm.gateway import LLMGateway
 from app.services.llm.routing_policy import llm_route_for_task
 from app.services.runtime_v5.conversation_hints import ConversationHints
 from app.services.runtime_v5.conversation_state import ConversationState
+from app.services.runtime_v5.semantic_fields import canonical_people_field
 
 
 @dataclass(frozen=True)
@@ -206,9 +207,9 @@ def _semantic_frame_from_payload(
         if value:
             parameters[key] = value
     if parameters.get("field"):
-        parameters["field"] = _canonical_people_field(str(parameters.get("field") or ""))
+        parameters["field"] = canonical_people_field(str(parameters.get("field") or ""))
     if target.get("field"):
-        target["field"] = _canonical_people_field(str(target.get("field") or ""))
+        target["field"] = canonical_people_field(str(target.get("field") or ""))
     if parameters.get("person_name"):
         parameters["person_name"] = _canonical_person_name(str(parameters.get("person_name") or ""))
     if isinstance(raw_parameters.get("filters"), dict):
@@ -389,50 +390,8 @@ def _confidence(*, hints: ConversationHints, state: ConversationState) -> float:
 
 
 def _requested_field(target_hint: str) -> str:
-    aliases = {
-        "电话": "mobile",
-        "手机号": "mobile",
-        "号码": "mobile",
-        "邮箱": "email",
-        "职位": "title",
-        "岗位": "title",
-        "直属上级": "leader",
-        "上级": "leader",
-        "领导": "leader",
-        "性别": "gender",
-    }
-    return aliases.get(target_hint, "")
-
-
-def _canonical_people_field(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    aliases = {
-        "phone": "mobile",
-        "telephone": "mobile",
-        "mobile": "mobile",
-        "手机号": "mobile",
-        "电话": "mobile",
-        "号码": "mobile",
-        "email": "email",
-        "mail": "email",
-        "邮箱": "email",
-        "position": "title",
-        "job_title": "title",
-        "title": "title",
-        "role": "title",
-        "岗位": "title",
-        "职位": "title",
-        "leader": "leader",
-        "manager": "leader",
-        "supervisor": "leader",
-        "直属上级": "leader",
-        "上级": "leader",
-        "领导": "leader",
-        "gender": "gender",
-        "sex": "gender",
-        "性别": "gender",
-    }
-    return aliases.get(normalized, normalized)
+    field = canonical_people_field(target_hint)
+    return field if field in {"mobile", "email", "title", "leader", "gender"} else ""
 
 
 def _canonical_person_name(value: str) -> str:

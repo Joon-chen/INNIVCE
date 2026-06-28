@@ -74,6 +74,8 @@ Conversation First Command Engine Refactor V1
 - People 本地快照用于身份索引和权限/目标解析，不作为不可审计的事实黑箱；性别、岗位、手机号、邮箱等字段必须保留来源口径，未知字段不得由姓名、语气或 LLM 推断。
 - ResultContext 后续追问必须先判定这是上一轮结果的 `expand / filter / continue / reference` 操作，字段输出再通过 `field_projection` 控制；用户只要数量或姓名时不得把手机号、邮箱、open_id、company_id 等内部字段混入正文；`continue/补全/剩下` 必须基于上一轮 `display_offset/display_end/display_limit` 接着列，不能从头重列或重新查询。
 - People Provider 必须优先消费 Intent 抽取出的 `entities.keyword / people_query_field`，不得绕回整句自然语言做 Provider 关键词；多字段查询（例如职位 + 手机）由同一条 People 字段投影合并回答，保证不同问法的信息完整性一致。
+- Semantic Field 必须走统一定义，不允许 `SemanticFrame / DialogueResolver / Provider / Composer` 各自维护字段别名；People V1 当前 canonical fields 为 `title / leader / mobile / email / gender`，后续 Knowledge、IM、Cognitive 字段也按同一模式纳入，而不是新增业务关键词入口。
+- Conversation Reference 必须先绑定到 `ConversationState.previous_result_reference / active_collection`，再进入动作参数；“这些人 / 他们 / 行政的 3 人 / 上一轮名单”等表达应解析成上一轮集合引用，旧 IM 规则只能补缺失槽位，不能覆盖 Conversation First 的目标解析。
 - People 交互默认 Text-first：单人字段事实（手机号、邮箱、职位、性别）直接用自然语言回答，不渲染卡片；侧边栏只承接多人、明细、候选确认、显式展开和字段较多的结构化查看。
 - People / Knowledge 查询必须产出 Conversation First `CommandFrame`，并在 `params.semantic_frame / output_contract / context_contract` 里保留可审计上下文。
 - Provider 可以返回结构化事实和原始摘要，但 People / Knowledge 的最终文本与卡片/侧边栏选择由 Response Orchestrator 根据 `output_contract.surface/mode` 决定：数量与单人字段走自然文本，名单/明细走侧边栏，不在正文堆列表模板。

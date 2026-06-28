@@ -169,6 +169,15 @@ Observability
 
 Foundation 保存事实，不保存业务逻辑；Engine 做决策，不保存组织事实；Provider 只调用能力，不理解用户、不判断权限、不生成最终话术；LLM 只负责理解、分析、表达和总结，不负责组织事实、权限、Scope、Provider、Capability 或系统事实。
 
+### 2.3 Conversation Semantic Contract
+
+Conversation First 入口不得继续堆业务域关键词路由。Command Engine 只允许保留两类低成本确定性定义：
+
+- Semantic Field：把用户表达中的字段词标准化为 canonical field，例如 People 的 `title / leader / mobile / email / gender`。字段定义是跨层合同，不是业务入口规则；Semantic Understanding、Dialogue Resolver、Provider 参数和 Response Orchestrator 必须消费同一份字段定义。
+- Conversation Reference：把“这些人 / 他们 / 行政的 3 人 / 上一轮名单 / 第 N 个”等表达标准化为对 `ConversationState.previous_result_reference` 或 `active_collection` 的引用。引用解析只决定上下文对象，不决定权限、Provider 或最终执行。
+
+发送、建群、邮件、会议、任务等动作如果引用上一轮集合，必须先解析为 `recipient_ref=previous_collection` 或等价 CommandFrame 上下文合同，再交给 Policy 和 Runtime。旧入口规则只能补缺失槽位，禁止覆盖 Conversation First 已经解析出的上下文对象。
+
 ## 3. Foundation Layer
 
 Foundation Layer 是系统元数据与上下文底座，不执行业务。

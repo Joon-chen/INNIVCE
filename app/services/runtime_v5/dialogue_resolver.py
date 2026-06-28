@@ -8,6 +8,8 @@ from app.services.runtime_v5.command_frame import command_frame_payload
 from app.services.runtime_v5.conversation_hints import ConversationHints
 from app.services.runtime_v5.conversation_state import ConversationState, build_conversation_state
 from app.services.runtime_v5.models import CommandFrame, IntentResult, RuntimeContext
+from app.services.runtime_v5.people_resolver import people_targets_from_result_context
+from app.services.runtime_v5.semantic_fields import people_field_label, people_fields_from_text
 from app.services.runtime_v5.semantic_frame import SemanticFrame
 
 
@@ -20,7 +22,7 @@ def resolve_dialogue_to_command_frame(
     """Resolve a semantic utterance into the sole Command Engine output."""
 
     domain = _domain(state=state, semantic_frame=semantic_frame, hints=hints)
-    intent = _intent(domain=domain, semantic_frame=semantic_frame, hints=hints)
+    intent = _intent(domain=domain, state=state, semantic_frame=semantic_frame, hints=hints)
     output_contract = _output_contract(semantic_frame=semantic_frame, hints=hints)
     context_contract = _context_contract(state=state, semantic_frame=semantic_frame)
     scope = _scope(domain=domain, semantic_frame=semantic_frame)
@@ -32,7 +34,7 @@ def resolve_dialogue_to_command_frame(
         output_contract=output_contract,
         context_contract=context_contract,
     )
-    question_type = "action" if semantic_frame.speech_act == "request_action" else "query"
+    question_type = "action" if semantic_frame.speech_act == "request_action" or intent == "message_send" else "query"
     return CommandFrame(
         utterance_type=_utterance_type(semantic_frame),
         dialogue_mode=_dialogue_mode(semantic_frame),
@@ -44,7 +46,7 @@ def resolve_dialogue_to_command_frame(
         capability="",
         skill_intent="",
         scope=scope,
-        action_type=_operation_kind(semantic_frame),
+        action_type=_operation_kind(semantic_frame, intent=intent),
         safety_level="low" if question_type == "query" else "high",
         target=dict(semantic_frame.target),
         params={
@@ -143,6 +145,8 @@ def build_conversation_first_frame(context: RuntimeContext) -> CommandFrame:
 
 
 def _domain(*, state: ConversationState, semantic_frame: SemanticFrame, hints: ConversationHints) -> str:
+    if _is_pending_message_send_target_answer(state=state, semantic_frame=semantic_frame):
+        return "Communication"
     if hints.domain_hint:
         return hints.domain_hint
     if semantic_frame.topic == "people":
@@ -154,11 +158,15 @@ def _domain(*, state: ConversationState, semantic_frame: SemanticFrame, hints: C
     return "Conversation"
 
 
-def _intent(*, domain: str, semantic_frame: SemanticFrame, hints: ConversationHints) -> str:
+def _intent(*, domain: str, state: ConversationState, semantic_frame: SemanticFrame, hints: ConversationHints) -> str:
     if semantic_frame.speech_act in {"cancel", "answer"}:
         return "smalltalk"
     if semantic_frame.speech_act == "request_action":
         return "message_send" if domain == "Communication" else "smalltalk"
+    if _is_pending_message_send_target_answer(state=state, semantic_frame=semantic_frame):
+        return "message_send"
+    if domain == "Communication" and semantic_frame.parameters.get("previous_result"):
+        return "message_send"
     if domain == "People":
         parameters = semantic_frame.parameters
         previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
@@ -190,15 +198,24 @@ def _intent(*, domain: str, semantic_frame: SemanticFrame, hints: ConversationHi
     return "smalltalk"
 
 
+def _is_pending_message_send_target_answer(*, state: ConversationState, semantic_frame: SemanticFrame) -> bool:
+    pending_intent = state.pending_confirmation.intent or state.pending_clarification.intent
+    if pending_intent != "message_send":
+        return False
+    raw_message = str(semantic_frame.parameters.get("raw_message") or "")
+    compact = re.sub(r"\s+", "", raw_message)
+    return _references_previous_collection(compact=compact, state=state)
+
+
 def _communication_action_entities(context: RuntimeContext) -> tuple[dict[str, Any], tuple[str, ...]]:
     # Conversation First owns target/text extraction. The legacy parser is only
     # a compatibility fallback for forms not covered by the semantic contract.
     from app.services.runtime_v5.intent import _recognize_intent_by_rules
 
     candidate = _recognize_intent_by_rules(context.current_message, context)
-    entities = dict(candidate.entities) if candidate.intent == "message_send" else {}
     extracted = _conversation_message_send_entities(context)
-    entities = {**entities, **{key: value for key, value in extracted.items() if value not in (None, "")}}
+    legacy = dict(candidate.entities) if candidate.intent == "message_send" else {}
+    entities = _merge_action_entities(extracted=extracted, legacy=legacy)
     missing = []
     if not entities.get("target_type") and not entities.get("target"):
         missing.append("target_type")
@@ -207,6 +224,17 @@ def _communication_action_entities(context: RuntimeContext) -> tuple[dict[str, A
     if entities.get("target_type") == "people_context" and not entities.get("delivery_mode"):
         missing.append("delivery_mode")
     return entities, tuple(missing)
+
+
+def _merge_action_entities(*, extracted: dict[str, Any], legacy: dict[str, Any]) -> dict[str, Any]:
+    entities = {key: value for key, value in extracted.items() if value not in (None, "", [], {})}
+    for key, value in legacy.items():
+        if value in (None, "", [], {}) or key in entities:
+            continue
+        if key in {"target", "target_type"} and entities.get("target_type"):
+            continue
+        entities[key] = value
+    return entities
 
 
 def _conversation_message_send_entities(context: RuntimeContext) -> dict[str, Any]:
@@ -218,6 +246,17 @@ def _conversation_message_send_entities(context: RuntimeContext) -> dict[str, An
         entities["text"] = text
     state = build_conversation_state(context)
     active_person = state.active_object if state.active_object.get("type") == "person" else {}
+    if _references_previous_collection(compact=compact, state=state):
+        entities["target_type"] = "people_context"
+        entities["target"] = "previous_result"
+        people_targets = people_targets_from_result_context(context.result_context)
+        if people_targets:
+            entities["people_targets"] = [dict(item) for item in people_targets]
+            entities["people_target_count"] = str(len(people_targets))
+        delivery_mode = _message_delivery_mode(compact)
+        if delivery_mode:
+            entities["delivery_mode"] = delivery_mode
+        return entities
     if any(token in compact for token in ("给他", "发给他", "通知他", "给她", "发给她", "通知她")):
         name = str(active_person.get("name") or "").strip()
         if name:
@@ -243,6 +282,29 @@ def _conversation_message_send_entities(context: RuntimeContext) -> dict[str, An
                 entities["target_type"] = "person"
                 entities["target"] = person_target
     return entities
+
+
+def _references_previous_collection(*, compact: str, state: ConversationState) -> bool:
+    if not state.previous_result_reference.has_items:
+        return False
+    if any(token in compact for token in ("他们", "她们", "这些人", "这些同事", "这几位", "这几个人", "上面这些人", "刚才这些人")):
+        return True
+    target_label = str(state.previous_result_reference.target_label or "").strip()
+    if not target_label:
+        return False
+    label_core = _collection_label_core(target_label)
+    if not label_core or label_core not in compact:
+        return False
+    count = state.previous_result_reference.count
+    count_markers = {f"{count}人", f"{count}位", f"{count}个"} if count else set()
+    collection_words = ("人", "同事", "成员", "人员", "名单", "这几位", "这几个人")
+    return any(marker in compact for marker in count_markers) or any(word in compact for word in collection_words)
+
+
+def _collection_label_core(value: str) -> str:
+    label = str(value or "").strip()
+    label = re.sub(r"(部门|事业部|中心|团队|小组|组|部)$", "", label)
+    return label.strip()
 
 
 def _message_send_text(message: str) -> str:
@@ -353,8 +415,8 @@ def _semantic_scope(semantic_frame: SemanticFrame) -> str:
     return ""
 
 
-def _operation_kind(semantic_frame: SemanticFrame) -> str:
-    if semantic_frame.speech_act == "request_action":
+def _operation_kind(semantic_frame: SemanticFrame, *, intent: str) -> str:
+    if intent == "message_send" or semantic_frame.speech_act == "request_action":
         return "send"
     return "read"
 
@@ -453,15 +515,7 @@ def _canonical_question_from_frame(*, frame: CommandFrame, context: RuntimeConte
     keyword = str(entities.get("keyword") or "").strip()
     field = str(entities.get("people_query_field") or "").strip()
     if keyword and field:
-        field_text = {
-            "mobile": "手机号",
-            "email": "邮箱",
-            "title": "岗位",
-            "leader": "直属上级",
-            "gender": "性别",
-            "profile": "信息",
-        }.get(field, "信息")
-        return f"{keyword}的{field_text}"
+        return f"{keyword}的{people_field_label(field)}"
     return frame.user_goal or context.current_message
 
 
@@ -482,10 +536,10 @@ def _domain_query(
     output_contract: dict[str, str],
     context_contract: dict[str, Any],
 ) -> dict[str, Any]:
-    operation_kind = "send" if semantic_frame.speech_act == "request_action" else "read"
+    operation_kind = "send" if intent == "message_send" or semantic_frame.speech_act == "request_action" else "read"
     fields: list[str] = []
     if domain == "People":
-        fields.extend(_people_fields_from_text(str(semantic_frame.parameters.get("raw_message") or "")))
+        fields.extend(people_fields_from_text(str(semantic_frame.parameters.get("raw_message") or "")))
     field = semantic_frame.parameters.get("field")
     if isinstance(field, str) and field and field not in fields:
         fields.append(field)
@@ -526,22 +580,6 @@ def _domain_query(
         "risk_hint": "high" if operation_kind == "send" else "low",
         "evidence_requirement": "source_field" if fields else "",
     }
-
-
-def _people_fields_from_text(text: str) -> tuple[str, ...]:
-    compact = re.sub(r"\s+", "", str(text or "").lower())
-    fields: list[str] = []
-    if any(token in compact for token in ("岗位", "职位", "职务")):
-        fields.append("title")
-    if any(token in compact for token in ("直属上级", "上级", "领导")):
-        fields.append("leader")
-    if any(token in compact for token in ("电话", "号码", "手机号", "手机")):
-        fields.append("mobile")
-    if "邮箱" in compact:
-        fields.append("email")
-    if any(token in compact for token in ("男还是女", "女还是男", "男性还是女性", "性别")):
-        fields.append("gender")
-    return tuple(fields)
 
 
 def _resource_boundary(*, domain: str, scope: str) -> str:

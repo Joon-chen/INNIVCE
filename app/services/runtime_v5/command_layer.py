@@ -113,6 +113,9 @@ def _non_conversation_first_action_requested(context: RuntimeContext) -> bool:
 def _conversation_first_communication_allowed(context: RuntimeContext, command_frame) -> bool:
     if command_frame.domain != "Communication" or command_frame.intent != "message_send":
         return False
+    pending = context.session_context.get("runtime_v5_pending_action")
+    if isinstance(pending, dict) and str(pending.get("intent") or "") == "message_send":
+        return True
     from app.services.runtime_v5.intent import _recognize_intent_by_rules
 
     rule_intent = _recognize_intent_by_rules(context.current_message, context)

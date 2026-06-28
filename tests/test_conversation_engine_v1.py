@@ -81,7 +81,11 @@ BUSINESS_GROUP_RESULT = ResultContext(
 ADMIN_GROUP_RESULT = ResultContext(
     result_type="department_members",
     count=3,
-    items=({"name": "李慧玲"}, {"name": "杜玉娟"}, {"name": "王亚莉"}),
+    items=(
+        {"name": "李慧玲", "open_id": "ou_lihuiling"},
+        {"name": "杜玉娟", "open_id": "ou_duyujuan"},
+        {"name": "王亚莉", "open_id": "ou_wangyali"},
+    ),
     metadata={
         "entity_domain": "People",
         "keyword": "行政组",
@@ -341,6 +345,32 @@ def test_conversation_first_numeric_output_is_semantic_contract(message: str) ->
     assert plan.command_frame is not None
     assert plan.command_frame.params["output_contract"]["mode"] == "numeric_only"
     assert plan.intent_result.entities["people_query_mode"] == "count_only"
+
+
+def test_conversation_first_send_action_uses_previous_collection_recipient_ref() -> None:
+    plan = build_command_plan(context=_context("给他们分别发信息说：大飞哥测试信息", result_context=ADMIN_GROUP_RESULT))
+
+    assert plan.intent == "message_send"
+    assert plan.command_frame is not None
+    assert plan.command_frame.domain == "Communication"
+    assert plan.intent_result.entities["target_type"] == "people_context"
+    assert plan.intent_result.entities["target"] == "previous_result"
+    assert plan.intent_result.entities["delivery_mode"] == "user_multi_private"
+    assert plan.intent_result.entities["text"] == "大飞哥测试信息"
+    assert plan.intent_result.entities["people_target_count"] == "3"
+    assert "target_type" not in plan.intent_result.missing_params
+    assert "text" not in plan.intent_result.missing_params
+
+
+def test_conversation_first_collection_label_answer_fills_send_target() -> None:
+    plan = build_command_plan(context=_context("行政的3人", result_context=ADMIN_GROUP_RESULT, session_context=PENDING_SEND))
+
+    assert plan.intent == "message_send"
+    assert plan.command_frame is not None
+    assert plan.intent_result.entities["target_type"] == "people_context"
+    assert plan.intent_result.entities["target"] == "previous_result"
+    assert plan.intent_result.entities["people_target_count"] == "3"
+    assert "target_type" not in plan.intent_result.missing_params
 
 
 @pytest.mark.parametrize(
