@@ -301,6 +301,7 @@ def test_conversation_first_single_department_member_field_followup_uses_active_
     (
         ("有商务部这个部门吗", BUSINESS_GROUP_RESULT, "department_members", "department", "商务部"),
         ("那商务部这个人叫什么", BUSINESS_GROUP_RESULT, "department_members", "department", "商务部"),
+        ("商务部有几人", None, "department_members", "department", "商务部"),
         ("商务组多少人，分别叫什么。", None, "department_members", "department", "商务组"),
         ("叫什么", BUSINESS_GROUP_RESULT, "department_members", "department", "商务组"),
         ("公司的董事长是谁", None, "organization_snapshot", "organization", ""),

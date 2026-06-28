@@ -84,7 +84,7 @@ def test_organization_resolver_alias_returns_target_name_not_alias_text() -> Non
         ),
     )
 
-    resolution = resolve_organization_object("商务部有几人", directory, target_types=(ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP))
+    resolution = resolve_organization_object("商务部", directory, target_types=(ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP))
 
     assert resolution.resolved_type == ORG_TARGET_GROUP
     assert resolution.resolved_department_id == "group_business"
