@@ -1478,6 +1478,17 @@ def test_runtime_v5_people_single_question_can_request_title_and_leader() -> Non
     assert intent.entities["domain_query"]["fields"] == ["title", "leader"]
 
 
+def test_conversation_first_people_single_question_preserves_multiple_fields() -> None:
+    question = "李慧玲是什么岗位，她的领导是谁"
+    plan = build_command_plan(context=_context(question))
+
+    assert plan.intent == "people_lookup"
+    assert plan.intent_result.entities["keyword"] == "李慧玲"
+    assert plan.intent_result.entities["domain_query"]["fields"] == ["title", "leader"]
+    assert plan.command_frame is not None
+    assert plan.command_frame.params["domain_query"]["fields"] == ["title", "leader"]
+
+
 def test_runtime_v5_people_contextual_pronoun_switches_to_phone() -> None:
     result_context = ResultContext(
         result_type="people_search",

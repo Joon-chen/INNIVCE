@@ -484,8 +484,10 @@ def _domain_query(
 ) -> dict[str, Any]:
     operation_kind = "send" if semantic_frame.speech_act == "request_action" else "read"
     fields: list[str] = []
+    if domain == "People":
+        fields.extend(_people_fields_from_text(str(semantic_frame.parameters.get("raw_message") or "")))
     field = semantic_frame.parameters.get("field")
-    if isinstance(field, str) and field:
+    if isinstance(field, str) and field and field not in fields:
         fields.append(field)
     if domain == "People" and intent == "organization_snapshot":
         subject: Any = {"type": "organization"}
@@ -524,6 +526,22 @@ def _domain_query(
         "risk_hint": "high" if operation_kind == "send" else "low",
         "evidence_requirement": "source_field" if fields else "",
     }
+
+
+def _people_fields_from_text(text: str) -> tuple[str, ...]:
+    compact = re.sub(r"\s+", "", str(text or "").lower())
+    fields: list[str] = []
+    if any(token in compact for token in ("岗位", "职位", "职务")):
+        fields.append("title")
+    if any(token in compact for token in ("直属上级", "上级", "领导")):
+        fields.append("leader")
+    if any(token in compact for token in ("电话", "号码", "手机号", "手机")):
+        fields.append("mobile")
+    if "邮箱" in compact:
+        fields.append("email")
+    if any(token in compact for token in ("男还是女", "女还是男", "男性还是女性", "性别")):
+        fields.append("gender")
+    return tuple(fields)
 
 
 def _resource_boundary(*, domain: str, scope: str) -> str:

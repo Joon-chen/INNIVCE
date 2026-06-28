@@ -475,7 +475,7 @@ def _person_candidate(message: str) -> str:
     if not has_field and any(token in compact for token in ("多少", "几位", "几个")):
         return ""
     compact_for_name = re.sub(r"^(那|那么|还有)", "", compact)
-    match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})(?:的)?(?:电话|手机号|号码|邮箱|职位|岗位|领导|直属上级|上级|性别|是男是女).*", compact_for_name)
+    match = re.match(r"(?P<name>[\u4e00-\u9fff]{2,4})(?:的|是什么)?(?:电话|手机号|号码|邮箱|职位|岗位|领导|直属上级|上级|性别|是男是女).*", compact_for_name)
     if match:
         return match.group("name").removesuffix("的")
     if not any(token in compact for token in ("公司", "部门", "我们", "你", "我")):
