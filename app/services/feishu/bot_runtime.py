@@ -366,6 +366,8 @@ def _runtime_v5_answer_rewrite_allowed(*, envelope: Any, answer: str, question: 
         return False
     if not str(answer or "").strip():
         return False
+    if _conversation_first_data_answer(envelope):
+        return False
     output_contract = _runtime_v5_output_contract(envelope)
     if output_contract.get("mode") == "numeric_only" or output_contract.get("surface") == "sidepanel":
         return False
@@ -385,6 +387,22 @@ def _runtime_v5_answer_rewrite_allowed(*, envelope: Any, answer: str, question: 
     if _runtime_v5_fast_response_result(result_type=result_type, answer=answer, data_scope=data_scope):
         return False
     return True
+
+
+def _conversation_first_data_answer(envelope: Any) -> bool:
+    intent = getattr(envelope, "intent", None)
+    entities = getattr(intent, "entities", None)
+    if not isinstance(entities, dict):
+        return False
+    frame = entities.get("command_frame") if isinstance(entities.get("command_frame"), dict) else {}
+    if frame.get("route_path") != "conversation_first_v1":
+        return False
+    domain = str(frame.get("domain") or "")
+    if domain not in {"People", "Knowledge"}:
+        return False
+    result_context = getattr(getattr(envelope, "composed", None), "result_context", None)
+    result_type = str(getattr(result_context, "result_type", "") or "")
+    return result_type in {"people_search", "department_members", "organization_snapshot", "company_profile_knowledge", "knowledge_search", "docs_read"}
 
 
 def _runtime_v5_output_contract(envelope: Any) -> dict[str, Any]:

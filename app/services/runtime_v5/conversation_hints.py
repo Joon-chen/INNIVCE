@@ -53,7 +53,7 @@ _FOLLOWUP_MARKERS = (
     "全部",
     "第",
 )
-_ACTION_MARKERS = ("发给", "发送", "发消息", "发到", "通知", "拉群", "建群", "发邮件", "群发")
+_ACTION_MARKERS = ("发给", "发送", "发消息", "发信息", "发条信息", "发条消息", "发个信息", "发个消息", "发到", "通知", "拉群", "建群", "发邮件", "群发")
 _KNOWLEDGE_MARKERS = (
     "公司是做什么",
     "主营业务",
@@ -115,6 +115,8 @@ def _domain_hint(*, compact: str, state: ConversationState) -> str:
         return "Knowledge"
     if any(marker in compact for marker in _ACTION_MARKERS):
         return "Communication"
+    if _organization_unit_candidate(compact):
+        return "People"
     if any(marker in compact for marker in _PEOPLE_MARKERS) or _looks_like_named_person_question(compact):
         return "People"
     if "部" in compact and any(token in compact for token in ("多少", "哪些", "有哪些", "人", "名单")):
@@ -147,7 +149,7 @@ def _operation_hint(*, compact: str, state: ConversationState) -> str:
         return "field_lookup"
     if _asks_collection_identity(compact) or any(token in compact for token in ("哪", "名单", "列出", "展开", "全部", "补全", "继续")):
         return "list"
-    if any(token in compact for token in ("多少人", "多少", "几个人", "几位", "数量", "男生", "男性", "女生", "女性")):
+    if any(token in compact for token in ("多少人", "多少", "几个人", "几位", "几个", "数量", "男生", "男性", "女生", "女性")):
         return "count"
     if state.previous_result_reference.collection_type and _is_followup_reference(compact=compact, state=state):
         return "followup"
@@ -165,7 +167,7 @@ def _requested_output_hint(*, compact: str) -> str:
         return "sidepanel"
     if _asks_collection_identity(compact):
         return "name_only"
-    if any(token in compact for token in ("多少", "几位", "数量")):
+    if any(token in compact for token in ("多少", "几位", "几个", "数量")):
         return "count"
     return "natural_text"
 
@@ -198,7 +200,72 @@ def _organization_unit_candidate(compact: str) -> str:
         unit = _clean_organization_unit(raw)
         if unit:
             return unit
+    return _bare_organization_unit_candidate(compact)
+
+
+def _bare_organization_unit_candidate(compact: str) -> str:
+    patterns = (
+        r"(?:我们公司|我们|公司)(?:的)?(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})(?:是谁|有谁|有哪些|多少人|几人|几位|几个)$",
+        r"(?:有多少个|有多少位|有多少|多少个|多少位|多少|有几个|几个|有几位|几位|有几人|几人)(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})$",
+        r"(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})(?:有多少人|多少人|有几人|几人|有哪些人|有哪些|都有谁|是谁|名单)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, compact, re.I)
+        if match:
+            unit = _clean_bare_organization_unit(match.group("unit"))
+            if unit:
+                return unit
     return ""
+
+
+def _clean_bare_organization_unit(value: str) -> str:
+    unit = str(value or "").strip()
+    unit = unit.removesuffix("了")
+    unit = re.sub(r"^(的|有|几个|几位|几人|多少)", "", unit)
+    unit = re.sub(r"(的人|的同事|人员|成员)$", "", unit)
+    if "的" in unit:
+        unit = unit.rsplit("的", 1)[-1]
+    if not unit:
+        return ""
+    lowered = unit.lower()
+    if "有" in unit:
+        return ""
+    blocked = {
+        "我",
+        "你",
+        "他",
+        "她",
+        "谁",
+        "分别",
+        "全部",
+        "公司",
+        "这个公司",
+        "那个公司",
+        "人",
+        "位",
+        "个",
+        "个人",
+        "员工",
+        "同事",
+        "男生",
+        "男性",
+        "女生",
+        "女性",
+        "电话",
+        "号码",
+        "手机号",
+        "邮箱",
+        "邮件",
+        "名字",
+        "名单",
+        "老板",
+        "工程师",
+    }
+    if lowered in blocked:
+        return ""
+    if re.search(r"(工程师|经理|主管|总监|专员|助理|实习生|技术员|负责人|董事长)$", unit):
+        return ""
+    return unit
 
 
 def _clean_organization_unit(value: str) -> str:
@@ -264,6 +331,8 @@ def _short_contextual_question(compact: str) -> bool:
 
 def _looks_like_named_person_question(compact: str) -> bool:
     if any(token in compact for token in ("公司", "部门", "我们", "你", "我")):
+        return False
+    if compact.startswith(("分别", "全部", "哪些", "哪个", "哪位")):
         return False
     return bool(re.search(r"^[\u4e00-\u9fff]{2,4}(的)?(电话|手机号|号码|邮箱|职位|岗位|性别|是男是女|是谁)", compact))
 

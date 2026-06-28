@@ -25,7 +25,7 @@ def build_command_plan(
 
     command_frame = build_conversation_first_frame(context)
     if _conversation_first_v1_supported(context, command_frame):
-        if _conversation_first_v1_allowed(context):
+        if _conversation_first_v1_allowed(context) or _conversation_first_strict_domain(command_frame):
             intent = conversation_first_intent_result(context=context, frame=command_frame)
         else:
             intent = recognize_intent(context.current_message, context)
@@ -74,6 +74,10 @@ def _conversation_first_v1_allowed(context: RuntimeContext) -> bool:
     if context.session_context.get("runtime_v5_action_input") or _has_blocking_runtime_state(context.session_context):
         return False
     return True
+
+
+def _conversation_first_strict_domain(command_frame) -> bool:
+    return getattr(command_frame, "domain", "") in {"People", "Knowledge"}
 
 
 def _has_blocking_runtime_state(session_context: dict[str, Any]) -> bool:

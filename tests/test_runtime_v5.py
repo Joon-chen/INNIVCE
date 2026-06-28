@@ -6515,6 +6515,31 @@ def test_runtime_v5_conversation_first_im_send_target_boundary_keeps_message_tex
     assert result.composed.result_context.result_type == "runtime_pending_confirmation"
 
 
+def test_runtime_v5_conversation_first_im_send_pronoun_uses_active_person_context() -> None:
+    previous = ResultContext(
+        result_type="people_search",
+        count=1,
+        items=({"name": "王云飞", "job_title": "IT 专员", "department": "IT组"},),
+        metadata={"entity_domain": "People", "field_projection": "profile"},
+        answer="王云飞是 IT 专员，IT组。",
+    )
+
+    result = run_runtime_v5(
+        context=_context("发条信息给他:大飞哥测试", chat_id="chat_im_pronoun", result_context=previous),
+        providers={"im": object()},
+    )
+
+    assert result.intent.intent == "message_send"
+    assert result.intent.entities["command_frame"]["route_path"] == "conversation_first_v1"
+    assert result.intent.entities["target_type"] == "person"
+    assert result.intent.entities["target"] == "王云飞"
+    assert result.intent.entities["text"] == "大飞哥测试"
+    assert result.intent.missing_params == ()
+    assert result.execution is None
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "runtime_pending_confirmation"
+
+
 def test_runtime_v5_conversation_first_im_send_success_receipt_keeps_resolved_target() -> None:
     class IMProvider:
         source = "im"

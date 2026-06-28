@@ -108,6 +108,30 @@ def test_organization_resolver_uses_unit_suffix_as_generic_org_candidate() -> No
     assert resolution.needs_clarification is False
 
 
+def test_organization_resolver_uses_bare_unit_stem_when_unique() -> None:
+    directory = organization_directory_from_payload(
+        {
+            "departments": [
+                {"department_id": "group_admin", "name": "行政组"},
+                {"department_id": "group_it", "name": "IT组"},
+            ],
+            "users": [],
+        }
+    )
+
+    admin = resolve_organization_object("行政", directory, target_types=(ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP))
+    it = resolve_organization_object("IT", directory, target_types=(ORG_TARGET_DEPARTMENT, ORG_TARGET_GROUP))
+
+    assert admin.resolved_type == ORG_TARGET_GROUP
+    assert admin.resolved_department_id == "group_admin"
+    assert admin.resolved_name == "行政组"
+    assert admin.reason == "unit_suffix_match"
+    assert it.resolved_type == ORG_TARGET_GROUP
+    assert it.resolved_department_id == "group_it"
+    assert it.resolved_name == "IT组"
+    assert it.reason == "unit_suffix_match"
+
+
 def test_organization_resolver_does_not_guess_unit_suffix_when_ambiguous() -> None:
     directory = organization_directory_from_payload(
         {
@@ -143,7 +167,7 @@ def test_organization_resolver_returns_candidates_instead_of_full_org_when_ambig
     assert resolution.resolved_department_id == ""
     assert resolution.needs_clarification is True
     assert {item.target_id for item in resolution.candidates} == {"dept_business", "group_business"}
-    assert resolution.reason == "not_resolved"
+    assert resolution.reason == "unit_suffix_ambiguous"
 
 
 def test_organization_resolver_not_found_does_not_return_people_or_company_fallback() -> None:

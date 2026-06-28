@@ -756,7 +756,7 @@ def test_v5_waiting_input_result_contract_is_frozen() -> None:
 def test_v5_transfer_add_sign_confirmation_execution_guard_is_frozen() -> None:
     runtime_text = Path("app/services/runtime_v5/runtime.py").read_text()
     confirmation_block = runtime_text.split("if pending_action and _is_confirmation_message(context.current_message):", 1)[1].split(
-        "\n\n    followup = detect_result_followup",
+        "\n\n    followup = _legacy_result_followup",
         1,
     )[0]
     guard_text = runtime_text.split("def _confirmation_execution_guard_reason(", 1)[1].split(

@@ -407,7 +407,13 @@ def _looks_like_organization_unit_hint(value: str) -> bool:
     text = str(value or "").strip()
     if not text or text in {"这个", "那个", "这些", "那些", "谁", "是谁", "分别是谁"}:
         return False
-    return bool(re.search(r"(事业部|部门|中心|团队|小组|组|部)$", text))
+    if bool(re.search(r"(事业部|部门|中心|团队|小组|组|部)$", text)):
+        return True
+    if re.fullmatch(r"[A-Za-z0-9]{1,20}", text):
+        return True
+    if re.fullmatch(r"[\u4e00-\u9fff]{1,8}", text) and text not in {"男生", "男性", "女生", "女性"}:
+        return True
+    return False
 
 
 def _person_candidate(message: str) -> str:

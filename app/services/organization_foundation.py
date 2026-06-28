@@ -513,7 +513,7 @@ def _unit_suffix_candidates(
     target_types: tuple[str, ...],
 ) -> tuple[OrganizationCandidate, ...]:
     query_stem = _organization_unit_stem(normalized)
-    if not query_stem or query_stem == normalized:
+    if not query_stem:
         return ()
     candidates: list[OrganizationCandidate] = []
     if ORG_TARGET_DEPARTMENT in target_types or ORG_TARGET_GROUP in target_types:

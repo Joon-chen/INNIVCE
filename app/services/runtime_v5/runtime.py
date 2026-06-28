@@ -487,15 +487,8 @@ def run_runtime_v5(
             },
         )
 
-    followup = detect_result_followup(context.current_message, context.result_context)
-    timer.mark("result_followup_detector")
-    if (
-        _looks_like_new_question(context.current_message, context.result_context, followup)
-        or _looks_like_result_action(context.current_message)
-        or _looks_like_approval_detail_action(context.current_message, context.result_context)
-        or _conversation_first_should_own_followup(context)
-    ):
-        followup = replace(followup, is_result_followup=False)
+    followup = _legacy_result_followup(context)
+    timer.mark("legacy_result_followup")
     if followup.is_result_followup:
         command_plan, intent, plan, permission = _build_command_and_policy(
             context=context,
@@ -810,6 +803,23 @@ def _conversation_first_should_own_followup(context: RuntimeContext) -> bool:
         return False
     result_type = str(result_context.result_type or "")
     return result_type in {"people_search", "department_members", "organization_snapshot", "company_profile_knowledge", "knowledge_search", "docs_read"}
+
+
+def _legacy_result_followup(context: RuntimeContext):
+    from app.services.runtime_v5.models import ResultFollowup
+
+    if context.result_context is None:
+        return ResultFollowup(is_result_followup=False)
+    if _conversation_first_should_own_followup(context):
+        return ResultFollowup(is_result_followup=False)
+    followup = detect_result_followup(context.current_message, context.result_context)
+    if (
+        _looks_like_new_question(context.current_message, context.result_context, followup)
+        or _looks_like_result_action(context.current_message)
+        or _looks_like_approval_detail_action(context.current_message, context.result_context)
+    ):
+        return replace(followup, is_result_followup=False)
+    return followup
 
 
 def _record_command_route_observation(*, context: RuntimeContext, command_plan) -> None:

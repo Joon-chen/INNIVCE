@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any
 
 from app.services.runtime_v5.command_frame import command_frame_payload
 from app.services.runtime_v5.conversation_hints import ConversationHints
-from app.services.runtime_v5.conversation_state import ConversationState
+from app.services.runtime_v5.conversation_state import ConversationState, build_conversation_state
 from app.services.runtime_v5.models import CommandFrame, IntentResult, RuntimeContext
 from app.services.runtime_v5.semantic_frame import SemanticFrame
 
@@ -190,14 +191,97 @@ def _intent(*, domain: str, semantic_frame: SemanticFrame, hints: ConversationHi
 
 
 def _communication_action_entities(context: RuntimeContext) -> tuple[dict[str, Any], tuple[str, ...]]:
-    # Deterministic hint extraction only. Conversation First still owns the
-    # CommandFrame; this reuses the mature legacy parser for action parameters.
+    # Conversation First owns target/text extraction. The legacy parser is only
+    # a compatibility fallback for forms not covered by the semantic contract.
     from app.services.runtime_v5.intent import _recognize_intent_by_rules
 
     candidate = _recognize_intent_by_rules(context.current_message, context)
-    if candidate.intent != "message_send":
-        return {}, ("target_type", "text")
-    return dict(candidate.entities), tuple(candidate.missing_params)
+    entities = dict(candidate.entities) if candidate.intent == "message_send" else {}
+    extracted = _conversation_message_send_entities(context)
+    entities = {**entities, **{key: value for key, value in extracted.items() if value not in (None, "")}}
+    missing = []
+    if not entities.get("target_type") and not entities.get("target"):
+        missing.append("target_type")
+    if not entities.get("text"):
+        missing.append("text")
+    if entities.get("target_type") == "people_context" and not entities.get("delivery_mode"):
+        missing.append("delivery_mode")
+    return entities, tuple(missing)
+
+
+def _conversation_message_send_entities(context: RuntimeContext) -> dict[str, Any]:
+    message = str(context.current_message or "").strip()
+    compact = message.replace(" ", "")
+    entities: dict[str, Any] = {}
+    text = _message_send_text(message)
+    if text:
+        entities["text"] = text
+    state = build_conversation_state(context)
+    active_person = state.active_object if state.active_object.get("type") == "person" else {}
+    if any(token in compact for token in ("给他", "发给他", "通知他", "给她", "发给她", "通知她")):
+        name = str(active_person.get("name") or "").strip()
+        if name:
+            entities["target_type"] = "person"
+            entities["target"] = name
+    elif any(token in compact for token in ("这些人", "这些同事", "上面这些人")) and state.previous_result_reference.has_items:
+        entities["target_type"] = "people_context"
+        entities["target"] = "previous_result"
+        delivery_mode = _message_delivery_mode(compact)
+        if delivery_mode:
+            entities["delivery_mode"] = delivery_mode
+    elif any(token in compact for token in ("当前会话", "这个群", "本群", "这里")):
+        entities["target_type"] = "current_chat"
+        entities["target"] = "current_chat"
+    else:
+        chat_target = _message_chat_target(compact)
+        if chat_target:
+            entities["target_type"] = "chat"
+            entities["target"] = chat_target
+        else:
+            person_target = _message_person_target(compact)
+            if person_target:
+                entities["target_type"] = "person"
+                entities["target"] = person_target
+    return entities
+
+
+def _message_send_text(message: str) -> str:
+    text = str(message or "").strip()
+    for separator in ("说：", "说:", "：", ":"):
+        if separator in text:
+            return text.rsplit(separator, 1)[1].strip()
+    return ""
+
+
+def _message_chat_target(compact: str) -> str:
+    match = re.search(r"(?:发给|发到|发送到|拉群后发到|发条信息到)(?P<target>[\u4e00-\u9fffA-Za-z0-9_-]{2,30}?)群", compact)
+    if not match:
+        return ""
+    return match.group("target").strip()
+
+
+def _message_person_target(compact: str) -> str:
+    patterns = (
+        r"(?:给|发给|通知)(?P<target>[\u4e00-\u9fff]{2,4}?)(?:发消息|发信息|说|:|：)",
+        r"(?:给|发给|通知)(?P<target>[\u4e00-\u9fff]{2,4}?)(?:$|发|说|:|：)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, compact)
+        if match:
+            target = match.group("target")
+            if target not in {"这些人", "这个群", "当前会话"}:
+                return target
+    return ""
+
+
+def _message_delivery_mode(compact: str) -> str:
+    if any(token in compact for token in ("机器人通知", "用机器人", "机器人发", "系统通知", "自动通知", "大飞哥通知")):
+        return "bot_multi_notify"
+    if any(token in compact for token in ("替我发", "用我", "以我的名义", "我发给", "分别发", "单独发", "单独发送", "私聊发")):
+        return "user_multi_private"
+    if any(token in compact for token in ("拉群", "建群", "建个群", "创建群", "群里发", "发到群")):
+        return "create_group_then_send"
+    return ""
 
 
 def _output_contract(*, semantic_frame: SemanticFrame, hints: ConversationHints) -> dict[str, str]:
