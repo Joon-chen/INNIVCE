@@ -66,6 +66,7 @@ class OrganizationMembersResult:
     resolution: OrganizationResolution
     items: tuple[dict[str, Any], ...]
     source: str = "organization_foundation"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def normalize_organization_name(value: Any) -> str:
@@ -227,7 +228,11 @@ def resolve_department_members(
         ),
         root_department_name=root_department.name,
     )
-    return OrganizationMembersResult(resolution=resolution, items=items)
+    return OrganizationMembersResult(
+        resolution=resolution,
+        items=items,
+        metadata=_department_membership_metadata(root=root_department, subtree_departments=subtree_departments, rows=rows),
+    )
 
 
 def resolve_organization_object(
@@ -673,6 +678,50 @@ def _department_subtree(
         result.append(department)
         queue.extend(by_parent.get(str(department.source_department_id or ""), ()))
     return tuple(result)
+
+
+def _department_membership_metadata(
+    *,
+    root: OrganizationDepartment,
+    subtree_departments: tuple[OrganizationDepartment, ...],
+    rows: list[tuple[OrganizationMembership, OrganizationUser]],
+) -> dict[str, Any]:
+    direct_user_ids = {
+        user.id
+        for membership, user in rows
+        if membership.organization_department_id == root.id
+    }
+    direct_children = tuple(
+        department
+        for department in subtree_departments
+        if str(department.parent_source_department_id or "") == str(root.source_department_id or "")
+    )
+    child_counts = tuple(
+        {
+            "name": department.name,
+            "source_department_id": department.source_department_id,
+            "member_count": _department_metadata_count(department),
+        }
+        for department in direct_children
+    )
+    displayed_count = len(direct_user_ids) + sum(int(item["member_count"] or 0) for item in child_counts)
+    source_count = _department_metadata_count(root)
+    unique_user_ids = {user.id for _membership, user in rows}
+    return {
+        "unique_member_count": len(unique_user_ids),
+        "direct_member_count": len(direct_user_ids),
+        "display_member_count": displayed_count or source_count or len(unique_user_ids),
+        "source_member_count": source_count,
+        "child_member_counts": list(child_counts),
+        "count_basis": "direct_members_plus_child_department_member_counts" if direct_children else "department_member_count",
+    }
+
+
+def _department_metadata_count(department: OrganizationDepartment) -> int:
+    metadata = getattr(department, "metadata_json", None)
+    if isinstance(metadata, dict):
+        return _positive_int(metadata.get("member_count"))
+    return 0
 
 
 def _department_record(item: dict[str, Any]) -> dict[str, Any]:

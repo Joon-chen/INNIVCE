@@ -337,6 +337,111 @@ def test_resolve_department_members_includes_descendant_departments_and_dedupes_
     assert result.items[1]["department"] == "产品部"
 
 
+def test_resolve_department_members_reports_display_and_unique_count_basis() -> None:
+    division_id = uuid4()
+    product_id = uuid4()
+    sales_id = uuid4()
+    project_id = uuid4()
+    departments = [
+        SimpleNamespace(
+            id=division_id,
+            company_id=COMPANY_ID,
+            source_system="feishu",
+            source_department_id="division_power",
+            open_department_id="",
+            parent_source_department_id="0",
+            name="半导体事业部",
+            normalized_name=normalize_organization_name("半导体事业部"),
+            unit_type=ORG_TARGET_DEPARTMENT,
+            status="active",
+            path_names=[],
+            metadata_json={"member_count": 7},
+        ),
+        SimpleNamespace(
+            id=product_id,
+            company_id=COMPANY_ID,
+            source_system="feishu",
+            source_department_id="dept_product",
+            open_department_id="",
+            parent_source_department_id="division_power",
+            name="产品部",
+            normalized_name=normalize_organization_name("产品部"),
+            unit_type=ORG_TARGET_DEPARTMENT,
+            status="active",
+            path_names=[],
+            metadata_json={"member_count": 2},
+        ),
+        SimpleNamespace(
+            id=sales_id,
+            company_id=COMPANY_ID,
+            source_system="feishu",
+            source_department_id="dept_sales",
+            open_department_id="",
+            parent_source_department_id="division_power",
+            name="销售部",
+            normalized_name=normalize_organization_name("销售部"),
+            unit_type=ORG_TARGET_DEPARTMENT,
+            status="active",
+            path_names=[],
+            metadata_json={"member_count": 2},
+        ),
+        SimpleNamespace(
+            id=project_id,
+            company_id=COMPANY_ID,
+            source_system="feishu",
+            source_department_id="dept_project",
+            open_department_id="",
+            parent_source_department_id="division_power",
+            name="项目部",
+            normalized_name=normalize_organization_name("项目部"),
+            unit_type=ORG_TARGET_DEPARTMENT,
+            status="active",
+            path_names=[],
+            metadata_json={"member_count": 4},
+        ),
+    ]
+    people = [
+        SimpleNamespace(
+            id=uuid4(),
+            open_id=f"ou_{index}",
+            source_user_id="",
+            name=name,
+            normalized_name=normalize_organization_name(name),
+            email="",
+            mobile="",
+            job_title="",
+            status="active",
+            source_system="feishu",
+            metadata_json={},
+        )
+        for index, name in enumerate(("戴留兴", "缪瀛", "余莲莲", "张盛", "卢敏阳", "张瑞云", "王悦"), start=1)
+    ]
+    rows = [
+        (SimpleNamespace(organization_department_id=division_id, is_primary=True), people[0]),
+        (SimpleNamespace(organization_department_id=product_id, is_primary=True), people[1]),
+        (SimpleNamespace(organization_department_id=sales_id, is_primary=True), people[2]),
+        (SimpleNamespace(organization_department_id=sales_id, is_primary=True), people[3]),
+        (SimpleNamespace(organization_department_id=project_id, is_primary=True), people[4]),
+        (SimpleNamespace(organization_department_id=project_id, is_primary=True), people[5]),
+        (SimpleNamespace(organization_department_id=project_id, is_primary=True), people[6]),
+        (SimpleNamespace(organization_department_id=project_id, is_primary=False), people[0]),
+    ]
+    db = _OrganizationSession(departments=departments, users=people, root=departments[0], rows=rows)
+
+    result = resolve_department_members(db, company_id=COMPANY_ID, query="半导体事业部有多少人")
+
+    assert result is not None
+    assert len(result.items) == 7
+    assert result.metadata["unique_member_count"] == 7
+    assert result.metadata["display_member_count"] == 9
+    assert result.metadata["direct_member_count"] == 1
+    assert result.metadata["child_member_counts"] == [
+        {"name": "产品部", "source_department_id": "dept_product", "member_count": 2},
+        {"name": "销售部", "source_department_id": "dept_sales", "member_count": 2},
+        {"name": "项目部", "source_department_id": "dept_project", "member_count": 4},
+    ]
+
+
 def test_organization_resolver_does_not_guess_unit_suffix_when_ambiguous() -> None:
     directory = organization_directory_from_payload(
         {

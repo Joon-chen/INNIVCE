@@ -473,6 +473,72 @@ def test_response_orchestrator_summarizes_department_count_without_output_contra
     assert composed.answer == "1人。"
 
 
+def test_response_orchestrator_uses_department_display_count_basis_for_counts() -> None:
+    context = _context("半导体事业部有多少人")
+    command_plan = build_command_plan(context=context)
+    result_context = ResultContext(
+        result_type="department_members",
+        count=7,
+        items=tuple({"name": name} for name in ("戴留兴", "缪瀛", "余莲莲", "张盛", "卢敏阳", "张瑞云", "王悦")),
+        metadata={
+            "entity_domain": "People",
+            "organization_resolution": {"query": "半导体事业部", "resolved_name": "半导体事业部"},
+            "display_member_count": 9,
+            "unique_member_count": 7,
+            "count_basis": "direct_members_plus_child_department_member_counts",
+        },
+        answer="半导体事业部目前 7 人。",
+    )
+    execution = ExecutionResult(
+        strategy="department_members",
+        status="success",
+        provider_results=(ProviderResult(source="people", status="success", result_type="department_members", count=7, answer=result_context.answer),),
+        result_context=result_context,
+    )
+
+    composed = compose_answer(
+        context=context,
+        intent=command_plan.intent_result,
+        permission=PermissionDecision(allowed=True),
+        execution=execution,
+    )
+
+    assert composed.answer == "按组织架构展示口径是 9 人；去重后是 7 位同事。"
+
+
+def test_response_orchestrator_department_list_explains_count_basis_naturally() -> None:
+    context = _context("半导体事业部有多少人，分别叫什么")
+    command_plan = build_command_plan(context=context)
+    result_context = ResultContext(
+        result_type="department_members",
+        count=7,
+        items=tuple({"name": name} for name in ("戴留兴", "缪瀛", "余莲莲", "张盛", "卢敏阳", "张瑞云", "王悦")),
+        metadata={
+            "entity_domain": "People",
+            "organization_resolution": {"query": "半导体事业部", "resolved_name": "半导体事业部"},
+            "display_member_count": 9,
+            "unique_member_count": 7,
+            "count_basis": "direct_members_plus_child_department_member_counts",
+        },
+        answer="半导体事业部目前 7 人。",
+    )
+    execution = ExecutionResult(
+        strategy="department_members",
+        status="success",
+        provider_results=(ProviderResult(source="people", status="success", result_type="department_members", count=7, answer=result_context.answer),),
+        result_context=result_context,
+    )
+
+    composed = compose_answer(
+        context=context,
+        intent=command_plan.intent_result,
+        permission=PermissionDecision(allowed=True),
+        execution=execution,
+    )
+
+    assert composed.answer == "半导体事业部按组织架构展示口径是 9 人，去重后 7 位同事：戴留兴、缪瀛、余莲莲、张盛、卢敏阳、张瑞云、王悦。"
+
+
 def test_runtime_v5_people_list_followup_uses_conversation_first_sidepanel() -> None:
     calls: list[str] = []
 
@@ -1209,6 +1275,79 @@ def test_runtime_v5_people_lookup_resolves_leader_name_from_organization_foundat
 
     assert result.answer == "李慧玲的直属上级是杜玉娟。"
     assert result.items[0]["leader"] == "杜玉娟"
+
+
+def test_runtime_v5_people_lookup_marks_identifier_leader_name_as_uncertain(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.load_people_snapshot", lambda company_id: {})
+
+    class _ScalarResult:
+        def __init__(self, items):
+            self._items = items
+
+        def all(self):
+            return self._items
+
+    class _FoundationDb:
+        def scalars(self, _statement):
+            return _ScalarResult(
+                [
+                    SimpleNamespace(
+                        open_id="ou_li",
+                        source_user_id="u_li",
+                        name="李慧玲",
+                        email="",
+                        mobile="",
+                        job_title="高级人事专员",
+                        metadata_json={"leader_user_id": "ou_400704"},
+                    ),
+                    SimpleNamespace(
+                        open_id="ou_400704",
+                        source_user_id="u_400704",
+                        name="400704",
+                        email="",
+                        mobile="",
+                        job_title="人事经理",
+                        metadata_json={"department_names": ["人事组"]},
+                    ),
+                ]
+            )
+
+    class Provider(FeishuPeopleProvider):
+        def _execute_tool(
+            self,
+            request: ProviderRequest,
+            *,
+            tool_name: str,
+            params: dict | None = None,
+            confirm_write: bool = False,
+        ):
+            return SimpleNamespace(
+                status=ToolExecutionStatus.SUCCESS,
+                error="",
+                answer="",
+                structured_result={"response_payload": {"users": [{"open_id": "ou_li", "name": "李慧玲", "leader_user_id": "ou_400704"}]}},
+            )
+
+    result = Provider(db=_FoundationDb()).execute(
+        ProviderRequest(
+            source="people",
+            operation="search_person",
+            intent=IntentResult(
+                question_type="query",
+                intent="people_lookup",
+                data_scope="person",
+                entities={"keyword": "李慧玲", "people_query_field": "leader"},
+                canonical_question="李慧玲的直属上级",
+            ),
+            planner=_command_plan("people_lookup", sources=("people",)),
+            context=_context("李慧玲的直属上级是谁"),
+            execution_identity="bot",
+            params={"keyword": "李慧玲"},
+        )
+    )
+
+    assert "显示名是 400704" in result.answer
+    assert "当前没有可确认的中文姓名" in result.answer
 
 
 def test_runtime_v5_people_typo_match_asks_confirmation_without_answering_field(monkeypatch) -> None:

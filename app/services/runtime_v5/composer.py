@@ -175,6 +175,7 @@ def _conversation_people_answer(
     mode = str(contract.get("mode") or "")
     surface = str(contract.get("surface") or "")
     count = int(result_context.count or len(result_context.items or ()))
+    display_count = _people_display_count(result_context=result_context, metadata=metadata)
     field_projection = str(metadata.get("field_projection") or "")
     semantic = _conversation_semantic_frame(intent)
     filters = semantic.get("parameters", {}).get("filters") if isinstance(semantic.get("parameters"), dict) else {}
@@ -198,16 +199,40 @@ def _conversation_people_answer(
         if surface == "sidepanel" or mode == "sidepanel" or field_projection in {"name_only", "detail"}:
             return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
         if mode == "numeric_only":
-            return str(count)
+            return str(display_count)
         if mode in {"count", "short_answer"} or field_projection == "count_only":
             gender = filters.get("gender") if isinstance(filters, dict) else ""
             if gender in {"male", "female"}:
                 label = "男性" if gender == "male" else "女性"
-                return f"目前能确认的{label}员工是 {count} 位。"
-            return f"{count}人。"
+                return f"目前能确认的{label}员工是 {display_count} 位。"
+            return _department_count_answer(result_context=result_context, metadata=metadata) if result_type == "department_members" else f"{display_count}人。"
         if count:
-            return f"当前可见通讯录里有 {count} 位同事。"
+            return _department_count_answer(result_context=result_context, metadata=metadata) if result_type == "department_members" else f"当前可见通讯录里有 {display_count} 位同事。"
     return ""
+
+
+def _people_display_count(*, result_context: ResultContext, metadata: dict[str, Any]) -> int:
+    if result_context.result_type == "department_members":
+        value = _safe_int(metadata.get("display_member_count"), default=0)
+        if value > 0:
+            return value
+    return int(result_context.count or len(result_context.items or ()))
+
+
+def _department_count_answer(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
+    display_count = _people_display_count(result_context=result_context, metadata=metadata)
+    unique_count = _safe_int(metadata.get("unique_member_count"), default=int(result_context.count or len(result_context.items or ())))
+    resolution = metadata.get("organization_resolution") if isinstance(metadata.get("organization_resolution"), dict) else {}
+    resolved_name = str(resolution.get("resolved_name") or "").strip()
+    query = str(resolution.get("query") or metadata.get("keyword") or "").strip()
+    correction = _organization_name_correction(query=query, resolved_name=resolved_name)
+    if display_count != unique_count and unique_count > 0:
+        prefix = f"{correction}" if correction else ""
+        return f"{prefix}按组织架构展示口径是 {display_count} 人；去重后是 {unique_count} 位同事。"
+    subject = resolved_name or query
+    if correction:
+        return f"{correction}{subject}目前 {display_count} 人。"
+    return f"{display_count}人。"
 
 
 def _default_structured_people_answer(*, context: RuntimeContext, result_context: ResultContext) -> str:
@@ -347,11 +372,56 @@ def _people_list_contract_answer(*, result_context: ResultContext, metadata: dic
     names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
     if not names:
         return _human_readable_answer(result_context.answer) or f"共 {count} 人。"
+    if result_context.result_type == "department_members":
+        department_intro = _department_list_intro(result_context=result_context, metadata=metadata)
+        if department_intro:
+            if count > 8:
+                return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
+            return f"{department_intro}{'、'.join(names)}。"
     keyword = str(metadata.get("keyword") or "").strip()
     subject = f"{keyword} " if keyword else ""
     if len(names) == 1:
         return f"{subject}这 1 位是：{names[0]}。"
     return f"{subject}共 {count} 位：{'、'.join(names[:8])}。" if count <= 8 else _people_sidepanel_summary(result_context=result_context, metadata=metadata)
+
+
+def _department_list_intro(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
+    resolution = metadata.get("organization_resolution") if isinstance(metadata.get("organization_resolution"), dict) else {}
+    resolved_name = str(resolution.get("resolved_name") or "").strip()
+    query = str(resolution.get("query") or metadata.get("keyword") or "").strip()
+    correction = _organization_name_correction(query=query, resolved_name=resolved_name)
+    display_count = _people_display_count(result_context=result_context, metadata=metadata)
+    unique_count = _safe_int(metadata.get("unique_member_count"), default=int(result_context.count or len(result_context.items or ())))
+    subject = resolved_name or query
+    if display_count != unique_count and unique_count > 0:
+        return f"{correction}{subject}按组织架构展示口径是 {display_count} 人，去重后 {unique_count} 位同事："
+    if correction:
+        return f"{correction}{subject}目前 {unique_count} 位："
+    return ""
+
+
+def _organization_name_correction(*, query: str, resolved_name: str) -> str:
+    query = str(query or "").strip()
+    resolved_name = str(resolved_name or "").strip()
+    if not query or not resolved_name:
+        return ""
+    compact_query = query.replace(" ", "")
+    compact_resolved = resolved_name.replace(" ", "")
+    if compact_query == compact_resolved or compact_resolved in compact_query:
+        return ""
+    query_stem = _organization_unit_stem(compact_query)
+    resolved_stem = _organization_unit_stem(compact_resolved)
+    if query_stem and query_stem == resolved_stem:
+        return f"你说的「{query}」在组织架构里对应的是「{resolved_name}」。"
+    return ""
+
+
+def _organization_unit_stem(value: str) -> str:
+    text = str(value or "").strip()
+    for suffix in ("事业部", "部门", "中心", "小组", "团队", "部", "组"):
+        if text.endswith(suffix) and len(text) > len(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _with_command_enrichment(answer: str, *, intent: IntentResult) -> str:

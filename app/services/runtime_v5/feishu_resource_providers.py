@@ -192,6 +192,8 @@ class FeishuPeopleProvider(FeishuResourceProvider):
             if foundation_result is not None:
                 resolution = foundation_result.resolution
                 items = foundation_result.items
+                foundation_metadata = getattr(foundation_result, "metadata", {})
+                foundation_metadata = foundation_metadata if isinstance(foundation_metadata, dict) else {}
                 return ProviderResult(
                     source="people",
                     status="success",
@@ -203,6 +205,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                         "keyword": keyword,
                         "organization_foundation": True,
                         "organization_resolution": _organization_resolution_metadata(resolution),
+                        **_department_membership_result_metadata(foundation_metadata),
                     },
                     answer=_department_members_answer(keyword, items, resolution=resolution)
                     if resolution.resolved_department_id
@@ -5268,7 +5271,15 @@ def _enrich_people_items_from_foundation(db: Session | None, items: tuple[dict[s
         leader_name = str(item.get("leader") or item.get("leader_name") or "").strip()
         if leader is not None:
             leader_name = leader.name
-        next_item = dict(item)
+            next_item = dict(item)
+            next_item["leader_title"] = leader.job_title or ""
+            leader_metadata = leader.metadata_json if isinstance(leader.metadata_json, dict) else {}
+            leader_departments = leader_metadata.get("department_names") if isinstance(leader_metadata.get("department_names"), list) else []
+            next_item["leader_department"] = "、".join(str(value) for value in leader_departments if str(value).strip())
+            if _looks_like_identifier_name(leader.name):
+                next_item["leader_name_is_identifier"] = True
+        else:
+            next_item = dict(item)
         if current is not None:
             next_item.setdefault("open_id", current.open_id)
             next_item.setdefault("user_id", current.source_user_id or "")
@@ -5289,6 +5300,11 @@ def _enrich_people_items_from_foundation(db: Session | None, items: tuple[dict[s
             next_item["leader_name"] = leader_name
         enriched.append(next_item)
     return tuple(enriched)
+
+
+def _looks_like_identifier_name(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and bool(re.fullmatch(r"[A-Za-z0-9._-]{3,}", text))
 
 
 def _approval_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -5524,7 +5540,19 @@ def _focused_people_answer(item: dict[str, Any], *, question: str = "", requeste
     if "leader" in requested_fields:
         leader = str(item.get("leader") or item.get("leader_name") or "").strip()
         if leader:
-            parts.append(f"直属上级是{leader}")
+            if item.get("leader_name_is_identifier"):
+                leader_detail = "，".join(
+                    part
+                    for part in (
+                        str(item.get("leader_title") or "").strip(),
+                        str(item.get("leader_department") or "").strip(),
+                    )
+                    if part
+                )
+                suffix = f"（{leader_detail}）" if leader_detail else ""
+                parts.append(f"直属上级在通讯录里的显示名是 {leader}{suffix}，当前没有可确认的中文姓名")
+            else:
+                parts.append(f"直属上级是{leader}")
         else:
             missing.append("直属上级")
     if "mobile" in requested_fields:
@@ -5647,13 +5675,30 @@ def _organization_resolution_metadata(resolution) -> dict[str, Any]:
     }
 
 
+def _department_membership_result_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    if not metadata:
+        return {}
+    return {
+        key: value
+        for key, value in {
+            "unique_member_count": metadata.get("unique_member_count"),
+            "direct_member_count": metadata.get("direct_member_count"),
+            "display_member_count": metadata.get("display_member_count"),
+            "source_member_count": metadata.get("source_member_count"),
+            "child_member_counts": metadata.get("child_member_counts"),
+            "count_basis": metadata.get("count_basis"),
+        }.items()
+        if value not in (None, "", (), [])
+    }
+
+
 def _organization_resolution_failure_answer(keyword: str, resolution) -> str:
     candidates = getattr(resolution, "candidates", ()) or ()
     if candidates:
         names = "、".join(str(item.name) for item in candidates[:5] if str(item.name).strip())
         if names:
             return f"我没有唯一匹配到「{keyword}」这个组织对象。比较接近的是：{names}。你指的是哪一个？"
-    return f"我没有在 Organization Foundation 里找到「{keyword}」这个组织对象。需要先同步或补充组织别名后再查。"
+    return f"我没有找到「{keyword}」这个组织对象。可能是名称不一致，或者它不在当前可读组织范围里。"
 
 
 def _department_item_matches(item: dict[str, Any], keyword: str) -> bool:
