@@ -181,6 +181,11 @@ def _conversation_people_answer(
     filters = semantic.get("parameters", {}).get("filters") if isinstance(semantic.get("parameters"), dict) else {}
     field = _requested_people_field(intent=intent, semantic=semantic, metadata=metadata)
     if result_type == "people_search" and count == 1:
+        query_fields = _people_query_fields(metadata)
+        if len(query_fields) > 1:
+            answer = _human_readable_answer(result_context.answer)
+            if answer:
+                return answer
         item = result_context.items[0] if result_context.items else {}
         answer = _single_people_field_answer(item=item, field=field)
         if answer:
@@ -209,6 +214,21 @@ def _conversation_people_answer(
         if count:
             return _department_count_answer(result_context=result_context, metadata=metadata) if result_type == "department_members" else f"当前可见通讯录里有 {display_count} 位同事。"
     return ""
+
+
+def _people_query_fields(metadata: dict[str, Any]) -> tuple[str, ...]:
+    value = metadata.get("people_query_fields")
+    if isinstance(value, (tuple, list)):
+        return tuple(str(item) for item in value if str(item).strip())
+    frame = metadata.get("people_context_frame") if isinstance(metadata.get("people_context_frame"), dict) else {}
+    value = frame.get("current_requested_fields")
+    if isinstance(value, (tuple, list)):
+        return tuple(str(item) for item in value if str(item).strip())
+    query = metadata.get("domain_query") if isinstance(metadata.get("domain_query"), dict) else {}
+    value = query.get("fields")
+    if isinstance(value, list):
+        return tuple(str(item) for item in value if str(item).strip())
+    return ()
 
 
 def _people_display_count(*, result_context: ResultContext, metadata: dict[str, Any]) -> int:

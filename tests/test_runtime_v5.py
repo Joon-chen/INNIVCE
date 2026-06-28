@@ -455,6 +455,47 @@ def test_runtime_v5_preserves_provider_membership_count_basis_in_result_context(
     assert result.composed.result_context.metadata["unique_member_count"] == 7
 
 
+def test_response_orchestrator_keeps_single_person_multi_field_answer() -> None:
+    context = _context("李慧玲是什么岗位，她的领导是谁")
+    command_plan = build_command_plan(context=context)
+    result_context = ResultContext(
+        result_type="people_search",
+        count=1,
+        items=(
+            {
+                "name": "李慧玲",
+                "title": "高级人事专员",
+                "leader": "400704",
+                "leader_name_is_identifier": True,
+                "leader_title": "人事经理",
+                "leader_department": "人事组",
+            },
+        ),
+        metadata={
+            "entity_domain": "People",
+            "people_query_field": "leader",
+            "people_query_fields": ("title", "leader"),
+            "domain_query": {"fields": ["title", "leader"]},
+        },
+        answer="李慧玲的职位是高级人事专员，直属上级在通讯录里的显示名是 400704（人事经理，人事组），当前没有可确认的中文姓名。",
+    )
+    execution = ExecutionResult(
+        strategy="people_lookup",
+        status="success",
+        provider_results=(ProviderResult(source="people", status="success", result_type="people_search", count=1, answer=result_context.answer),),
+        result_context=result_context,
+    )
+
+    composed = compose_answer(
+        context=context,
+        intent=command_plan.intent_result,
+        permission=PermissionDecision(allowed=True),
+        execution=execution,
+    )
+
+    assert composed.answer == result_context.answer
+
+
 def test_people_provider_contract_applies_domain_query_filters_to_items_and_count() -> None:
     items = (
         {"name": "张三", "gender_normalized": "male", "gender_source": "source", "mobile": "1"},
