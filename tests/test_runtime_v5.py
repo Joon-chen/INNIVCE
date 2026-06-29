@@ -3224,6 +3224,16 @@ def test_registered_knowledge_candidates_read_nested_document_type_and_skip_bita
     assert candidates[0]["document_type"] == "docx"
     assert "business_domain" in str(db.query)
 
+    unrelated = _registered_knowledge_resource_candidates(
+        db,
+        company_id=company_id,
+        seed_text="制度文件在哪里",
+        context="general",
+        limit=5,
+    )
+
+    assert unrelated == []
+
 
 def test_runtime_v5_placeholder_objective_does_not_render_as_intro() -> None:
     from app.services.runtime_v5.composer import _natural_enrichment_intro

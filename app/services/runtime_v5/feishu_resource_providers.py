@@ -3705,7 +3705,10 @@ def _knowledge_document_score(candidate: dict[str, Any], *, seed_text: str, cont
     title = str(candidate.get("title") or "").lower()
     seed = str(seed_text or "").lower()
     terms = _COMPANY_PROFILE_DOCUMENT_TERMS if context == "company_profile" else _GENERAL_KNOWLEDGE_DOCUMENT_TERMS
-    score = sum(3 for term in terms if term.lower() in title)
+    if context == "company_profile":
+        score = sum(3 for term in terms if term.lower() in title)
+    else:
+        score = sum(3 for term in terms if term.lower() in title and term.lower() in seed)
     keywords = _knowledge_keywords(seed)
     score += sum(1 for keyword in keywords if keyword and keyword.lower() in title)
     if context == "company_profile" and _text_contains_any(title, ("合同", "库存", "采购", "crm", "资产", "订单", "台账")):
