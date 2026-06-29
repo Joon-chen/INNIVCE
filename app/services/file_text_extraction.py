@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
@@ -55,6 +56,7 @@ def _extract_pdf_text(data: bytes) -> str:
 
 def _extract_pdf_embedded_text(data: bytes) -> str:
     try:
+        logging.getLogger("pypdf").setLevel(logging.ERROR)
         from pypdf import PdfReader
     except Exception:
         return ""
