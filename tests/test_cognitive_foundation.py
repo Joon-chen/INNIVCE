@@ -529,6 +529,40 @@ def test_cognitive_v1_extractor_registry_is_by_cognitive_object() -> None:
     assert extractor.object_type == "company_profile"
 
 
+def test_cognitive_v1_company_profile_contact_extraction_avoids_address_as_phone() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+    evidence = EvidenceInput(
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+        timestamp=datetime.now(UTC),
+        extractor=COMPANY_PROFILE_EXTRACTOR,
+        summary=(
+            "固势（苏州）科技有限公司 & 0512 - 69176883 "
+            "QBN LAUER 2073 207 Xingpu Road, Suzhou Industrial Park CONTENTS 目录"
+        ),
+        metadata={"title": "固势宣传册26--中文.pdf"},
+    )
+    event = append_evidence_work_event(
+        db,
+        company_id=company_id,
+        evidence=evidence,
+        object_type="company_profile",
+        object_id=str(company_id),
+        actor="ou_test",
+    )
+    snapshot = build_company_profile_snapshot(db, company_id=company_id, evidence_events=(event,), object_id=str(company_id))
+    item = company_profile_snapshot_item(snapshot)
+
+    answer = company_profile_snapshot_answer(item, query="联系方式")
+
+    assert "2073 207" not in answer
+    assert "207 Xingpu Road, Suzhou Industrial Park" in answer
+    assert "CONTENTS" not in answer
+
+
 def test_write_memory_candidate_only_writes_candidate() -> None:
     db = _WriteDb()
     company_id = uuid4()

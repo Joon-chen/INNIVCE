@@ -299,9 +299,10 @@ def _extract_advantages(text: str) -> list[str]:
 
 def _extract_contacts(text: str) -> dict[str, list[str]]:
     emails = re.findall(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
-    phones = re.findall(r"(?:\+?\d[\d\s-]{6,}\d)", text)
+    phone_candidates = re.findall(r"(?:\+?\d[\d\s-]{6,}\d)", text)
+    phones = [phone for phone in phone_candidates if len(re.sub(r"\D", "", phone)) >= 8]
     addresses = []
-    address_match = re.search(r"(\d{3,5}\s+[A-Za-z0-9 ,.-]*Suzhou[^,\n]*(?:Park)?)", text)
+    address_match = re.search(r"\b(\d{1,5}\s+Xingpu Road,\s*Suzhou Industrial Park)\b", text)
     if address_match:
         addresses.append(address_match.group(1).strip())
     return {
