@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from app.core.config import settings
 from app.models.entities import FeishuAppConfig
 from app.services.feishu.client import FeishuClient
-from app.services.file_text_extraction import extract_file_text
+from app.shared.file_intelligence import extract_file_text
 
 
 MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024

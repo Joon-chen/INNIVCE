@@ -3237,8 +3237,11 @@ def test_registered_knowledge_candidates_read_nested_document_type_and_skip_bita
 
 def test_read_knowledge_document_candidate_extracts_file_text(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.runtime_v5.feishu_resource_providers.extract_file_text",
-        lambda data, *, filename, content_type=None, max_chars=12000: "固势宣传册 公司介绍 主营业务：工业智能设备。",
+        "app.services.runtime_v5.feishu_resource_providers.extract_file",
+        lambda data, *, filename, content_type=None, max_chars=12000: SimpleNamespace(
+            success=True,
+            text="固势宣传册 公司介绍 主营业务：工业智能设备。",
+        ),
     )
 
     class FakeService:

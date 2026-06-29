@@ -41,7 +41,7 @@ from app.services.feishu.okr import FeishuOkrService
 from app.services.feishu.task import FeishuTaskService
 from app.services.llm.approval_advisor import generate_approval_llm_advice
 from app.services.organization_foundation import resolve_department_members
-from app.services.file_text_extraction import extract_file_text
+from app.shared.file_intelligence import extract_file
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
 from app.services.runtime_v5.domain_query import domain_query_fields, domain_query_payload
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
@@ -3766,7 +3766,10 @@ def _read_knowledge_document_text(
                 return ""
             return str(payload.get("content_text") or "").strip()
         data, content_type = _run_async(service.download_file_content(file_token=document_id))
-        return extract_file_text(data, filename=title, content_type=content_type, max_chars=12000).strip()
+        result = extract_file(data, filename=title, content_type=content_type, max_chars=12000)
+        if not result.success and not result.text:
+            return ""
+        return result.text.strip()
     except Exception:
         return ""
 

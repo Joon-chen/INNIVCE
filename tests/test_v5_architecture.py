@@ -195,6 +195,48 @@ def test_v5_runtime_result_payload_serialization_stays_in_builder_module() -> No
     assert '"target_ui": runtime_result.target_ui' not in runtime_text
 
 
+def test_file_intelligence_is_shared_foundation_not_business_domain_parsers() -> None:
+    assert Path("app/shared/file_intelligence/extract.py").exists()
+    assert not Path("app/services/file_text_extraction.py").exists()
+
+    forbidden_parser_imports = (
+        "import fitz",
+        "import pytesseract",
+        "from pypdf",
+        "import pypdf",
+        "from openpyxl",
+        "import openpyxl",
+        "from docx",
+        "import docx",
+    )
+    business_roots = (
+        Path("app/services/feishu"),
+        Path("app/services/runtime_v5"),
+        Path("app/services/agent"),
+        Path("app/services/tools"),
+    )
+    offenders: list[str] = []
+    for root in business_roots:
+        for path in root.rglob("*.py"):
+            text = path.read_text()
+            offenders.extend(f"{path}:{token}" for token in forbidden_parser_imports if token in text)
+
+    assert offenders == []
+
+
+def test_file_intelligence_exports_extraction_result_contract() -> None:
+    models_text = Path("app/shared/file_intelligence/models.py").read_text()
+    extract_text = Path("app/shared/file_intelligence/extract.py").read_text()
+    registry_text = Path("app/shared/file_intelligence/registry.py").read_text()
+
+    assert "class ExtractionResult" in models_text
+    for field in ("success", "text", "mime_type", "filename", "extractor", "page_count", "language", "metadata", "warnings", "error"):
+        assert f"{field}:" in models_text
+    assert "def extract_file(" in extract_text
+    assert "ExtractionResult(" in extract_text
+    assert "def extractor_for(" in registry_text
+
+
 def test_v5_interaction_payload_consumer_boundary_is_render_only() -> None:
     portal_text = Path("app/services/portal_runtime.py").read_text()
     card_text = Path("app/services/feishu/confirmation_card_entrypoint.py").read_text()

@@ -63,7 +63,8 @@ from app.services.feishu.client import FeishuClientMode, route_for_feishu_api
 from app.services.feishu.approval import FeishuApprovalService
 from app.services.feishu import approval_card_responder
 from app.services.feishu import sync_commands
-from app.services import file_text_extraction
+from app.shared.file_intelligence import pdf as file_intelligence_pdf
+from app.shared.file_intelligence import registry as file_intelligence_registry
 from app.services.feishu.approval_cards import approval_card_action_value, approval_card_message_id
 from app.services.feishu.approval_attachments import ApprovalAttachmentReadResult, FeishuApprovalAttachmentService, extract_attachment_text
 from app.services.feishu.bitable import FeishuBitableService
@@ -3809,7 +3810,17 @@ def test_approval_attachment_service_reads_url_attachment() -> None:
 
 
 def test_extract_attachment_text_uses_ocr_for_image(monkeypatch) -> None:
-    monkeypatch.setattr(file_text_extraction, "_extract_image_ocr_text", lambda data: "发票金额 268 元")
+    monkeypatch.setattr(
+        file_intelligence_registry,
+        "extract_image",
+        lambda data, *, filename, mime_type, max_chars: file_intelligence_registry.ExtractionResult(
+            success=True,
+            text="发票金额 268 元",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="image_ocr",
+        ),
+    )
 
     text = extract_attachment_text(b"image-bytes", filename="invoice.png", content_type="image/png")
 
@@ -3817,8 +3828,28 @@ def test_extract_attachment_text_uses_ocr_for_image(monkeypatch) -> None:
 
 
 def test_extract_attachment_text_uses_ocr_when_pdf_has_no_embedded_text(monkeypatch) -> None:
-    monkeypatch.setattr(file_text_extraction, "_extract_pdf_embedded_text", lambda data: "")
-    monkeypatch.setattr(file_text_extraction, "_extract_pdf_ocr_text", lambda data: "扫描合同 OCR 文本")
+    monkeypatch.setattr(
+        file_intelligence_pdf,
+        "extract_pdf_embedded_text",
+        lambda data, *, filename, mime_type, max_chars: file_intelligence_pdf.ExtractionResult(
+            success=False,
+            text="",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_embedded",
+        ),
+    )
+    monkeypatch.setattr(
+        file_intelligence_pdf,
+        "extract_pdf_ocr_text",
+        lambda data, *, filename, mime_type, max_chars: file_intelligence_pdf.ExtractionResult(
+            success=True,
+            text="扫描合同 OCR 文本",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_ocr",
+        ),
+    )
 
     text = extract_attachment_text(b"pdf-bytes", filename="scan.pdf", content_type="application/pdf")
 
