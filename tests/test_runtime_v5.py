@@ -28,7 +28,7 @@ from app.services.runtime_v5.clarification import build_clarification_guide
 from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuIMProvider, FeishuPeopleProvider, FeishuTaskProvider, KnowledgeProvider
 from app.services.runtime_v5.feishu_resource_providers import _apply_people_domain_filters
-from app.services.runtime_v5.feishu_resource_providers import _knowledge_event_item, _memory_item, _workevent_item
+from app.services.runtime_v5.feishu_resource_providers import _knowledge_event_item, _memory_item, _registered_knowledge_resource_candidates, _workevent_item
 from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.composer import compose_answer
@@ -3165,6 +3165,59 @@ def test_runtime_v5_general_knowledge_query_uses_official_documents(monkeypatch)
     assert result.result_type == "knowledge_list"
     assert result.metadata["document_count"] == 1
     assert "正式文档｜报销流程说明" in result.answer
+
+
+def test_registered_knowledge_candidates_read_nested_document_type_and_skip_bitable() -> None:
+    company_id = uuid4()
+    doc_resource = SimpleNamespace(
+        id=uuid4(),
+        company_id=company_id,
+        resource_type="drive_file",
+        resource_name="报销流程说明",
+        resource_id="W6h6dl6dQoCN9zx2M1QcWHXtnOd",
+        enabled=True,
+        updated_at=None,
+        config_json={
+            "settings": {
+                "document_type": "docx",
+                "raw": {"type": "docx"},
+            }
+        },
+    )
+    bitable_resource = SimpleNamespace(
+        id=uuid4(),
+        company_id=company_id,
+        resource_type="drive_file",
+        resource_name="报销流程多维表格",
+        resource_id="PidobYUGmaRT5bs5ExZcHGe6nwf",
+        enabled=True,
+        updated_at=None,
+        config_json={
+            "settings": {
+                "document_type": "bitable",
+                "raw": {"type": "bitable"},
+            }
+        },
+    )
+
+    class Scalars:
+        def all(self):
+            return [doc_resource, bitable_resource]
+
+    class Db:
+        def scalars(self, query):
+            return Scalars()
+
+    candidates = _registered_knowledge_resource_candidates(
+        Db(),
+        company_id=company_id,
+        seed_text="报销流程怎么做",
+        context="general",
+        limit=5,
+    )
+
+    assert [item["title"] for item in candidates] == ["报销流程说明"]
+    assert candidates[0]["document_type"] == "docx"
 
 
 def test_runtime_v5_placeholder_objective_does_not_render_as_intro() -> None:

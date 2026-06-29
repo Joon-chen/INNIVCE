@@ -3651,7 +3651,7 @@ def _registered_knowledge_resource_candidates(
     candidates = []
     for resource in resources:
         config = resource.config_json if isinstance(resource.config_json, dict) else {}
-        document_type = str(config.get("document_type") or _document_type_for_token(resource.resource_id) or "").strip().lower()
+        document_type = _registered_resource_document_type(config, str(resource.resource_id or ""))
         candidate = {
             "title": resource.resource_name or resource.resource_id,
             "document_id": resource.resource_id,
@@ -5295,6 +5295,35 @@ def _document_type_for_token(token: str) -> str:
     if value.startswith(("doxcn", "docxcn")):
         return "docx"
     return "docx"
+
+
+def _registered_resource_document_type(config: dict[str, Any], token: str) -> str:
+    for value in _registered_resource_document_type_candidates(config):
+        normalized = str(value or "").strip().lower()
+        if normalized:
+            return normalized
+    return _document_type_for_known_document_token(token)
+
+
+def _registered_resource_document_type_candidates(config: dict[str, Any]) -> tuple[Any, ...]:
+    settings = config.get("settings") if isinstance(config.get("settings"), dict) else {}
+    raw = settings.get("raw") if isinstance(settings.get("raw"), dict) else {}
+    return (
+        config.get("document_type"),
+        settings.get("document_type"),
+        raw.get("type"),
+        raw.get("docs_type"),
+        raw.get("file_type"),
+    )
+
+
+def _document_type_for_known_document_token(token: str) -> str:
+    value = str(token or "").lower()
+    if value.startswith("doccn"):
+        return "doc"
+    if value.startswith(("doxcn", "docxcn")):
+        return "docx"
+    return ""
 
 
 def _items_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
