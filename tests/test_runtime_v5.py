@@ -28,7 +28,7 @@ from app.services.runtime_v5.clarification import build_clarification_guide
 from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuIMProvider, FeishuPeopleProvider, FeishuTaskProvider, KnowledgeProvider
 from app.services.runtime_v5.feishu_resource_providers import _apply_people_domain_filters
-from app.services.runtime_v5.feishu_resource_providers import _knowledge_event_item, _memory_item, _registered_knowledge_resource_candidates, _workevent_item
+from app.services.runtime_v5.feishu_resource_providers import _knowledge_event_item, _memory_item, _read_knowledge_document_candidate, _registered_knowledge_resource_candidates, _workevent_item
 from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.composer import compose_answer
@@ -3233,6 +3233,41 @@ def test_registered_knowledge_candidates_read_nested_document_type_and_skip_bita
     )
 
     assert unrelated == []
+
+
+def test_read_knowledge_document_candidate_extracts_file_text(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.runtime_v5.feishu_resource_providers.extract_file_text",
+        lambda data, *, filename, content_type=None, max_chars=12000: "固势宣传册 公司介绍 主营业务：工业智能设备。",
+    )
+
+    class FakeService:
+        def __init__(self):
+            self.calls = []
+
+        async def download_file_content(self, *, file_token):
+            self.calls.append(file_token)
+            return b"pdf", "application/pdf"
+
+    service = FakeService()
+    item = _read_knowledge_document_candidate(
+        service,
+        {
+            "title": "固势宣传册26--中文.pdf",
+            "document_id": "file_pdf",
+            "document_type": "file",
+            "source": "registered_resource",
+            "resource_type": "drive_file",
+        },
+        seed_text="公司是做什么的",
+        context="company_profile",
+    )
+
+    assert service.calls == ["file_pdf"]
+    assert item is not None
+    assert item["kind"] == "knowledge_document"
+    assert item["document_type"] == "file"
+    assert "主营业务" in item["summary"]
 
 
 def test_runtime_v5_placeholder_objective_does_not_render_as_intro() -> None:

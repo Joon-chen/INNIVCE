@@ -46,6 +46,22 @@ class FeishuDriveService:
             "body": body,
         }
 
+    async def download_file_content(self, *, file_token: str) -> tuple[bytes, str | None]:
+        quoted = quote(file_token, safe="")
+        paths = (
+            f"/open-apis/drive/v1/medias/{quoted}/download",
+            f"/open-apis/drive/v1/files/{quoted}/download",
+        )
+        last_error: Exception | None = None
+        for path in paths:
+            try:
+                return await self.client.download_binary(path)
+            except Exception as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise RuntimeError("没有可用下载路径")
+
     async def list_wiki_spaces(
         self,
         *,

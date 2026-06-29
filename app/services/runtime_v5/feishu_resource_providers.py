@@ -41,6 +41,7 @@ from app.services.feishu.okr import FeishuOkrService
 from app.services.feishu.task import FeishuTaskService
 from app.services.llm.approval_advisor import generate_approval_llm_advice
 from app.services.organization_foundation import resolve_department_members
+from app.services.file_text_extraction import extract_file_text
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
 from app.services.runtime_v5.domain_query import domain_query_fields, domain_query_payload
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
@@ -3589,9 +3590,10 @@ _BLOCKED_KNOWLEDGE_FACT_TYPES = {"compensation", "finance", "customer_or_order"}
 _BLOCKED_KNOWLEDGE_TERMS = ("薪资", "工资", "奖金", "现金流", "客户订单", "回款", "老板邮箱", "私密")
 _SENSITIVE_KNOWLEDGE_LEVELS = {"sensitive", "confidential", "secret", "private"}
 _KNOWLEDGE_EVENT_TERMS = ("wiki", "doc", "docx", "document", "knowledge", "知识", "制度", "流程", "规范", "模板")
-_COMPANY_PROFILE_DOCUMENT_TERMS = ("公司介绍", "公司简介", "企业介绍", "企业简介", "主营业务", "主要业务", "业务范围", "产品介绍", "客户类型", "官网")
+_COMPANY_PROFILE_DOCUMENT_TERMS = ("公司介绍", "公司简介", "企业介绍", "企业简介", "宣传册", "主营业务", "主要业务", "业务范围", "产品介绍", "客户类型", "官网")
 _GENERAL_KNOWLEDGE_DOCUMENT_TERMS = ("制度", "流程", "规范", "手册", "模板", "SOP", "说明", "指南", "知识", "文档", "资料", "项目")
 _READABLE_DOCUMENT_TYPES = {"doc", "docx", "document"}
+_TEXT_EXTRACTABLE_FILE_TYPES = {"file", "pdf"}
 
 
 def _text_contains_any(text: str, terms: tuple[str, ...]) -> bool:
@@ -3663,7 +3665,7 @@ def _registered_knowledge_resource_candidates(
             "config": config,
         }
         score = _knowledge_document_score(candidate, seed_text=seed_text, context=context)
-        if score > 0 and document_type in _READABLE_DOCUMENT_TYPES:
+        if score > 0 and _is_readable_knowledge_document_type(document_type):
             candidates.append((score, candidate))
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [candidate for _, candidate in candidates[:limit]]
@@ -3695,7 +3697,7 @@ def _drive_knowledge_candidates(
             "raw": raw,
         }
         score = _knowledge_document_score(candidate, seed_text=seed_text, context=context)
-        if score > 0 and document_type in _READABLE_DOCUMENT_TYPES:
+        if score > 0 and _is_readable_knowledge_document_type(document_type):
             candidates.append((score, candidate))
     candidates.sort(key=lambda item: item[0], reverse=True)
     return [candidate for _, candidate in candidates[:limit]]
@@ -3725,22 +3727,17 @@ def _read_knowledge_document_candidate(
 ) -> dict[str, Any] | None:
     document_id = str(candidate.get("document_id") or "").strip()
     document_type = str(candidate.get("document_type") or "").strip().lower()
-    if not document_id or document_type not in _READABLE_DOCUMENT_TYPES:
+    if not document_id or not _is_readable_knowledge_document_type(document_type):
         return None
-    try:
-        payload = _run_async(service.get_document_content(document_id=document_id, document_type=document_type))
-    except Exception:
-        return None
-    if not payload.get("available"):
-        return None
-    content = str(payload.get("content_text") or "").strip()
+    title = str(candidate.get("title") or document_id)
+    content = _read_knowledge_document_text(service, document_id=document_id, document_type=document_type, title=title)
     if not content:
         return None
     if context == "company_profile" and not _document_content_matches_company_profile(content, title=str(candidate.get("title") or "")):
         return None
     return {
         "kind": "knowledge_document",
-        "title": str(candidate.get("title") or document_id),
+        "title": title,
         "summary": _short_text(content, 260),
         "source": str(candidate.get("source") or "drive"),
         "resource_type": str(candidate.get("resource_type") or "drive_file"),
@@ -3749,6 +3746,29 @@ def _read_knowledge_document_candidate(
         "content_preview": _short_text(content, 1200),
         "evidence_type": "document_content",
     }
+
+
+def _is_readable_knowledge_document_type(document_type: str) -> bool:
+    return document_type in _READABLE_DOCUMENT_TYPES or document_type in _TEXT_EXTRACTABLE_FILE_TYPES
+
+
+def _read_knowledge_document_text(
+    service: FeishuDriveService,
+    *,
+    document_id: str,
+    document_type: str,
+    title: str,
+) -> str:
+    try:
+        if document_type in _READABLE_DOCUMENT_TYPES:
+            payload = _run_async(service.get_document_content(document_id=document_id, document_type=document_type))
+            if not payload.get("available"):
+                return ""
+            return str(payload.get("content_text") or "").strip()
+        data, content_type = _run_async(service.download_file_content(file_token=document_id))
+        return extract_file_text(data, filename=title, content_type=content_type, max_chars=12000).strip()
+    except Exception:
+        return ""
 
 
 def _document_content_matches_company_profile(content: str, *, title: str) -> bool:

@@ -61,9 +61,9 @@ from app.core.serialization import json_safe
 from app.services.feishu.client import FeishuClient, _extract_message_text
 from app.services.feishu.client import FeishuClientMode, route_for_feishu_api
 from app.services.feishu.approval import FeishuApprovalService
-from app.services.feishu import approval_attachments as approval_attachment_module
 from app.services.feishu import approval_card_responder
 from app.services.feishu import sync_commands
+from app.services import file_text_extraction
 from app.services.feishu.approval_cards import approval_card_action_value, approval_card_message_id
 from app.services.feishu.approval_attachments import ApprovalAttachmentReadResult, FeishuApprovalAttachmentService, extract_attachment_text
 from app.services.feishu.bitable import FeishuBitableService
@@ -1427,6 +1427,30 @@ def test_feishu_drive_service_gets_docx_content() -> None:
 
     assert calls["path"] == "/open-apis/docx/v1/documents/doccn_x/raw_content"
     assert result["content_text"] == "会议纪要正文"
+
+
+def test_feishu_drive_service_downloads_file_content_with_fallback() -> None:
+    calls = []
+
+    class FakeClient:
+        async def download_binary(self, path, params=None):
+            calls.append(path)
+            if path.startswith("/open-apis/drive/v1/medias/"):
+                raise RuntimeError("media download unavailable")
+            return b"PDF bytes", "application/pdf"
+
+    data, content_type = __import__("asyncio").run(
+        FeishuDriveService(SimpleNamespace(company_id=uuid4()), client=FakeClient()).download_file_content(
+            file_token="file_x",
+        )
+    )
+
+    assert calls == [
+        "/open-apis/drive/v1/medias/file_x/download",
+        "/open-apis/drive/v1/files/file_x/download",
+    ]
+    assert data == b"PDF bytes"
+    assert content_type == "application/pdf"
 
 
 def test_sync_feishu_document_content_marks_hot_knowledge_metadata(monkeypatch) -> None:
@@ -3785,7 +3809,7 @@ def test_approval_attachment_service_reads_url_attachment() -> None:
 
 
 def test_extract_attachment_text_uses_ocr_for_image(monkeypatch) -> None:
-    monkeypatch.setattr(approval_attachment_module, "_extract_image_ocr_text", lambda data: "发票金额 268 元")
+    monkeypatch.setattr(file_text_extraction, "_extract_image_ocr_text", lambda data: "发票金额 268 元")
 
     text = extract_attachment_text(b"image-bytes", filename="invoice.png", content_type="image/png")
 
@@ -3793,8 +3817,8 @@ def test_extract_attachment_text_uses_ocr_for_image(monkeypatch) -> None:
 
 
 def test_extract_attachment_text_uses_ocr_when_pdf_has_no_embedded_text(monkeypatch) -> None:
-    monkeypatch.setattr(approval_attachment_module, "_extract_pdf_embedded_text", lambda data: "")
-    monkeypatch.setattr(approval_attachment_module, "_extract_pdf_ocr_text", lambda data: "扫描合同 OCR 文本")
+    monkeypatch.setattr(file_text_extraction, "_extract_pdf_embedded_text", lambda data: "")
+    monkeypatch.setattr(file_text_extraction, "_extract_pdf_ocr_text", lambda data: "扫描合同 OCR 文本")
 
     text = extract_attachment_text(b"pdf-bytes", filename="scan.pdf", content_type="application/pdf")
 
