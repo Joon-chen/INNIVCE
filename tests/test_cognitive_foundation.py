@@ -30,6 +30,7 @@ from app.services.cognitive_foundation_v1 import (
     company_profile_snapshot_answer,
     company_profile_snapshot_item,
     default_extractor_registry,
+    _natural_understanding_text,
 )
 from app.services.runtime_v5 import feishu_resource_providers
 from app.services.runtime_v5.feishu_resource_providers import (
@@ -567,6 +568,30 @@ def test_cognitive_v12_company_profile_consumes_generic_evidence_pack() -> None:
     assert snapshot.payload["derived_from"]["coverage"]["target_customers"] == "inferred"
     assert "客户判断属于基于场景的推断" in item["understanding"]
     assert "没有明确客户名单" in company_profile_snapshot_answer(item, query="客户有哪些")
+
+
+def test_cognitive_v12_llm_structured_understanding_is_naturalized() -> None:
+    understanding = _natural_understanding_text(
+        {
+            "company_positioning": "固势是一家面向测试测量和实验场景的技术公司。",
+            "product_capability_system": {
+                "products": ["GAUSTEK SRI 全系列产品", "测试测量产品系列"],
+                "capabilities": ["测试测量产品研发与交付"],
+                "value_proposition": "让测试更简单，让实验更高效。",
+            },
+            "application_scenarios": ["实验室/研发测试场景", "工业场景"],
+            "customer_type_inference_basis": "客户类型基于应用场景推断，资料中未提供明确客户名单。",
+            "information_gaps": ["缺少经营规模信息", "缺少客户案例"],
+            "confidence_boundaries": {
+                "high_confidence": ["产品品牌存在"],
+                "low_confidence_or_inferred": ["目标客户行业分布"],
+            },
+        }
+    )
+
+    assert "产品体系包括：GAUSTEK SRI 全系列产品、测试测量产品系列。" in understanding
+    assert "当前资料缺口：缺少经营规模信息；缺少客户案例。" in understanding
+    assert "{'company_positioning'" not in understanding
 
 
 def test_cognitive_v1_extractor_registry_is_by_cognitive_object() -> None:

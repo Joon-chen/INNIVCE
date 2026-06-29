@@ -458,10 +458,50 @@ def _company_understanding_with_optional_llm(
     except Exception:
         return fallback
     data = _json_object(raw or "")
-    understanding = str((data or {}).get("understanding") or "").strip()
+    understanding = _natural_understanding_text((data or {}).get("understanding"))
     if not understanding:
         return fallback
     return understanding[:1800]
+
+
+def _natural_understanding_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    lines: list[str] = []
+    positioning = str(value.get("company_positioning") or value.get("positioning") or "").strip()
+    if positioning:
+        lines.append(positioning)
+    product_system = value.get("product_capability_system")
+    if isinstance(product_system, dict):
+        products = _string_list(product_system.get("products"))
+        capabilities = _string_list(product_system.get("capabilities"))
+        value_proposition = str(product_system.get("value_proposition") or "").strip()
+        if products:
+            lines.append("产品体系包括：" + "、".join(products[:5]) + "。")
+        if capabilities:
+            lines.append("能力侧主要覆盖：" + "、".join(capabilities[:5]) + "。")
+        if value_proposition:
+            lines.append("价值主张：" + value_proposition)
+    scenarios = _string_list(value.get("application_scenarios"))
+    if scenarios:
+        lines.append("应用场景包括：" + "、".join(scenarios[:5]) + "。")
+    inference_basis = str(value.get("customer_type_inference_basis") or "").strip()
+    if inference_basis:
+        lines.append(inference_basis)
+    gaps = _string_list(value.get("information_gaps"))
+    if gaps:
+        lines.append("当前资料缺口：" + "；".join(gaps[:4]) + "。")
+    boundaries = value.get("confidence_boundaries")
+    if isinstance(boundaries, dict):
+        high_confidence = _string_list(boundaries.get("high_confidence"))
+        low_confidence = _string_list(boundaries.get("low_confidence_or_inferred"))
+        if high_confidence:
+            lines.append("高置信信息：" + "、".join(high_confidence[:4]) + "。")
+        if low_confidence:
+            lines.append("低置信或推断信息：" + "、".join(low_confidence[:4]) + "。")
+    return "\n".join(_dedupe(lines)).strip()
 
 
 def _company_snapshot_builder_prompt(
