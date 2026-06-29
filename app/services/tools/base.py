@@ -12,6 +12,7 @@ class ToolProvider(StrEnum):
     LOCAL = "local"
     FEISHU_API = "feishu_api"
     FEISHU_MCP = "feishu_mcp"
+    FEISHU_MOBILE = "feishu_mcp"
     REPORT = "report"
     DEVOPS = "devops"
 

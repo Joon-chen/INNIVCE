@@ -311,7 +311,19 @@ def test_calendar_query_uses_user_token_when_self_calendar_is_not_tenant_readabl
             calls.append(kwargs)
             if "user_access_token" not in kwargs:
                 raise AssertionError("self calendar query must not use tenant primary-calendar semantics")
-            return {"code": 0, "data": {"items": [{"event_id": "event-1", "summary": "会议"}]}}
+            return {
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "event_id": "event-1",
+                            "summary": "会议",
+                            "start_time": {"timestamp": "1782205200", "timezone": "Asia/Shanghai"},
+                            "end_time": {"timestamp": "1782208800", "timezone": "Asia/Shanghai"},
+                        }
+                    ]
+                },
+            }
 
     monkeypatch.setattr(feishu_resource_providers, "resolve_feishu_user_access_token", fake_resolve_user_token)
     monkeypatch.setattr(feishu_resource_providers, "FeishuCalendarService", FakeCalendarService)
@@ -327,6 +339,8 @@ def test_calendar_query_uses_user_token_when_self_calendar_is_not_tenant_readabl
     assert result.status == "success"
     assert result.result_type == "calendar_event_list"
     assert result.items[0]["title"] == "会议"
+    assert "2026-06-23 17:00 - 18:00" in result.answer
+    assert "timestamp" not in result.answer
     assert result.metadata["credential_mode"] == "USER_TOKEN"
     assert result.metadata["actor_identity"] == "USER"
     assert result.metadata["provider_boundary"] == "user_token_fallback_used"

@@ -15,12 +15,9 @@ from app.services.runtime_v5.clarification_reply import resolve_clarification_re
 from app.services.runtime_v5.composer import compose_answer
 from app.services.runtime_v5.command_layer import build_command_plan
 from app.services.runtime_v5.context import clear_result_context, save_result_context, save_session_context
-from app.services.runtime_v5.intent import recognize_intent
 from app.services.runtime_v5.intent_layers import should_start_new_question_over_result_context
-from app.services.runtime_v5.models import AnswerEnvelope, ComposedAnswer, ExecutionResult, PermissionDecision, ProviderResult, ResultContext, RuntimeContext
+from app.services.runtime_v5.models import AnswerEnvelope, CommandFrame, CommandPlan, ComposedAnswer, ExecutionResult, IntentResult, PermissionDecision, PlannerResult, ProviderRequest, ProviderResult, ResultContext, RuntimeContext
 from app.services.runtime_v5.policy_layer import evaluate_policy
-from app.services.runtime_v5.permission import check_runtime_permission
-from app.services.runtime_v5.planner import plan_task
 from app.services.runtime_v5.provider_snapshot import build_runtime_provider_snapshot
 from app.services.runtime_v5.result_followup import detect_result_followup
 from app.services.runtime_v5.runtime_action_input import (
@@ -59,6 +56,7 @@ from app.services.runtime_v5.runtime_state import (
 
 
 _PENDING_ACTION_KEY = "runtime_v5_pending_action"
+_CONFIRMED_PENDING_ACTION_KEY = "runtime_v5_confirmed_pending_action"
 _WAITING_INPUT_STARTED_KEY = "runtime_v5_waiting_input_started"
 _PENDING_ACTION_TTL_SECONDS = 900
 _CONFIRM_TERMS = ("确认", "确认执行", "可以执行", "继续执行", "执行吧", "同意", "是", "对", "可以", "好的", "好")
@@ -176,11 +174,19 @@ def run_runtime_v5(
             composed=composed,
         )
     context = _context_from_action_request(context)
+    context = _context_without_stale_waiting_result(context)
     waiting_input_action = waiting_input_action_from_runtime_state(context.session_context)
+    if waiting_input_action is not None and _should_interrupt_waiting_input(context=context, pending_action=waiting_input_action):
+        mark_runtime_action_stale(chat_id=context.chat_id, session_context=context.session_context)
+        session_context = _session_without_runtime_action(context.session_context)
+        if context.chat_id:
+            clear_result_context(context.chat_id)
+        context = replace(context, session_context=session_context, result_context=None)
+        waiting_input_action = None
     if waiting_input_action is not None:
         if _is_cancel_message(context.current_message):
             state = mark_runtime_action_cancelled(chat_id=context.chat_id, session_context=context.session_context)
-            command_plan, intent, plan, permission = _build_command_and_policy(
+            _command_plan, intent, plan, permission = _build_command_and_policy(
                 context=context,
                 runtime_provider_snapshot=runtime_provider_snapshot,
                 timer=timer,
@@ -274,6 +280,46 @@ def run_runtime_v5(
                 composed=composed,
             )
         filled_action = pending_action_with_user_input(waiting_input_action, context.current_message)
+        remaining_missing = [str(item) for item in filled_action.get("missing_params", []) if str(item)]
+        if remaining_missing:
+            state = save_waiting_input_state(
+                chat_id=context.chat_id,
+                session_context=context.session_context,
+                pending_action=filled_action,
+                ttl_seconds=_PENDING_ACTION_TTL_SECONDS,
+            )
+            command_plan, intent, plan, permission = _build_command_and_policy(
+                context=context,
+                runtime_provider_snapshot=runtime_provider_snapshot,
+                timer=timer,
+            )
+            result_context = _waiting_input_result_context(pending_action=filled_action, state=state)
+            _save_runtime_result_context(context, result_context)
+            composed = ComposedAnswer(
+                answer=result_context.answer,
+                result_context=result_context,
+                metadata={
+                    "waiting_input": True,
+                    "strategy": plan.strategy,
+                    "sources": list(plan.sources),
+                    "context_kind": "waiting_input",
+                },
+            )
+            composed = _with_pipeline_timing(composed, timer)
+            composed = _with_runtime_result_metadata(
+                command_plan=command_plan,
+                permission=permission,
+                execution=None,
+                composed=composed,
+            )
+            return AnswerEnvelope(
+                context=context,
+                intent=intent,
+                plan=plan,
+                permission=permission,
+                execution=None,
+                composed=composed,
+            )
         state = mark_runtime_action_waiting_confirmation(
             chat_id=context.chat_id,
             session_context=context.session_context,
@@ -382,12 +428,11 @@ def run_runtime_v5(
     if pending_action and _is_confirmation_message(context.current_message):
         if _pending_action_expired(pending_action):
             state = mark_runtime_action_stale(chat_id=context.chat_id, session_context=context.session_context)
-            intent = recognize_intent(context.current_message, context)
-            timer.mark("intent_recognition")
-            plan = plan_task(intent, runtime_provider_snapshot=runtime_provider_snapshot)
-            timer.mark("task_planner")
-            permission = check_runtime_permission(context=context, intent=intent, plan=plan)
-            timer.mark("permission_check")
+            command_plan, intent, plan, permission = _build_command_and_policy(
+                context=context,
+                runtime_provider_snapshot=runtime_provider_snapshot,
+                timer=timer,
+            )
             answer = "这条待确认操作已经过期，我没有继续执行。请重新发起需要执行的任务。"
             receipt_context = _pending_action_receipt_context(
                 pending_action=pending_action,
@@ -463,6 +508,7 @@ def run_runtime_v5(
             state = mark_runtime_action_confirmed(chat_id=context.chat_id, session_context=context.session_context)
             session_context = _session_without_pending_action(context.session_context)
             session_context["runtime_v5_confirmed_action_entities"] = pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {}
+            session_context[_CONFIRMED_PENDING_ACTION_KEY] = pending_action
             if state is not None:
                 session_context["runtime_v5_state"] = runtime_state_payload(state)
             context = replace(
@@ -487,7 +533,7 @@ def run_runtime_v5(
             },
         )
 
-    followup = _legacy_result_followup(context)
+    followup = _legacy_result_followup(context, runtime_provider_snapshot=runtime_provider_snapshot)
     timer.mark("legacy_result_followup")
     if followup.is_result_followup:
         command_plan, intent, plan, permission = _build_command_and_policy(
@@ -513,19 +559,21 @@ def run_runtime_v5(
             composed=composed,
         )
 
-    command_plan = build_command_plan(
+    command_plan, intent, plan, permission = _build_command_and_policy(
         context=context,
         runtime_provider_snapshot=runtime_provider_snapshot,
+        timer=timer,
     )
     _record_command_route_observation(context=context, command_plan=command_plan)
-    intent = command_plan.intent_result
-    timer.mark("intent_recognition")
+    command_plan, intent, permission = _hydrate_action_targets_from_foundation(
+        context=context,
+        command_plan=command_plan,
+        providers=providers or {},
+    )
     plan = command_plan.planner_result
-    timer.mark("task_planner")
-    permission = evaluate_policy(context=context, command_plan=command_plan)
-    timer.mark("permission_check")
 
     if _should_wait_for_action_input(context=context, intent=intent, permission=permission):
+        missing_params = _action_input_missing_params(intent)
         pending_action_id, state = _save_missing_action_input(context=context, intent=intent, plan=plan, permission=permission)
         pending_action = _pending_action({**context.session_context, "runtime_v5_state": runtime_state_payload(state)})
         if pending_action is None:
@@ -534,7 +582,7 @@ def run_runtime_v5(
                 "intent": intent.intent,
                 "strategy": plan.strategy,
                 "message": context.current_message,
-                "missing_params": list(intent.missing_params),
+                "missing_params": missing_params,
                 "sources": list(plan.sources),
             }
         result_context = _waiting_input_result_context(pending_action=pending_action, state=state)
@@ -619,7 +667,12 @@ def run_runtime_v5(
             state = mark_runtime_action_executing(chat_id=context.chat_id, session_context=context.session_context)
             if state is not None:
                 runtime_state = state
-                context = replace(context, session_context={**context.session_context, "runtime_v5_state": runtime_state_payload(state)})
+                context = replace(
+                    context,
+                    session_context=_session_without_confirmed_pending_action(
+                        {**context.session_context, "runtime_v5_state": runtime_state_payload(state)}
+                    ),
+                )
         runtime_task, execution = execute_runtime_task(
             context=context,
             command_plan=command_plan,
@@ -784,10 +837,20 @@ def _build_command_and_policy(
     runtime_provider_snapshot: dict[str, Any] | None,
     timer: "_RuntimeTimer",
 ):
-    command_plan = build_command_plan(
-        context=context,
-        runtime_provider_snapshot=runtime_provider_snapshot,
+    confirmed_pending_action = context.session_context.get(_CONFIRMED_PENDING_ACTION_KEY)
+    if not isinstance(confirmed_pending_action, dict):
+        confirmed_pending_action = None
+    pending_action = _pending_action(context.session_context)
+    command_plan = (
+        _command_plan_from_pending_action(context=context, pending_action=confirmed_pending_action or pending_action)
+        if pending_action is not None and _should_use_pending_action_for_command(context)
+        or confirmed_pending_action is not None
+        else build_command_plan(
+            context=context,
+            runtime_provider_snapshot=runtime_provider_snapshot,
+        )
     )
+    command_plan = _command_plan_with_confirmed_action_entities(context=context, command_plan=command_plan)
     intent = command_plan.intent_result
     timer.mark("intent_recognition")
     plan = command_plan.planner_result
@@ -795,6 +858,177 @@ def _build_command_and_policy(
     permission = evaluate_policy(context=context, command_plan=command_plan)
     timer.mark("permission_check")
     return command_plan, intent, plan, permission
+
+
+def _should_use_pending_action_for_command(context: RuntimeContext) -> bool:
+    if _is_confirmation_message(context.current_message):
+        return True
+    return isinstance(context.session_context.get("runtime_v5_last_action_input"), dict)
+
+
+def _command_plan_from_pending_action(*, context: RuntimeContext, pending_action: dict[str, Any]) -> CommandPlan:
+    intent_name = str(pending_action.get("intent") or pending_action.get("strategy") or "runtime_action").strip()
+    strategy = str(pending_action.get("strategy") or intent_name).strip()
+    sources = tuple(str(source) for source in pending_action.get("sources", []) if str(source))
+    entities = dict(pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {})
+    if strategy.startswith("approval_") and "item" not in entities:
+        item = {key: entities.get(key) for key in ("approval_code", "instance_code", "task_id") if entities.get(key)}
+        if item:
+            entities["item"] = item
+    data_scope = str(pending_action.get("data_scope") or "self")
+    intent = IntentResult(
+        question_type="action",
+        intent=intent_name,
+        data_scope=data_scope,  # type: ignore[arg-type]
+        entities={
+            **entities,
+            "runtime_pending_action": True,
+            "pending_action_id": str(pending_action.get("id") or pending_action.get("action_id") or ""),
+            "command_frame": {
+                "intent": intent_name,
+                "question_type": "action",
+                "scope": data_scope,
+                "route_path": "runtime_pending_action",
+            },
+        },
+        missing_params=tuple(str(item) for item in pending_action.get("missing_params", []) if str(item)),
+        confidence=1.0,
+        canonical_question=str(pending_action.get("message") or context.current_message or ""),
+    )
+    planner = PlannerResult(strategy=strategy, sources=sources)
+    frame = CommandFrame(
+        utterance_type="runtime_action",
+        dialogue_mode="execute",
+        user_goal=intent.canonical_question,
+        intent=intent_name,
+        question_type="action",
+        domain="Runtime",
+        context_mode="runtime_pending_action",
+        skill_intent=intent_name,
+        scope=data_scope,
+        action_type="write",
+        safety_level="high",
+        target=dict(entities),
+        gates={
+            "utterance": {"type": "runtime_action"},
+            "domain": {"domain": "Runtime", "reason": "runtime_pending_action", "source": "runtime_state", "confidence": 1.0},
+            "scope": {"scope": data_scope, "requested_scope": data_scope, "resolved_scope": data_scope, "reason": "runtime_action_scope", "resource_boundary": "runtime_action", "target": {"type": data_scope}},
+            "action": {"type": "write", "operation_kind": "write", "confirmation_hint": "runtime_state"},
+            "safety": {"level": "high", "confirmation_expected": True, "blocks_execution": False, "risk_reasons": ["runtime_pending_action"]},
+            "route": {"path": "runtime_pending_action", "foundation_route": ""},
+        },
+        confidence=1.0,
+        route_reason="runtime_pending_action",
+        route_path="runtime_pending_action",
+    )
+    return CommandPlan(
+        intent=intent_name,
+        steps=(),
+        target_ui="card",
+        tool_candidates=(),
+        context_scope={
+            "scope_type": context.runtime_scope.scope_type,
+            "company_id": str(context.runtime_scope.active_company_id or ""),
+            "company_ids": [str(company_id) for company_id in context.runtime_scope.company_ids],
+            "data_scope": data_scope,
+        },
+        intent_result=intent,
+        planner_result=planner,
+        command_frame=frame,
+    )
+
+
+def _hydrate_action_targets_from_foundation(
+    *,
+    context: RuntimeContext,
+    command_plan,
+    providers: dict[str, ResourceProvider],
+) -> tuple[Any, Any, Any]:
+    intent = command_plan.intent_result
+    entities = intent.entities if isinstance(intent.entities, dict) else {}
+    if intent.intent != "message_send" or entities.get("target_type") != "people_context":
+        permission = evaluate_policy(context=context, command_plan=command_plan)
+        return command_plan, intent, permission
+    if entities.get("people_targets"):
+        permission = evaluate_policy(context=context, command_plan=command_plan)
+        return command_plan, intent, permission
+    organization_unit = str(entities.get("organization_unit") or entities.get("target") or "").strip()
+    if not organization_unit:
+        permission = evaluate_policy(context=context, command_plan=command_plan)
+        return command_plan, intent, permission
+    people_provider = providers.get("people")
+    if people_provider is None:
+        permission = evaluate_policy(context=context, command_plan=command_plan)
+        return command_plan, intent, permission
+
+    read_intent = replace(
+        intent,
+        intent="department_members",
+        question_type="query",
+        entities={**entities, "keyword": organization_unit},
+        missing_params=(),
+    )
+    read_plan = replace(command_plan.planner_result, strategy="department_members", sources=("people",))
+    result = people_provider.execute(
+        ProviderRequest(
+            source="people",
+            operation="list_department_members",
+            intent=read_intent,
+            planner=read_plan,
+            context=context,
+            execution_identity="bot",
+            params={"keyword": organization_unit},
+        )
+    )
+    targets = [_people_target_from_foundation_item(item) for item in result.items]
+    targets = [item for item in targets if item.get("open_id") or item.get("name")]
+    if not targets:
+        permission = evaluate_policy(context=context, command_plan=command_plan)
+        return command_plan, intent, permission
+
+    hydrated_entities = dict(entities)
+    hydrated_entities["organization_target_hydrated"] = True
+    hydrated_entities["organization_target_hydration_source"] = "people.list_department_members"
+    hydrated_entities["people_targets"] = targets
+    hydrated_entities["people_target_count"] = str(len(targets))
+    if len(targets) == 1:
+        target = targets[0]
+        hydrated_entities["target_type"] = "person"
+        hydrated_entities["target"] = str(target.get("name") or organization_unit)
+        if target.get("open_id"):
+            hydrated_entities["target_open_id"] = str(target.get("open_id") or "")
+        hydrated_entities["target_name"] = str(target.get("name") or "")
+        missing_params = tuple(param for param in intent.missing_params if param not in {"delivery_mode", "people_targets"})
+    else:
+        missing_params = tuple(param for param in intent.missing_params if param != "people_targets")
+    hydrated_intent = replace(intent, entities=hydrated_entities, missing_params=missing_params)
+    hydrated_plan = replace(command_plan, intent_result=hydrated_intent)
+    permission = evaluate_policy(context=context, command_plan=hydrated_plan)
+    return hydrated_plan, hydrated_intent, permission
+
+
+def _command_plan_with_confirmed_action_entities(*, context: RuntimeContext, command_plan):
+    confirmed_entities = context.session_context.get("runtime_v5_confirmed_action_entities")
+    if not isinstance(confirmed_entities, dict) or not confirmed_entities:
+        return command_plan
+    intent = command_plan.intent_result
+    if intent.question_type != "action":
+        return command_plan
+    if str(confirmed_entities.get("intent") or intent.intent) != "message_send" and intent.intent != "message_send":
+        return command_plan
+    frozen_intent = replace(intent, entities=dict(confirmed_entities), missing_params=())
+    return replace(command_plan, intent_result=frozen_intent)
+
+
+def _people_target_from_foundation_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(item.get("name") or "").strip(),
+        "open_id": str(item.get("open_id") or item.get("user_id") or "").strip(),
+        "email": str(item.get("email") or "").strip(),
+        "mobile": str(item.get("mobile") or item.get("phone") or "").strip(),
+        "title": str(item.get("title") or item.get("job_title") or "").strip(),
+        "department": str(item.get("department") or item.get("department_name") or "").strip(),
+    }
 
 
 def _conversation_first_should_own_followup(context: RuntimeContext) -> bool:
@@ -805,7 +1039,11 @@ def _conversation_first_should_own_followup(context: RuntimeContext) -> bool:
     return result_type in {"people_search", "department_members", "organization_snapshot", "company_profile_knowledge", "knowledge_search", "docs_read"}
 
 
-def _legacy_result_followup(context: RuntimeContext):
+def _legacy_result_followup(
+    context: RuntimeContext,
+    *,
+    runtime_provider_snapshot: dict[str, Any] | None = None,
+):
     from app.services.runtime_v5.models import ResultFollowup
 
     if context.result_context is None:
@@ -819,7 +1057,39 @@ def _legacy_result_followup(context: RuntimeContext):
         or _looks_like_approval_detail_action(context.current_message, context.result_context)
     ):
         return replace(followup, is_result_followup=False)
+    if _conversation_first_claims_current_message(
+        context,
+        followup=followup,
+        runtime_provider_snapshot=runtime_provider_snapshot,
+    ):
+        return replace(followup, is_result_followup=False)
     return followup
+
+
+def _conversation_first_claims_current_message(
+    context: RuntimeContext,
+    *,
+    followup,
+    runtime_provider_snapshot: dict[str, Any] | None = None,
+) -> bool:
+    if getattr(followup, "followup_type", "") == "receipt_detail":
+        return False
+    followup_type = str(getattr(followup, "followup_type", "") or "")
+    entity_ref = getattr(followup, "entity_ref", {}) if isinstance(getattr(followup, "entity_ref", {}), dict) else {}
+    if followup_type == "position" or (followup_type == "detail" and "index" in entity_ref):
+        return False
+    command_plan = build_command_plan(
+        context=context,
+        runtime_provider_snapshot=runtime_provider_snapshot,
+    )
+    frame = getattr(command_plan, "command_frame", None)
+    context_mode = str(getattr(frame, "context_mode", "") or "")
+    if command_plan.intent_result.question_type == "action":
+        return True
+    if context_mode == "new_question":
+        return True
+    entities = command_plan.intent_result.entities if isinstance(command_plan.intent_result.entities, dict) else {}
+    return bool(entities.get("foundation_route"))
 
 
 def _record_command_route_observation(*, context: RuntimeContext, command_plan) -> None:
@@ -857,7 +1127,18 @@ def _command_route_observation(command_plan) -> dict[str, Any]:
     observation = rule_candidate.get("route_observation")
     if isinstance(observation, dict):
         return observation
-    return {}
+    route_path = str(getattr(frame, "route_path", "") or "")
+    if not route_path:
+        return {}
+    return {
+        "interaction_kind": "conversation_feedback" if getattr(frame, "intent", "") == "smalltalk" else str(getattr(frame, "utterance_type", "") or "business_query"),
+        "misroute_risk": False,
+        "denoise_action": "none",
+        "risk_reasons": [],
+        "intent": str(getattr(frame, "intent", "") or ""),
+        "domain": str(getattr(frame, "domain", "") or ""),
+        "route_path": route_path,
+    }
 
 
 class _RuntimeTimer:
@@ -993,14 +1274,46 @@ def _should_request_confirmation(
 
 
 def _should_wait_for_action_input(*, context: RuntimeContext, intent, permission) -> bool:
+    missing_params = _action_input_missing_params(intent)
     return bool(
         context.chat_id
         and intent.question_type == "action"
-        and intent.needs_clarification
-        and intent.missing_params
+        and (
+            intent.needs_clarification
+            or _people_context_delivery_mode_unavailable(intent)
+            or _people_context_targets_missing(intent)
+        )
+        and missing_params
         and permission.allowed
-        and any(param in {"text", "target_type", "delivery_mode"} for param in intent.missing_params)
+        and any(param in {"text", "target_type", "delivery_mode", "people_targets"} for param in missing_params)
     )
+
+
+def _action_input_missing_params(intent) -> list[str]:
+    missing_params = [str(item) for item in getattr(intent, "missing_params", ()) if str(item)]
+    if _people_context_delivery_mode_unavailable(intent) and "delivery_mode" not in missing_params:
+        missing_params.append("delivery_mode")
+    if _people_context_targets_missing(intent) and "people_targets" not in missing_params:
+        missing_params.append("people_targets")
+    return missing_params
+
+
+def _people_context_targets_missing(intent) -> bool:
+    entities = getattr(intent, "entities", {}) if isinstance(getattr(intent, "entities", {}), dict) else {}
+    if getattr(intent, "intent", "") != "message_send":
+        return False
+    if entities.get("target_type") != "people_context":
+        return False
+    return not isinstance(entities.get("people_targets"), list) or not entities.get("people_targets")
+
+
+def _people_context_delivery_mode_unavailable(intent) -> bool:
+    entities = getattr(intent, "entities", {}) if isinstance(getattr(intent, "entities", {}), dict) else {}
+    if getattr(intent, "intent", "") != "message_send":
+        return False
+    if entities.get("target_type") != "people_context":
+        return False
+    return _normalized_delivery_mode(entities.get("delivery_mode")) in {"bot_multi_notify", "user_multi_private"}
 
 
 def _looks_like_new_question(message: str, result_context=None, followup=None) -> bool:
@@ -1086,7 +1399,7 @@ def _context_from_action_request(context: RuntimeContext) -> RuntimeContext:
         session_context["runtime_v5_state"] = runtime_state_payload(state)
         return replace(context, current_message="取消", session_context=session_context)
     if action_input.confirmation.confirmed:
-        pending_action = _pending_action_from_action_input(action_input, message=message)
+        pending_action = _pending_action(context.session_context) or _pending_action_from_action_input(action_input, message=message)
         session_context[_PENDING_ACTION_KEY] = pending_action
         session_context["runtime_v5_confirmed_action_entities"] = pending_action.get("entities") if isinstance(pending_action.get("entities"), dict) else {}
         state = save_waiting_confirmation_state(
@@ -1115,6 +1428,18 @@ def _context_from_action_request(context: RuntimeContext) -> RuntimeContext:
     )
     session_context["runtime_v5_state"] = runtime_state_payload(state)
     return replace(context, current_message=message, session_context=session_context)
+
+
+def _context_without_stale_waiting_result(context: RuntimeContext) -> RuntimeContext:
+    result_context = context.result_context
+    if result_context is None or result_context.result_type != "runtime_waiting_input":
+        return context
+    if not _looks_like_new_question_or_smalltalk(context.current_message):
+        return context
+    session_context = _session_without_runtime_action(context.session_context)
+    if context.chat_id:
+        clear_result_context(context.chat_id)
+    return replace(context, session_context=session_context, result_context=None)
 
 
 def _pending_action_from_action_input(action_input, *, message: str) -> dict[str, Any]:
@@ -1499,13 +1824,75 @@ def _waiting_input_prompt(missing_params: list[str]) -> str:
         return "要发送什么内容？你可以直接回复消息正文。"
     if "target_type" in missing_params or "target" in missing_params:
         return "要发给谁？你可以直接回复人名、群名，或说「发到当前会话」。"
+    if "people_targets" in missing_params:
+        return "我还没有拿到这批人的具体名单，不能只用“上一轮人员结果”占位去发送。请先查询这个组织有哪些人，或明确要发送的人员。"
     if "delivery_mode" in missing_params:
-        return "你想怎么发给这些人？可以说「用机器人通知这些人」「替我分别发给这些人」，或「拉群后发到群里」。"
+        return "当前多人目标只开放「拉群后发到群里」。机器人批量通知和分别私信执行器还没开放，我不会生成一张注定失败的确认卡。"
     if "comment" in missing_params:
         return "请补充拒绝原因。你可以直接回复：原因：资料不完整。"
     if "target_user" in missing_params:
         return "请补充处理人。你可以直接回复：转交给张三。"
     return "请补充必要信息后继续。"
+
+
+def _should_interrupt_waiting_input(*, context: RuntimeContext, pending_action: dict[str, Any]) -> bool:
+    message = str(context.current_message or "").strip()
+    if not message or _is_cancel_message(message):
+        return False
+    if _is_confirmation_message(message):
+        return False
+    missing = {str(item) for item in pending_action.get("missing_params", []) if str(item)}
+    if not missing:
+        return False
+    if "delivery_mode" in missing:
+        mode = _normalized_delivery_mode(message)
+        if mode in {"bot_multi_notify", "user_multi_private"}:
+            return False
+        return mode != "create_group_then_send"
+    if "people_targets" in missing:
+        return _looks_like_new_question_or_smalltalk(message)
+    if "target_type" in missing or "target" in missing:
+        return _looks_like_new_question_or_smalltalk(message)
+    if "text" in missing:
+        return _looks_like_new_question_or_smalltalk(message)
+    return False
+
+
+def _looks_like_new_question_or_smalltalk(message: str) -> bool:
+    compact = "".join(str(message or "").split())
+    if compact in {"你好", "您好", "在吗", "你在吗", "谢谢", "多谢"}:
+        return True
+    if compact.endswith(("吗", "呢", "？", "?")):
+        return True
+    return any(
+        token in compact
+        for token in (
+            "多少",
+            "几人",
+            "几位",
+            "几个",
+            "是谁",
+            "谁是",
+            "哪些",
+            "有什么",
+            "下面",
+            "下级",
+            "子部门",
+            "领导",
+            "负责人",
+            "电话",
+            "手机号",
+            "邮箱",
+            "职位",
+            "岗位",
+            "公司是做什么",
+            "主营业务",
+            "邮件",
+            "日程",
+            "任务",
+            "审批",
+        )
+    )
 
 
 def _runtime_noop_receipt_context(*, status: str, answer: str, operation: str) -> ResultContext:
@@ -1600,12 +1987,13 @@ def _save_pending_action(*, context: RuntimeContext, intent, plan, permission) -
 
 
 def _save_missing_action_input(*, context: RuntimeContext, intent, plan, permission) -> tuple[str, Any]:
+    missing_params = _action_input_missing_params(intent)
     pending_action = {
         **_pending_action_payload(context=context, intent=intent, plan=plan, permission=permission),
-        "missing_params": list(intent.missing_params),
+        "missing_params": missing_params,
         "input_contract": {
             "status": "waiting_input",
-            "missing_params": list(intent.missing_params),
+            "missing_params": missing_params,
         },
     }
     state = save_waiting_input_state(
@@ -1770,12 +2158,28 @@ def _pending_action_expired(pending_action: dict[str, Any]) -> bool:
 def _session_without_pending_action(session_context: dict[str, Any]) -> dict[str, Any]:
     payload = dict(session_context)
     payload.pop(_PENDING_ACTION_KEY, None)
+    payload.pop(_CONFIRMED_PENDING_ACTION_KEY, None)
+    return payload
+
+
+def _session_without_confirmed_pending_action(session_context: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(session_context)
+    payload.pop(_CONFIRMED_PENDING_ACTION_KEY, None)
+    return payload
+
+
+def _session_without_runtime_action(session_context: dict[str, Any]) -> dict[str, Any]:
+    payload = _session_without_pending_action(session_context)
+    payload.pop("runtime_v5_state", None)
+    payload.pop(_WAITING_INPUT_STARTED_KEY, None)
+    payload.pop(RUNTIME_ACTION_INPUT_KEY, None)
+    payload.pop(LEGACY_ACTION_REQUEST_KEY, None)
+    payload.pop("runtime_v5_confirmed_action_entities", None)
     return payload
 
 
 def _is_confirmation_message(message: str) -> bool:
-    text = message.strip().lower()
-    return bool(text) and any(term in text for term in _CONFIRM_TERMS)
+    return _is_standalone_confirmation_message(message)
 
 
 def _is_standalone_confirmation_message(message: str) -> bool:

@@ -13,6 +13,7 @@ from app.services.runtime_v5.models import (
     ResultFollowup,
     RuntimeContext,
 )
+from app.services.llm.conversation import ConversationLLMContext, conversation_llm_reply
 from app.services.runtime_v5.response_classification import classify_response_request
 from app.services.runtime_v5.interaction_intent import classify_interaction_intent
 from app.services.runtime_v5.people_resolver import filter_people_by_department, filter_people_by_title, format_people_brief, normalize_gender, people_context_metadata
@@ -180,6 +181,9 @@ def _conversation_people_answer(
     semantic = _conversation_semantic_frame(intent)
     filters = semantic.get("parameters", {}).get("filters") if isinstance(semantic.get("parameters"), dict) else {}
     field = _requested_people_field(intent=intent, semantic=semantic, metadata=metadata)
+    relation_answer = _organization_relation_answer(result_context=result_context, metadata=metadata)
+    if relation_answer:
+        return relation_answer
     if result_type == "people_search" and count == 1:
         query_fields = _people_query_fields(metadata)
         if len(query_fields) > 1:
@@ -199,8 +203,11 @@ def _conversation_people_answer(
         if name:
             return f"我找到了{name}。"
     if result_type in {"department_members", "organization_snapshot"}:
+        inline_text = str(contract.get("list_delivery") or "") == "inline_text"
         if mode in {"name_only", "full_list", "detail"}:
-            return _people_list_contract_answer(result_context=result_context, metadata=metadata, mode=mode)
+            return _people_list_contract_answer(result_context=result_context, metadata=metadata, mode=mode, force_inline=inline_text)
+        if inline_text:
+            return _people_list_contract_answer(result_context=result_context, metadata=metadata, mode="full_list", force_inline=True)
         if surface == "sidepanel" or mode == "sidepanel" or field_projection in {"name_only", "detail"}:
             return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
         if mode == "numeric_only":
@@ -209,7 +216,9 @@ def _conversation_people_answer(
             gender = filters.get("gender") if isinstance(filters, dict) else ""
             if gender in {"male", "female"}:
                 label = "男性" if gender == "male" else "女性"
-                return f"目前能确认的{label}员工是 {display_count} 位。"
+                unknown_count = _safe_int(metadata.get("unknown_gender_count"), default=0)
+                suffix = f"另有 {unknown_count} 位没有可靠性别字段，未计入。" if unknown_count > 0 else ""
+                return f"目前能确认的{label}员工是 {display_count} 位。" + suffix
             return _department_count_answer(result_context=result_context, metadata=metadata) if result_type == "department_members" else f"{display_count}人。"
         if count:
             return _department_count_answer(result_context=result_context, metadata=metadata) if result_type == "department_members" else f"当前可见通讯录里有 {display_count} 位同事。"
@@ -229,6 +238,15 @@ def _people_query_fields(metadata: dict[str, Any]) -> tuple[str, ...]:
     if isinstance(value, list):
         return tuple(str(item) for item in value if str(item).strip())
     return ()
+
+
+def _organization_relation_answer(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
+    if result_context.result_type != "department_members":
+        return ""
+    relation = str(metadata.get("organization_relation") or "").strip()
+    if relation not in {"children", "leader"}:
+        return ""
+    return _human_readable_answer(result_context.answer)
 
 
 def _people_display_count(*, result_context: ResultContext, metadata: dict[str, Any]) -> int:
@@ -362,7 +380,7 @@ def _single_people_field_answer(*, item: dict[str, Any], field: str) -> str:
             return f"{name}是男性。"
         if gender in {"female", "女", "女性"}:
             return f"{name}是女性。"
-        return f"通讯录里没有可靠的{name}性别字段，我不按姓名推断。"
+        return f"通讯录里没有可靠的{name}性别字段，我不按姓名推断，也不会把这位同事纳入明确男性或女性名单。"
     return ""
 
 
@@ -382,12 +400,12 @@ def _people_sidepanel_summary(*, result_context: ResultContext, metadata: dict[s
     return f"我把 {count} 条人员结果整理好了，打开侧边栏可以看完整明细。"
 
 
-def _people_list_contract_answer(*, result_context: ResultContext, metadata: dict[str, Any], mode: str) -> str:
+def _people_list_contract_answer(*, result_context: ResultContext, metadata: dict[str, Any], mode: str, force_inline: bool = False) -> str:
     items = tuple(item for item in result_context.items if isinstance(item, dict))
     count = int(result_context.count or len(items))
     if not items:
         return _human_readable_answer(result_context.answer) or "没有匹配到人员。"
-    if mode in {"full_list", "detail"} and count > 8:
+    if mode in {"full_list", "detail"} and count > 8 and not force_inline:
         return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
     names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
     if not names:
@@ -395,13 +413,15 @@ def _people_list_contract_answer(*, result_context: ResultContext, metadata: dic
     if result_context.result_type == "department_members":
         department_intro = _department_list_intro(result_context=result_context, metadata=metadata)
         if department_intro:
-            if count > 8:
+            if count > 8 and not force_inline:
                 return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
             return f"{department_intro}{'、'.join(names)}。"
     keyword = str(metadata.get("keyword") or "").strip()
     subject = f"{keyword} " if keyword else ""
     if len(names) == 1:
         return f"{subject}这 1 位是：{names[0]}。"
+    if force_inline:
+        return f"{subject}共 {count} 位：{'、'.join(names)}。"
     return f"{subject}共 {count} 位：{'、'.join(names[:8])}。" if count <= 8 else _people_sidepanel_summary(result_context=result_context, metadata=metadata)
 
 
@@ -551,9 +571,21 @@ def _conversation_seed_answer(*, context: RuntimeContext, display_name: str) -> 
         return "我能看到一部分账号和上下文信息，但更重要的是在对话和工作处理中逐步了解你。你也可以直接告诉我希望我怎么配合。"
     if interaction.kind == "emoji_or_reaction":
         return "我收到了。这个我会当作你的反馈来理解，不急着打断你。"
+    fallback = "我在，直接说就行。"
+    if interaction.kind == "conversation":
+        return conversation_llm_reply(
+            ConversationLLMContext(
+                question=message,
+                fallback_answer=fallback,
+                actor_name=str(context.identity.display_name or ""),
+                actor_role=str(context.identity.role or ""),
+                profile_text=str(getattr(context.profile, "tone_tips", "") or ""),
+                session_context=str(context.session_context or "")[:500],
+            )
+        )
     if display_name:
-        return "我在，直接说就行。"
-    return "我在，直接说就行。"
+        return fallback
+    return fallback
 
 
 def _partial_answer(execution: ExecutionResult) -> str:
@@ -670,24 +702,9 @@ def _runtime_status_answer(context: RuntimeContext) -> str:
     provider_registry = snapshot.get("provider_registry") if isinstance(snapshot.get("provider_registry"), dict) else {}
     health = snapshot.get("health") if isinstance(snapshot.get("health"), dict) else {}
     permission = snapshot.get("permission") if isinstance(snapshot.get("permission"), dict) else {}
-    installed = capability.get("installed_count", 0)
-    total = capability.get("count", 0)
-    pending = capability.get("pending_count", 0)
-    query_count = capability.get("query_count", 0)
-    action_count = capability.get("action_count", 0)
-    confirmation_action_count = capability.get("confirmation_action_count", 0)
-    runtime_strategy_count = capability.get("runtime_strategy_count", 0)
-    atomic_count = capability.get("atomic_count", 0)
-    path_maturity_counts = capability.get("path_maturity_counts") if isinstance(capability.get("path_maturity_counts"), dict) else {}
     migration_queue = capability.get("migration_queue_summary") if isinstance(capability.get("migration_queue_summary"), dict) else {}
-    skill_inventory = capability.get("skill_atomic_inventory") if isinstance(capability.get("skill_atomic_inventory"), dict) else {}
     provider_count = len(provider_registry.get("registered_sources") or [])
     pending_ops = provider_registry.get("pending_operation_count", 0)
-    read_ops = provider_registry.get("read_operation_count", 0)
-    write_ops = provider_registry.get("write_operation_count", 0)
-    confirm_ops = provider_registry.get("requires_confirmation_operation_count", 0)
-    drift = provider_registry.get("capability_drift") if isinstance(provider_registry.get("capability_drift"), dict) else {}
-    planner_drift = provider_registry.get("planner_drift") if isinstance(provider_registry.get("planner_drift"), dict) else {}
     status_summary = provider_registry.get("status_summary") if isinstance(provider_registry.get("status_summary"), dict) else {}
     contract_health = provider_registry.get("contract_health") if isinstance(provider_registry.get("contract_health"), dict) else {}
     write_confirmation_contract = provider_registry.get("write_confirmation_contract")
@@ -700,7 +717,6 @@ def _runtime_status_answer(context: RuntimeContext) -> str:
     skill_registry = provider_registry.get("skill_registry")
     if not isinstance(skill_registry, dict):
         skill_registry = status_summary.get("skill_registry") if isinstance(status_summary.get("skill_registry"), dict) else {}
-    top_skill_gap = skill_registry.get("top_priority_operation") if isinstance(skill_registry.get("top_priority_operation"), dict) else {}
     snapshot_summary = snapshot.get("snapshot_summary") if isinstance(snapshot.get("snapshot_summary"), dict) else {}
     runtime_mode = str(snapshot.get("runtime_mode") or snapshot_summary.get("runtime_mode") or "unknown")
     runtime_path_kind = str(snapshot.get("runtime_path_kind") or snapshot_summary.get("runtime_path_kind") or "")
@@ -718,7 +734,6 @@ def _runtime_status_answer(context: RuntimeContext) -> str:
     followup_contract_for_summary = snapshot.get("followup_consume_contract") if isinstance(snapshot.get("followup_consume_contract"), dict) else {}
     action_closure_for_summary = snapshot.get("action_closure") if isinstance(snapshot.get("action_closure"), dict) else {}
     current_path_maturity = snapshot.get("current_path_maturity") if isinstance(snapshot.get("current_path_maturity"), dict) else {}
-    current_capability_readiness = snapshot.get("current_capability_readiness") if isinstance(snapshot.get("current_capability_readiness"), dict) else {}
     snapshot_integrity = snapshot.get("snapshot_integrity") if isinstance(snapshot.get("snapshot_integrity"), dict) else {}
     pipeline_constitution_contract = snapshot.get("pipeline_constitution_contract") if isinstance(snapshot.get("pipeline_constitution_contract"), dict) else {}
     guardrail_parts = [

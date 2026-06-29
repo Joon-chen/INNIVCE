@@ -11,7 +11,6 @@ from app.services.agent.context import (
     record_bot_session,
 )
 from app.services.agent.policies import BotActor
-from app.services.tools.base import SHARED_TOOL_COUNT
 
 
 def test_agent_context_models_match_expected_tables() -> None:

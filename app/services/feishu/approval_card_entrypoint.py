@@ -599,7 +599,6 @@ def _attach_feishu_cli_approval_instance_details(context: ToolContext, items: li
         item.setdefault("start_time", data.get("start_time"))
         # Extract applicant name from instance detail for display
         # Check all possible name fields at all nesting levels
-        import json as _json
         _name_keys = ["starter_name", "applicant_name", "user_name", "name", "initiator_name"]
         _app_name = ""
         for _key in _name_keys:
@@ -699,10 +698,12 @@ def _read_feishu_approval_attachment_ref(
                 output_path = Path(str(payload.get("output_path") or ""))
                 data = output_path.read_bytes()
                 text_preview = extract_attachment_text(data, filename=name)
-                try: output_path.unlink(missing_ok=True)
-                except OSError: pass
+                try:
+                    output_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return ApprovalAttachmentReadResult(name=name, token=token, text_preview=text_preview)
-            except:
+            except Exception:
                 pass
     # Neither URL nor token available or both failed
     return ApprovalAttachmentReadResult(name=name, token=token or "", error="附件无法读取")

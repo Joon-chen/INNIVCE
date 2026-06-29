@@ -9,17 +9,12 @@ Responsibilities:
 Strictly no business logic, no data queries, no tool calls.
 """
 
-from dataclasses import dataclass, field
-from typing import Any
 import json
+from dataclasses import dataclass
 
 from app.core.config import settings
 from app.services.feishu.identity import BotIdentity
-from app.services.llm.answer_semantics import (
-    _load_session,
-    _save_session,
-    _clear_session,
-)
+from app.services.llm.answer_semantics import _load_session
 
 
 @dataclass
@@ -100,7 +95,9 @@ def _detect_result_followup(question: str, chat_id: str | None) -> tuple:
     # Load result context from Redis
     try:
         from app.core.config import settings as _st
-        import redis as _rd, json as _rj
+        import json as _rj
+        import redis as _rd
+
         _rc = _rd.Redis.from_url(_st.redis_url, decode_responses=True)
         _raw = _rc.get(f"feishu:result:{chat_id}")
         if _raw:

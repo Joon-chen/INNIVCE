@@ -86,6 +86,7 @@ def _fake_runtime_envelope(company_id, answer: str = "ok", intent_entities: dict
 
 
 def _patch_runtime_v5_dependencies(monkeypatch, company_id, answer: str = "ok") -> None:
+    monkeypatch.setattr("app.services.feishu.bot_runtime.settings.feishu_bot_runtime_v5_enabled", True)
     monkeypatch.setattr("app.services.feishu.bot_runtime.build_feishu_provider_registry", lambda **kwargs: {})
     monkeypatch.setattr("app.services.feishu.bot_runtime.run_runtime_v5", lambda **kwargs: _fake_runtime_envelope(company_id, answer))
     monkeypatch.setattr("app.services.feishu.bot_runtime.runtime_trace_summary", lambda envelope: {"strategy": envelope.plan.strategy, "sources": list(envelope.plan.sources)})

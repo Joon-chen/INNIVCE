@@ -873,11 +873,15 @@ def _result_context_semantic_metadata(result_metadata: dict) -> dict:
         "unknown_gender_count",
         "organization_foundation",
         "organization_resolution",
+        "organization_relation",
         "display_member_count",
         "unique_member_count",
         "direct_member_count",
         "source_member_count",
+        "direct_child_count",
         "child_member_counts",
+        "leader_items",
+        "leader_source_user_ids",
         "count_basis",
     )
     return {key: result_metadata[key] for key in allowed if key in result_metadata}

@@ -453,14 +453,6 @@ FEISHU_API_CAPABILITIES: dict[str, FeishuApiCapability] = {
         official_doc_url="https://open.feishu.cn/api-explorer?apiName=detail&project=approval&resource=instance&version=v4",
         verified_by=("lark_cli_help", "lark_cli_schema", "lark_cli_dry_run"),
     ),
-    "feishu_approval_instance_initiated": FeishuApiCapability(
-        tool_name="feishu_approval_instance_initiated",
-        openapi_name="approval.v4.instance.query",
-        cli_command=("lark-cli", "approval", "instances", "initiated"),
-        risk=FeishuApiRisk.READ,
-        official_doc_url="https://open.feishu.cn/api-explorer?apiName=query&project=approval&resource=instance&version=v4",
-        verified_by=("lark_approval_skill", "lark_cli_schema", "lark_cli_dry_run"),
-    ),
     "feishu_approval_task_query": FeishuApiCapability(
         tool_name="feishu_approval_task_query",
         openapi_name="approval.v4.task.list",

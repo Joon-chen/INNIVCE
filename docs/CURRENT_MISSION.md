@@ -85,6 +85,7 @@ Conversation First Command Engine Refactor V1
 - Mail 查询语义保持 USER 资源边界；SELF 可走 USER_TOKEN fallback，DEPARTMENT / COMPANY 不得偷用个人授权扩大范围。
 - Knowledge 必须服务正式企业知识域：公司介绍、制度流程、项目资料、模板规范等都必须来自 Wiki / Drive / Doc / Knowledge 路径，不允许 Presentation LLM 凭空生成。
 - Command Engine 验收必须覆盖真实基础数据源和 Conversation First 合同，不只测 intent 分类。
+- Command Engine 回归必须包含跨域连续对话矩阵：泛知识/闲聊不得继承上一轮 People 结果；`我的审批 / 我的任务 / 我的日程 / 我的会议` 不得被旧上下文串域；上一轮结构化结果的“明细 / 名单 / 对话框显示”必须保持 read-only presentation，不得升级为发送、建群、写邮件或其他代执行动作。
 - 写动作仍需 RuntimeActionInput / WAITING_CONFIRMATION / USER_TOKEN 或明确 fallback，不被 LLM 自动执行。
 
 ## 下一步计划
@@ -113,8 +114,21 @@ Conversation First V1 Runtime Cutover + Knowledge Data Ingestion
 - Communication / IM：线上已走 `communication` 基础域，群聊数量和群列表通过当前 Feishu App 返回。
 - Communication / Mail：线上保持个人资源边界；未授权时返回 USER_TOKEN 授权提示，不把个人授权扩展到公司范围。
 - Knowledge：Runtime Provider 已接入正式知识资料路径，优先从已登记 Resource、Drive 列表、Doc/Docx 内容、企业画像读取；`foundation_data_source.domain=knowledge`，`provider_runtime=hybrid_knowledge`。
-- Command Engine：Conversation First V1 已冻结并开始落地。新增 `ConversationState -> SemanticFrame -> DialogueResolver -> CommandFrame` 合同层；People / Knowledge 已通过 V1 接入 `command_layer.py`，其他域暂走旧路径；首批 44 条回归已覆盖公司人数、性别追问、名单/展开、单人字段、换人追问、Knowledge 公司/制度/资料、结果动作、确认/取消、小聊天等场景，并同时断言 ConversationState、SemanticFrame、CommandFrame、Policy decision 和 Response mode。旧 `IntentCandidate / DomainQuery / ResultFollowup` 暂保留为兼容路径，但不得再作为新增入口规则的方向。
-- Response Orchestrator：People / Knowledge 已开始消费 Conversation First `output_contract`。`compose_answer` 会把人数、单人手机号/邮箱/职位/性别等摘要型问题自然化为文本，不再直接输出 Provider 的字段完整度或人员明细模板；`RuntimeResult` 会按 `surface=text/sidepanel` 决定是否生成侧边栏 action，单人字段事实不再弹卡，名单/明细不再在正文列长列表。
+- Command Engine：Conversation First V1 已冻结并开始落地。新增 `ConversationState -> Semantic Understanding -> SemanticFrame -> DialogueResolver -> CommandFrame` 合同层；自然语言入口统一走 `command_layer.py`，旧 `runtime_v5.intent` / `IntentCandidate` 入口已删除，不再作为 fallback 或测试目标存在。Semantic Protocol 已下沉为 Foundation Contract：`app/services/semantic_protocol/` 只定义枚举、Frame、Schema、Validator，不沉淀业务知识、关键词入口或业务域规则。业务复杂度只能进入 `semantic_understanding.py`、`dialogue_resolver.py`、`organization_foundation.py` / Organization Resolver。LLM 语义纠偏只能产出 SemanticFrame；deterministic fallback 必须在 LLM 超时、关闭或失败时仍守住同一语义边界，不能依赖线上 LLM 才避免串域。首批回归已覆盖公司人数、性别追问、名单/展开、单人字段、换人追问、组织下级部门、负责人、Knowledge 公司/制度/资料、跨域 Mail/Task/Calendar、结果动作、确认/取消、小聊天等场景，并同时断言 ConversationState、SemanticFrame、CommandFrame、Policy decision 和 Response mode；新增 Command Engine regression matrix 覆盖公共人物/历史常识不继承 People 上下文、Workspace/Process 显式锚点不被上一轮结果吞掉、previous_result presentation 保持 read-only。
+- Learning Loop：Intent 不做线上自动学习；失败样本必须先 Trace 归因，再进入 Semantic Sample / Regression。口语表达差异优化 Semantic Understanding，组织别名进入 Organization Foundation Alias Dictionary，稳定语义缺口才扩 Semantic Schema，权限差异归 Policy，表达问题归 Response Orchestrator。
+- Response Orchestrator：People / Knowledge 已开始消费 Conversation First `output_contract`。`compose_answer` 会把人数、单人手机号/邮箱/职位/性别等摘要型问题自然化为文本，不再直接输出 Provider 的字段完整度或人员明细模板；`RuntimeResult` 会按 `surface=text/sidepanel` 决定是否生成侧边栏 action，单人字段事实不再弹卡，名单/明细默认进侧边栏；当用户明确要求“不要侧边栏 / 对话框显示 / 聊天框显示”时，上一轮结果展示通过 `list_delivery=inline_text` 直接在对话中输出，但仍是 read-only presentation。
+- Feishu Gateway：WebSocket message receive 入口已按 `app_config_id + chat_id` 串行化，同一会话内消息 FIFO 处理，避免慢 LLM/知识回答被后续快速审批卡片反超；不同会话仍可并行。Card action 仍走独立快速 toast/后台处理路径。
+
+当前验证快照（2026-06-29 CST，V5 / 旧 Agent / Gateway 兼容、Ruff 收口与飞书 smoke 问题修复后刷新）：
+
+- 全量 pytest 已干净：`.venv312/bin/python -m pytest -q` -> 2014 passed / 1 warning。唯一 warning 来自第三方 `lark_oapi` 的 `datetime.utcfromtimestamp()` deprecation。
+- 基础编译检查已通过：`.venv312/bin/python -m compileall app tests`。
+- Gateway / Execution Identity / Feishu Provider Boundary / Tool Router 聚焦回归已通过：`tests/test_gateway_feishu.py tests/test_execution_identity_user_token.py tests/test_feishu_provider_boundary.py tests/test_tool_router.py -q` -> 288 passed。
+- Feishu WS / Gateway / Feishu / Command Engine / Runtime V5 聚焦回归已通过：`tests/test_feishu_ws.py tests/test_gateway_feishu.py tests/test_feishu.py tests/test_command_engine_regression_matrix.py tests/test_runtime_v5.py tests/test_conversation_engine_v1.py -q` -> 569 passed / 1 warning。
+- 全仓 Ruff 已干净：`.venv312/bin/python -m ruff check .` -> All checks passed。
+- 飞书真实 smoke 已确认 People / Process / Conversation 路径可用：`马云是谁`、`宋朝开国皇帝是谁` 不再误入通讯录；`我的审批` 走审批卡片；男性统计返回 24 位并明确 12 位无可靠性别字段；“哪24位，在对话框显示明细”直接在对话中列出名单，不再弹操作确认。
+- 飞书同会话顺序已在远程容器 smoke 验证：同一 `chat_id` 内 `om_1 -> om_2` 按 FIFO 执行，最大并发为 1；生产 `portal` / `sidepanel` GET 均为 200。
+- Docker local-prod 镜像构建尚未完成：`DOCKER_BUILDKIT=0 docker compose -p v5launchcheck -f docker-compose.local-prod.yml build api worker beat feishu-ws` 已尝试，但本机 Docker daemon 未运行，返回 `Cannot connect to the Docker daemon`；需启动 Docker Desktop 后重跑。
 
 当前线上数据事实：
 

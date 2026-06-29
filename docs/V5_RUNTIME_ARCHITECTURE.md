@@ -114,8 +114,14 @@ Forbidden:
 
 - `models.py` defines `CommandPlan`, `RuntimeTask`, `RuntimeStep`,
   `RuntimeResult` and `InteractionPayload`.
-- `conversation_state.py`, `semantic_frame.py`, `conversation_hints.py` and
+- `conversation_state.py`, `semantic_understanding.py` and
   `dialogue_resolver.py` define Conversation First V1.
+- `semantic_understanding.py` owns SemanticFrame production, including the
+  deterministic fallback used when LLM semantics are disabled, timed out or
+  rejected. The fallback must preserve the same safety boundaries as the LLM:
+  general knowledge must not inherit stale People context, explicit
+  Workspace/Process anchors must not be swallowed by previous results, and
+  previous-result presentation must stay read-only.
 - `command_layer.py` routes People and Knowledge through Conversation First V1
   and keeps other domains on the existing path for this migration stage.
 - `policy_layer.py` enforces tenant boundary and delegates permission checks.
@@ -123,6 +129,10 @@ Forbidden:
 - `runtime_result.py` normalizes runtime output.
 - `interaction_layer.py` adapts runtime output for display.
 - `runtime.py` main execution path now uses Command -> Policy -> Runtime Core.
+- `workers/feishu_ws.py` is an Interface/Gateway entry point. It must preserve
+  FIFO processing for ordinary messages within the same `chat_id`; cross-chat
+  processing may remain concurrent, and card actions may keep their fast
+  callback path.
 
 ## Migration rule
 
@@ -141,3 +151,6 @@ V1 scope:
 - Any future entry bug must be attributed to one layer only:
   ConversationState, SemanticFrame, DialogueResolver, Policy, or Response
   Orchestrator. It must not be fixed by adding business-domain keyword routes.
+- Visible reply ordering bugs in Feishu or another channel belong to
+  Interface/Gateway sequencing. Fix them at the entry queue or interaction
+  boundary, not by changing Command Engine semantics.

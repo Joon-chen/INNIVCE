@@ -13,21 +13,24 @@ _TABLE_TERM_PATTERN = re.compile(r"表格|多维表格|bitable|base|表")
 _CREATE_TERM_PATTERN = re.compile(
     r"创建|建立|新建|建表|建一|建张|建个|新建一个|新建一张|做一|做张|做个|弄一|弄张|弄个|起一|起张|起个|整一|整张"
 )
-_IMPORT_TERM_PATTERN = re.compile(r"放入|写入|导入|填入|装入|放到|塞进|放进|放进去|同步|更新|写入到|更新到")
+_IMPORT_TERM_PATTERN = re.compile(r"放入|写入|导入|填入|装入|放到|塞进|放进|放进去|写进|写到|同步|更新|写入到|更新到")
+_NEGATED_IMPORT_TERM_PATTERN = re.compile(r"不要写入|不写入|先不要写|不要导入|不导入|不要同步|不同步")
 _EXPORT_TERM_PATTERN = re.compile(r"导出|导成|导到|导出到")
 _SHARE_BACK_TERM_PATTERN = re.compile(r"发我|发给我|给我发|发到我|发一下|发一份|回我|推送我|同步给我|发我一份|私信我|发我这个")
 _QUERY_TERM_PATTERN = re.compile(r"查|查询|查看|看看|筛选|列出|列举|找|搜|搜索|看下|看一看|看下|同步|抽取")
-_APP_TOKEN_PATTERN = re.compile(r"\b(bascn[-A-Za-z0-9_]+)\b")
+_APP_TOKEN_PATTERN = re.compile(r"(bascn[-A-Za-z0-9_]+)")
 _TABLE_TARGET_TERM_PATTERN = re.compile(r"表|表格|多维表格|bitable|base|电子表格")
 _TASK_ACTION_TERM_PATTERN = re.compile(
     r"创建|新建|建立|修改|更新|删除|移除|指派|分配|认领|催办|催促|安排|转交|转办|转派|加派|派发|完成|开启|关闭|开始|挂起|恢复|重开|验收|重提|交付|延期|加急|优先|重发|标记|归档|取消|复制|作废"
 )
 _APPROVAL_ACTION_TERM_PATTERN = re.compile(
-    r"批复|同意|驳回|批准|加签|抄送|通过|否决|反对|审批|起草|草拟|作废|终止|重提|提交|打回|退回|撤回|撤销"
+    r"批复|同意|拒绝|驳回|批准|加签|抄送|通过|否决|反对|审批|起草|草拟|作废|终止|重提|提交|打回|退回|撤回|撤销"
 )
+_APPROVAL_STRONG_ACTION_TERM_PATTERN = re.compile(r"拒绝|驳回|打回|撤回|撤销|加签|批准|同意|批复")
 _MAIL_ACTION_TERM_PATTERN = re.compile(
     r"发送|上传|下载|回复|回信|下发|抄送|转交|转发|群发|转寄|归档|标记|已读|未读|配置"
 )
+_MAIL_STRONG_ACTION_TERM_PATTERN = re.compile(r"上传|发送(?!人)|回复|转发|归档|标记")
 _ACTION_TERM_PATTERN = re.compile(
     r"创建|新建|修改|更新|删除|移除|发起|提交|发送|同步|批复|同意|驳回|上传|下载|覆盖|覆盖掉|推送|配置|写入|放入|塞入|迁移|复制|转移|转发|安排|加|批准|拒绝|加签|抄送|转交|催办|催促|认领|指派|分配|完成|归档|关闭|开启|评论|回复|回信|下发|转办|打回|退回|撤回|撤销|转派|通过|否决|反对|审批|起草|草拟|群发|转寄|作废|终止|重开|启用|停用|挂起|恢复|验收|重提|交付|延期|加急|优先|重发|标记|已读|未读|取消|开始|加派|派发"
 )
@@ -38,9 +41,9 @@ _APPROVAL_QUERY_ACTION_NOISE_TERM_PATTERN = re.compile(
     r"状态|进度|当前进度|办理进度|处理进度|详情|结果|是否|报销状态|当前状态|审批状态|审批结果|处理结果|发起人|提交人|创建者|处理人|申请人|审批人|截止时间|截止日期|截止日|到期时间|完成时间"
 )
 _MAIL_QUERY_ACTION_NOISE_TERM_PATTERN = re.compile(
-    r"是否|状态|详情|结果|已读状态|未读状态|是否已读|是否未读|收件|发送人|收件人|发件人|主题|标题|时间|附件"
+    r"是否|状态|详情|结果|已读状态|未读状态|是否已读|是否未读|收件|发送人|收件人|发件人|主题|标题|时间|附件|超期|逾期"
 )
-_DECISION_TERM_PATTERN = re.compile(r"该不该|要不要|要不|应该|最好|可否|可不可以|能不能|行不行|帮我判断|帮我决|选择|选哪个|选哪种|对比|比较后|建议")
+_DECISION_TERM_PATTERN = re.compile(r"该不该|要不要|要不|应该|是否合理|是否要|是否需要|是否值得|是否可行|最好|可否|可不可以|能不能|行不行|帮我判断|帮我决|选择|选哪个|选哪种|对比|比较后|建议")
 _ANALYSIS_TERM_PATTERN = re.compile(r"分析|对比|趋势|原因|影响|评估|风险|异常|统计|总结|汇总|为什么|问题|情况|现状|进展|复盘|回顾")
 _DEFAULT_ORGANIZATION_BATABLE_FIELDS = [
     {"name": "部门", "type": "text"},
@@ -241,6 +244,8 @@ def build_agent_plan(
         semantic=semantic,
         execution_category=execution_category,
     )
+    if template is not None and template.name == "query_to_bitable_table" and not allow_write_tools:
+        template = None
     if template is not None:
         steps.extend(
             template.build_plan(
@@ -325,6 +330,8 @@ def _organization_to_bitable_table_intent(
 ) -> bool:
     if not (_ORG_TERM_PATTERN.search(semantic_text) and _TABLE_TERM_PATTERN.search(semantic_text)):
         return False
+    if _NEGATED_IMPORT_TERM_PATTERN.search(semantic_text):
+        return False
     return (
         _CREATE_TERM_PATTERN.search(semantic_text) is not None
         and _IMPORT_TERM_PATTERN.search(semantic_text) is not None
@@ -344,15 +351,20 @@ def _query_to_bitable_table_intent(
         return False
     if _organization_to_bitable_table_intent(semantic_text):
         return False
+    if _ORG_TERM_PATTERN.search(semantic_text) and _TABLE_TERM_PATTERN.search(semantic_text):
+        return False
+    strong_intent = is_strong_bitable_query(semantic_text)
+    if strong_intent:
+        return True
     if is_ambiguous_bitable_query(semantic_text):
         return False
-    return is_strong_bitable_query(semantic_text)
+    return False
 
 
 def _is_noisy_action_query(route: BotAnswerRoute, semantic_text: str) -> bool:
     if route.path in {"task_qa", "personal_tasks", "chat_tasks"}:
         return _TASK_QUERY_ACTION_NOISE_TERM_PATTERN.search(semantic_text) is not None
-    if route.path in {"feishu_approval_task_query"}:
+    if route.path in {"feishu_approval_task_query", "approval_qa"}:
         return _APPROVAL_QUERY_ACTION_NOISE_TERM_PATTERN.search(semantic_text) is not None
     if route.path == "mail_qa":
         return _MAIL_QUERY_ACTION_NOISE_TERM_PATTERN.search(semantic_text) is not None
@@ -429,10 +441,22 @@ def classify_execution_category(*, route: BotAnswerRoute, semantic: Any) -> str:
 
     if _DECISION_TERM_PATTERN.search(semantic_text):
         return "decision"
+    if route.path == "bitable_qa" and _organization_to_bitable_table_intent(semantic_text) and "整" in semantic_text:
+        return "query"
+    if route.path == "approval_qa" and _APPROVAL_STRONG_ACTION_TERM_PATTERN.search(semantic_text):
+        return "action"
+    if route.path == "mail_qa" and _MAIL_STRONG_ACTION_TERM_PATTERN.search(semantic_text):
+        return "action"
+    if route.path in {"mail_qa", "chat_tasks"} and _query_to_bitable_table_intent(
+        semantic_text,
+        route=route,
+        execution_category="query",
+    ):
+        return "query"
     if route.path in {"task_qa", "personal_tasks", "chat_tasks"} and _TASK_ACTION_TERM_PATTERN.search(semantic_text):
         if not _is_noisy_action_query(route=route, semantic_text=semantic_text):
             return "action"
-    elif route.path in {"feishu_approval_task_query"}:
+    elif route.path in {"feishu_approval_task_query", "approval_qa"}:
         if _is_noisy_action_query(route=route, semantic_text=semantic_text):
             return "query" if route.path == "feishu_approval_task_query" else "analysis"
         if _APPROVAL_ACTION_TERM_PATTERN.search(semantic_text):
@@ -454,6 +478,8 @@ def classify_execution_category(*, route: BotAnswerRoute, semantic: Any) -> str:
         return "analysis"
     if route.path in {"feishu_approval_task_query", "personal_tasks", "mail_qa"}:
         return "query"
+    if route.path == "approval_qa":
+        return "analysis"
     return "query"
 
 
@@ -755,7 +781,7 @@ WORKFLOW_TEMPLATES: tuple[AgentPlanTemplate, ...] = (
     ),
     AgentPlanTemplate(
         name="query_to_bitable_table",
-        route_paths=("bitable_qa", "task_qa", "feishu_approval_task_query", "mail_qa", "personal_tasks", "chat_tasks", "feishu_vc_meeting_search"),
+        route_paths=("bitable_qa", "task_qa", "feishu_approval_task_query", "approval_qa", "mail_qa", "personal_tasks", "chat_tasks", "feishu_vc_meeting_search"),
         matches=_query_to_bitable_table_intent,
         build_plan=_build_query_to_bitable_table_plan,
     ),

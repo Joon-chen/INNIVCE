@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from sqlalchemy.exc import OperationalError
 
+from app.core.config import settings
 from app.api.routes.v5 import router as v5_router
 from app.api.routes.v5_agent_request_models import AgentSettingsUpdate, AgentTracePreviewRequest
 from app.api.routes.v5_agent_reply_mode_routes import agent_reply_modes
@@ -45,6 +46,7 @@ from app.services.v5_administration import (
 )
 from app.services.v5_auto_sync import company_auto_sync_due, select_company_auto_sync_resources, sync_company_auto_resources
 from app.services.operations_bot_users import bot_user_access_payload, recent_gateway_messages_by_actor
+from app.services.user_identity_authorizations import user_identity_authorization_url_status
 from app.services.v5_owner_actions import owner_actions_from_resource_items
 from app.services.v5_resource_status import _resource_sync_payload, _status_order, resource_sync_run_payload, workspace_event_payload
 from app.services.v5_resource_governance import set_resource_access_decision
@@ -248,30 +250,25 @@ def test_bot_user_access_payload_exposes_employee_agent_profile() -> None:
     bundle_auth = payload["user_identity_authorizations"][0]
     assert bundle_auth["authorization_model"] == "bundle_authorization"
     assert bundle_auth["covered_resources"] == ["personal_feishu", "external_mail", "personal_dingtalk", "personal_wechat"]
+    base_url = settings.api_base_url.rstrip("/")
+    url_status = user_identity_authorization_url_status(base_url)
     assert bundle_auth["authorization_actions"] == [
         {
             "label": "授权个人能力包",
             "channel": "feishu_oauth",
             "authorization_flow": "feishu_in_app_oauth",
-            "url": f"http://127.0.0.1:8000/api/user-identity/oauth/feishu/start?company_id={item.company_id}&open_id=ou_member",
+            "url": f"{base_url}/api/user-identity/oauth/feishu/start?company_id={item.company_id}&open_id=ou_member",
             "start_endpoint": "/api/user-identity/oauth/feishu/start",
             "callback_endpoint": "/api/feishu/oauth/callback",
             "fallback_debug_flow": "feishu_cli_split_flow",
-            "fallback_debug_url": f"http://127.0.0.1:8000/user-auth/feishu-cli?company_id={item.company_id}&open_id=ou_member",
+            "fallback_debug_url": f"{base_url}/user-auth/feishu-cli?company_id={item.company_id}&open_id=ou_member",
             "owner_open_id": "ou_member",
             "authorization_model": "bundle_authorization",
             "covered_resources": ["personal_feishu", "external_mail", "personal_dingtalk", "personal_wechat"],
             "can_escalate_original_permissions": False,
-            "employee_reachable": False,
-            "local_only": True,
-            "api_base_url_status": {
-                "api_base_url": "http://127.0.0.1:8000",
-                "api_base_url_scheme": "http",
-                "api_base_url_host": "127.0.0.1",
-                "employee_reachable": False,
-                "local_only": True,
-                "production_requirement": "Set API_BASE_URL to a public HTTPS origin before employee rollout.",
-            },
+            "employee_reachable": url_status["employee_reachable"],
+            "local_only": url_status["local_only"],
+            "api_base_url_status": url_status,
         }
     ]
 

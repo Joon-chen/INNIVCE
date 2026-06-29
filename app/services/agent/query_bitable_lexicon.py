@@ -17,6 +17,9 @@ TABLE_QUERY_TERMS = (
     "看一看",
     "同步",
     "抽取",
+    "导出",
+    "超期",
+    "逾期",
 )
 
 TABLE_ACTION_TERMS = (
@@ -59,6 +62,7 @@ TABLE_QUERY_DOMAIN_TERMS = (
     "组织",
     "群",
     "项目",
+    "里程碑",
     "清单",
     "列表",
     "个人",
@@ -109,7 +113,7 @@ _ANALYSIS_GUARD_TERMS = (
 )
 
 QUERY_TERM_PATTERN = re.compile(
-    r"查|查询|查看|看看|筛选|列出|列举|找|搜|搜索|看下|看一看|看下|同步|抽取"
+    r"查|查询|查看|看看|筛选|列出|列举|找|搜|搜索|看下|看一看|看下|同步|抽取|导出|超期|逾期"
 )
 TABLE_TARGET_TERM_PATTERN = re.compile(
     r"表|表格|多维表格|bitable|base|电子表格|sheet|工作表"
@@ -153,6 +157,8 @@ QUERY_TEXT_WRITE_PROMOTION_TERMS = (
     "更新",
     "更新到",
     "同步",
+    "创建",
+    "新建",
 )
 
 

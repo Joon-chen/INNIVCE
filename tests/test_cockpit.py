@@ -24,7 +24,6 @@ from app.services.cockpit.modules.today import _build_today_focus_items, _today_
 from app.services.cockpit.modules.risks import _is_open_business_risk, _risk_summary
 from app.services.cockpit.registry import DEFAULT_MODULE_ORDER, MODULE_BUILDERS
 from app.services.tools.providers.feishu_api import FEISHU_API_CAPABILITIES, FeishuApiRisk
-from app.services.tools.router import TOOL_REGISTRY
 
 
 def test_cockpit_modules_are_registered() -> None:

@@ -1545,7 +1545,7 @@ def _render_confirmation_card(raw_answer: str, *, chat_id: str | None = None) ->
     request_text = pending_message or fields.get("请求", "")
     if request_text:
         summary_parts.append(f"请求：{request_text}")
-    for label in ("审批对象", "申请人", "金额", "发送对象", "消息摘要", "处理意见"):
+    for label in ("人员目标", "发送方式", "审批对象", "申请人", "金额", "发送对象", "消息摘要", "处理意见"):
         value = fields.get(label)
         if value:
             summary_parts.append(f"{label}：{value}")

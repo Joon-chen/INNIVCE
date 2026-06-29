@@ -63,10 +63,15 @@ def build_conversation_state(context: RuntimeContext) -> ConversationState:
     for Command Engine routing.
     """
 
-    result_ref = _previous_result_reference(context.result_context)
+    result_context = context.result_context
+    if result_context is None and context.chat_id:
+        from app.services.runtime_v5.context import load_result_context
+
+        result_context = load_result_context(context.chat_id)
+    result_ref = _previous_result_reference(result_context)
     pending_confirmation = _pending_confirmation(context.session_context)
-    pending_clarification = _pending_clarification(context.result_context)
-    assistant_question = _assistant_question(context.result_context, pending_clarification=pending_clarification)
+    pending_clarification = _pending_clarification(result_context)
+    assistant_question = _assistant_question(result_context, pending_clarification=pending_clarification)
     domain = result_ref.domain or _pending_domain(pending_confirmation) or _pending_domain(pending_clarification)
     topic = result_ref.topic or pending_confirmation.intent or pending_clarification.intent
     return ConversationState(
@@ -82,7 +87,7 @@ def build_conversation_state(context: RuntimeContext) -> ConversationState:
         presentation_preference=_presentation_preference(context),
         user_profile=_profile_payload(context),
         source_contract={
-            "result_context_consumed_by_builder": context.result_context is not None,
+            "result_context_consumed_by_builder": result_context is not None,
             "pending_action_consumed_by_builder": bool(pending_confirmation.kind),
             "pending_clarification_consumed_by_builder": bool(pending_clarification.kind),
         },
@@ -235,6 +240,10 @@ def _domain_for_result_type(result_type: str) -> str:
         return "People"
     if result_type in {"company_profile_knowledge", "knowledge_search", "docs_read"}:
         return "Knowledge"
+    if result_type in {"approval_list", "approval_detail", "approval_query"}:
+        return "Process"
+    if result_type in {"external_information_unavailable", "external_information"}:
+        return "External"
     if result_type in {"runtime_pending_confirmation", "runtime_waiting_input", "runtime_action"}:
         return "Action"
     return ""
@@ -246,6 +255,8 @@ def _normalize_domain(domain: str) -> str:
         "knowledge": "Knowledge",
         "action": "Action",
         "communication": "Communication",
+        "external": "External",
+        "process": "Process",
     }
     text = str(domain or "").strip()
     return aliases.get(text.lower(), text)
@@ -256,6 +267,10 @@ def _topic_for_result_type(result_type: str, *, domain: str) -> str:
         return "people"
     if domain == "Knowledge":
         return "knowledge"
+    if domain == "External":
+        return "external"
+    if domain == "Process":
+        return "approval"
     return result_type
 
 

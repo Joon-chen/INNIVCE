@@ -837,6 +837,14 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {
         required_permissions=("domain:read",),
         audit_action="tool.domain_qa.read",
     ),
+    "approval_qa": ToolDefinition(
+        family="TaskTool",
+        capabilities=["approval"],
+        name="approval_qa",
+        provider=ToolProvider.LOCAL,
+        required_permissions=("approval:read",),
+        audit_action="tool.approval_qa.read",
+    ),
     "general_chat": ToolDefinition(
         family="ChatTool",
         capabilities=["im"],
@@ -2137,13 +2145,13 @@ def _provider_execution_boundary_metadata(definition: ToolDefinition) -> dict[st
 
 
 def _actor_can_invoke_tool(actor: BotActor, definition: ToolDefinition, *, chat_id: str | None) -> tuple[bool, str | None]:
+    if definition.provider == ToolProvider.DEVOPS:
+        if _actor_has_permission(actor, "system:admin", chat_id=chat_id):
+            return True, None
+        return False, "missing_permission:system:admin"
     if _is_shared_business_tool(definition):
         return True, None
-    if definition.provider != ToolProvider.DEVOPS:
-        return True, None
-    if _actor_has_permission(actor, "system:admin", chat_id=chat_id):
-        return True, None
-    return False, "missing_permission:system:admin"
+    return True, None
 
 
 def _actor_data_permission_for_tool(context: ToolContext, definition: ToolDefinition) -> tuple[bool, str | None]:
@@ -2466,5 +2474,3 @@ def _strip_agent_supplied_runtime_params(request: ToolRequest) -> ToolRequest:
     if not runtime_only_keys & set(request.params):
         return request
     return replace(request, params={key: value for key, value in request.params.items() if key not in runtime_only_keys})
-
-

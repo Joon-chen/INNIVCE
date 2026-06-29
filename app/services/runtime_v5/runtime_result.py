@@ -29,6 +29,10 @@ def build_runtime_result(
 
     result_context = composed.result_context
     result_type = result_context.result_type if result_context is not None else command_plan.planner_result.strategy
+    waiting_input = result_type == "runtime_waiting_input" or bool(composed.metadata.get("waiting_input"))
+    effective_requires_confirmation = False if waiting_input else (
+        permission.requires_confirmation or bool(composed.metadata.get("requires_confirmation"))
+    )
     execution_status = execution.status if execution is not None else (
         "waiting" if composed.metadata.get("requires_confirmation") or composed.metadata.get("waiting_input") else "skipped"
     )
@@ -67,7 +71,7 @@ def build_runtime_result(
         data_scope=str(command_plan.intent_result.data_scope or ""),
         answer=_summary_from_composed(composed),
         question_type=str(command_plan.intent_result.question_type or ""),
-        requires_confirmation=permission.requires_confirmation or bool(composed.metadata.get("requires_confirmation")),
+        requires_confirmation=effective_requires_confirmation,
     )
     response_experience = build_response_experience(
         command_plan=command_plan,
@@ -109,7 +113,8 @@ def build_runtime_result(
             "scope_context": scope_context,
             "sources": list(command_plan.planner_result.sources),
             "permission_allowed": permission.allowed,
-            "requires_confirmation": permission.requires_confirmation,
+            "requires_confirmation": effective_requires_confirmation,
+            "policy_requires_confirmation": permission.requires_confirmation,
             "execution_identity": permission.execution_identity,
             "result_context": result_metadata,
             "authorization": authorization,

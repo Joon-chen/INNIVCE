@@ -167,7 +167,7 @@ class FeishuContactService:
         while remaining > 0:
             body = await self.list_users_by_department(
                 department_id=department_id,
-                page_size=min(max(remaining, 1), 50),
+                page_size=50,
                 page_token=page_token,
             )
             data = body.get("data") or {}

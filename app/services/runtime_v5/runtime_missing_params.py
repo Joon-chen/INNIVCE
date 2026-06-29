@@ -98,26 +98,36 @@ def pending_action_with_user_input(pending_action: dict[str, Any], user_input: s
     value = resolve_missing_param_value(contract, text) if contract else text
     target_key = contract.target_key if contract else "comment"
     filled_param = contract.filled_param if contract else target_key
+    previous_missing = [str(item) for item in pending_action.get("missing_params", []) if str(item)]
+    satisfied_params = {filled_param}
+    if contract is not None:
+        satisfied_params.add(contract.name)
+    remaining_missing = [item for item in previous_missing if item not in satisfied_params]
     message = message_with_text_param(str(pending_action.get("message") or ""), value, filled_param=filled_param)
     updated_target = {**target, target_key: value}
+    updated_entities = {**entities, target_key: value}
+    if contract is not None and contract.name == "target_type" and value:
+        updated_target["target_type"] = "person"
+        updated_entities["target_type"] = "person"
+        updated_entities.setdefault("target_name", value)
     updated_action_input = {
         **action_input,
         "target": updated_target,
         "message": message,
         "metadata": {
             **(action_input.get("metadata") if isinstance(action_input.get("metadata"), dict) else {}),
-            "missing_params": [],
+            "missing_params": remaining_missing,
             "filled_params": {filled_param: value},
         },
     }
     return {
         **pending_action,
         "message": message,
-        "entities": {**entities, target_key: value},
-        "missing_params": [],
+        "entities": updated_entities,
+        "missing_params": remaining_missing,
         "input_contract": {
-            "status": "waiting_confirmation",
-            "missing_params": [],
+            "status": "waiting_input" if remaining_missing else "waiting_confirmation",
+            "missing_params": remaining_missing,
             "filled_params": [filled_param],
         },
         "runtime_action_input": updated_action_input,
@@ -128,12 +138,19 @@ def waiting_input_still_missing(pending_action: dict[str, Any], user_input: str)
     contract = missing_param_contract(pending_action)
     if contract is None:
         return False
-    return not resolve_missing_param_value(contract, user_input)
+    value = resolve_missing_param_value(contract, user_input)
+    if contract.name == "delivery_mode" and value in {"bot_multi_notify", "user_multi_private"}:
+        return True
+    if "people_targets" in [str(item) for item in pending_action.get("missing_params", []) if str(item)]:
+        return True
+    return not value
 
 
 def missing_param_contract(pending_action: dict[str, Any]) -> MissingParamContract | None:
     missing_params = [str(item) for item in pending_action.get("missing_params", []) if str(item)]
     for param in missing_params:
+        if param == "people_targets":
+            continue
         contract = _MISSING_PARAM_REGISTRY.get(param)
         if contract is not None:
             return contract
@@ -201,7 +218,7 @@ def _normalize_delivery_mode(value: str) -> str:
         return "user_multi_private"
     if any(token in compact for token in ("拉群", "建群", "建个群", "创建群", "群里发", "发到群")):
         return "create_group_then_send"
-    return str(value or "").strip()
+    return ""
 
 
 def _delivery_mode_phrase(value: str) -> str:

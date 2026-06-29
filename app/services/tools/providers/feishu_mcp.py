@@ -104,6 +104,12 @@ def execute_feishu_mcp_realtime_tool(context: ToolContext | None, request: ToolR
     handlers = _feishu_mcp_realtime_handlers()
     handler = handlers.get(request.tool_name)
     if handler is not None:
+        if context is not None and request.tool_name in _TENANT_IM_TOOL_NAMES:
+            return _execute_tenant_im_tool(
+                context,
+                request,
+                fallback=lambda: _with_cli_profile(request, lambda: handler(request)),
+            )
         if request.tool_name == "mail_qa":
             if context is None:
                 return _with_cli_profile(request, lambda: handler(request))
@@ -3961,11 +3967,12 @@ def _run_contact_department_children(params: dict[str, Any], *, department_id: s
     return _run_lark_cli_json_loose(
         _contact_api_get_args(
             params,
-            "/open-apis/contact/v3/departments/" + department_id + "/children",
+            "/open-apis/contact/v3/departments/:department_id/children",
             query,
             label="api contact department children",
         ),
         action="api contact department children",
+        timeout=60,
     )
 
 
@@ -3985,6 +3992,7 @@ def _run_contact_department_users(params: dict[str, Any], *, department_id: str)
             label="api contact department users",
         ),
         action="api contact department users",
+        timeout=60,
     )
 
 

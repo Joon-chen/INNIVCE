@@ -1,12 +1,14 @@
 import json
 import os
 import re
-import time as _time
 from dataclasses import dataclass, replace
 from typing import Any
 
 from app.core.config import settings
 from app.services.agent.complex_task_matrix import QUERY_TO_BITABLE_ROUTE_HINTS, should_allow_query_to_bitable_route
+from app.services.agent.intents import classify_bot_intent
+from app.services.agent.query_bitable_lexicon import is_ambiguous_bitable_query, is_strong_bitable_query
+from app.services.llm.gateway import LLMGateway
 
 
 # Session cache for guided dialogue (clarification → user response → execution)
@@ -49,11 +51,6 @@ def _clear_session(chat_id: str) -> None:
         _redis_client.delete(_session_key(chat_id), _biz_key(chat_id))
     except Exception:
         pass
-from app.services.agent.query_bitable_lexicon import is_ambiguous_bitable_query, is_strong_bitable_query
-from app.services.agent.intents import classify_bot_intent
-from app.services.llm.gateway import LLMGateway
-
-
 ROUTE_HINTS = {
     "company_qa",
     "chat_summary",
@@ -218,6 +215,41 @@ def semantic_intent_for_question(*, question: str, normalized_command: str, acto
 
 def _heuristic_intent(*, question: str, normalized_command: str, actor: Any) -> SemanticIntent:
     intent = classify_bot_intent(question, normalized_command=normalized_command)
+    text = f"{question} {normalized_command}".lower()
+    if _contains(text, ("审批", "付款", "报销", "用章", "合同", "请假", "单子")) and _contains(
+        text,
+        ("拒绝", "驳回", "退回", "打回", "撤回", "加签", "转交", "抄送", "催办"),
+    ):
+        return SemanticIntent(
+            route_hint="approval_qa",
+            module_hint="approvals",
+            canonical_question=question,
+            confidence=0.92,
+            source="heuristic",
+            execution_category="action",
+        )
+    if _contains(text, ("任务", "待办")) and _contains(text, ("转办",)):
+        return SemanticIntent(
+            route_hint="task_qa",
+            module_hint="tasks",
+            canonical_question=question,
+            confidence=0.9,
+            source="heuristic",
+            execution_category="action",
+        )
+    if _contains(text, ("任务", "待办")) and (_DECISION_TERM_PATTERN.search(text) or _ANALYSIS_TERM_PATTERN.search(text)):
+        if _contains(text, ("群", "群里", "这个群", "当前群")) or getattr(actor, "access_scope", "") == "chat":
+            route_hint = "chat_tasks"
+        else:
+            route_hint = "personal_tasks" if _contains(text, ("我的", "我负责", "待我")) else "task_qa"
+        return SemanticIntent(
+            route_hint=route_hint,
+            module_hint="tasks",
+            canonical_question=question,
+            confidence=0.9,
+            source="heuristic",
+            execution_category=classify_execution_category_from_text(text=text, route_hint=route_hint),
+        )
     if intent.confidence >= 0.85:
         return SemanticIntent(
             route_hint=intent.route_hint,
@@ -228,7 +260,6 @@ def _heuristic_intent(*, question: str, normalized_command: str, actor: Any) -> 
             execution_category=getattr(intent, "execution_category", None),
         )
 
-    text = f"{question} {normalized_command}".lower()
     # Greeting + business mixed queries should NOT go to general_chat
     _business_kw = ("审批", "总经理", "公司", "组织架构", "职位", "电话", "邮箱", "谁", "多少", "哪", "什么", "信息")
     if _contains(text, ("你好", "好呀", "在吗", "还在吗", "不理我", "没回复", "没有回复", "什么情况", "卡住", "掉线", "离线")):
@@ -272,7 +303,7 @@ def _heuristic_intent(*, question: str, normalized_command: str, actor: Any) -> 
         if not _sn:
             pass  # fall through to normal search
         elif question == "我是谁":
-            return SemanticIntent(route_hint="general_chat", canonical_question=f"你是谁", confidence=0.92, source="heuristic", execution_category="query")
+            return SemanticIntent(route_hint="general_chat", canonical_question="你是谁", confidence=0.92, source="heuristic", execution_category="query")
         else:
             return SemanticIntent(route_hint="feishu_contact_user_get", canonical_question=question, confidence=0.92, source="heuristic", execution_category="query")
     if _contains(text, _PENDING_APPROVAL_TRIGGER_TERMS) and _contains(text, _PENDING_APPROVAL_SUBJECT_TERMS):
@@ -292,6 +323,19 @@ def _heuristic_intent(*, question: str, normalized_command: str, actor: Any) -> 
             confidence=0.9,
             source="heuristic",
             execution_category=None,
+        )
+    if _contains(text, ("任务", "待办")) and (_DECISION_TERM_PATTERN.search(text) or _ANALYSIS_TERM_PATTERN.search(text)):
+        if _contains(text, ("群", "群里", "这个群", "当前群")) or getattr(actor, "access_scope", "") == "chat":
+            route_hint = "chat_tasks"
+        else:
+            route_hint = "personal_tasks" if _contains(text, ("我的", "我负责", "待我")) else "task_qa"
+        return SemanticIntent(
+            route_hint=route_hint,
+            module_hint="tasks",
+            canonical_question=question,
+            confidence=0.9,
+            source="heuristic",
+            execution_category=classify_execution_category_from_text(text=text, route_hint=route_hint),
         )
     if _contains(text, ("风险", "预警", "隐患", "异常", "逾期")):
         return SemanticIntent(

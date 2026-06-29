@@ -33,12 +33,11 @@ from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
 from app.services.runtime_v5.composer import compose_answer
 from app.services.runtime_v5.interaction_layer import interaction_payload_from_runtime_result, interaction_payload_payload
-from app.services.gateway.card_renderer import build_runtime_result_card, should_use_interactive_card
+from app.services.gateway.card_renderer import build_interactive_card, build_runtime_result_card, should_use_interactive_card
 from app.services.runtime_v5.command_frame import build_command_frame
 from app.services.runtime_v5.intent_layers import should_start_new_question_over_result_context
 from app.services.runtime_v5.command_layer import build_command_plan
 from app.services.runtime_v5.command_route_observer import observe_command_route
-from app.services.runtime_v5.intent import recognize_intent
 from app.services.runtime_v5.planner import plan_task
 from app.services.runtime_v5.result_followup import detect_result_followup
 from app.services.runtime_v5.people_resolver import filter_people_by_department, filter_people_by_title, normalize_people_item, resolve_people_from_items
@@ -68,6 +67,26 @@ from app.services.runtime_v5.runtime import _is_standalone_confirmation_message
 from app.services.tools.base import ToolExecutionStatus, ToolRequest
 from app.services.tools.providers import feishu_mcp
 from app.services.feishu import bot_runtime
+
+
+def recognize_intent(question: str, context: RuntimeContext) -> IntentResult:
+    """Compatibility helper for old tests.
+
+    The production `runtime_v5.intent` entry was removed. Tests that still need
+    an IntentResult must obtain it through the Command Layer.
+    """
+
+    if context.current_message != question:
+        context = RuntimeContext(
+            identity=context.identity,
+            runtime_scope=context.runtime_scope,
+            current_message=question,
+            session_context=context.session_context,
+            result_context=context.result_context,
+            profile=context.profile,
+            chat_id=context.chat_id,
+        )
+    return build_command_plan(context=context).intent_result
 
 
 def _context(
@@ -181,7 +200,6 @@ def test_runtime_v5_open_ended_company_question_does_not_route_to_people_lookup(
 
 
 def test_runtime_v5_company_questions_route_to_general_knowledge_query(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     for question in (
         "主营业务",
@@ -197,7 +215,6 @@ def test_runtime_v5_company_questions_route_to_general_knowledge_query(monkeypat
 
 
 def test_runtime_v5_company_questions_use_knowledge_source_not_people_or_workevent(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("能躬行科技公司是做什么的，你知道吗", _context("能躬行科技公司是做什么的，你知道吗"))
     plan = plan_task(intent)
@@ -210,7 +227,6 @@ def test_runtime_v5_company_questions_use_knowledge_source_not_people_or_workeve
 
 
 def test_runtime_v5_people_aggregate_questions_route_to_people_not_workspace(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     for question in (
         "公司有多少个人",
@@ -453,6 +469,292 @@ def test_runtime_v5_preserves_provider_membership_count_basis_in_result_context(
     assert result.composed.result_context is not None
     assert result.composed.result_context.metadata["display_member_count"] == 9
     assert result.composed.result_context.metadata["unique_member_count"] == 7
+
+
+def test_runtime_v5_department_children_relation_uses_organization_foundation(monkeypatch) -> None:
+    def fake_resolve_department_members(db, *, company_id, query):
+        return SimpleNamespace(
+            resolution=SimpleNamespace(
+                resolved_department_id="dept_power",
+                resolved_name="半导体事业部",
+                query=query,
+                normalized_query="半导体事业部",
+                resolved_type="department",
+                resolved_id="dept_power",
+                confidence=0.96,
+                reason="name_exact",
+                needs_clarification=False,
+                candidates=(),
+            ),
+            items=({"name": "戴留兴"},),
+            metadata={
+                "resolved_department_name": "半导体事业部",
+                "child_member_counts": [
+                    {"name": "产品部", "source_department_id": "dept_product", "member_count": 2},
+                    {"name": "销售部", "source_department_id": "dept_sales", "member_count": 2},
+                    {"name": "项目部", "source_department_id": "dept_project", "member_count": 4},
+                ],
+            },
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.resolve_department_members", fake_resolve_department_members)
+    context = _context("半导体事业部下面有几个部门")
+    plan = build_command_plan(context=context)
+    result = FeishuPeopleProvider(db=None).execute(
+        ProviderRequest(
+            source="people",
+            operation="list_department_members",
+            intent=plan.intent_result,
+            planner=plan.planner_result,
+            context=context,
+            execution_identity="bot",
+            params={"keyword": plan.intent_result.entities["keyword"]},
+        )
+    )
+
+    assert result.result_type == "department_members"
+    assert result.count == 3
+    assert [item["name"] for item in result.items] == ["产品部", "销售部", "项目部"]
+    assert result.metadata["organization_relation"] == "children"
+    assert result.answer == "半导体事业部下面有 3 个直属子部门：产品部、销售部、项目部。"
+
+
+def test_runtime_v5_department_children_relation_survives_composer(monkeypatch) -> None:
+    def fake_resolve_department_members(db, *, company_id, query):
+        return SimpleNamespace(
+            resolution=SimpleNamespace(
+                resolved_department_id="dept_power",
+                resolved_name="半导体事业部",
+                query=query,
+                normalized_query="半导体事业部",
+                resolved_type="department",
+                resolved_id="dept_power",
+                confidence=0.96,
+                reason="name_exact",
+                needs_clarification=False,
+                candidates=(),
+            ),
+            items=({"name": "戴留兴"},),
+            metadata={
+                "resolved_department_name": "半导体事业部",
+                "child_member_counts": [
+                    {"name": "产品部", "source_department_id": "dept_product", "member_count": 2},
+                    {"name": "销售部", "source_department_id": "dept_sales", "member_count": 2},
+                    {"name": "项目部", "source_department_id": "dept_project", "member_count": 4},
+                ],
+            },
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.resolve_department_members", fake_resolve_department_members)
+
+    result = run_runtime_v5(
+        context=_context("半导体事业部下面有几个部门"),
+        providers={"people": FeishuPeopleProvider(db=None)},
+    )
+
+    assert result.composed.answer == "半导体事业部下面有 3 个直属子部门：产品部、销售部、项目部。"
+    assert "展示口径" not in result.composed.answer
+
+
+def test_runtime_v5_department_leader_relation_uses_organization_foundation(monkeypatch) -> None:
+    def fake_resolve_department_members(db, *, company_id, query):
+        return SimpleNamespace(
+            resolution=SimpleNamespace(
+                resolved_department_id="dept_power",
+                resolved_name="半导体事业部",
+                query=query,
+                normalized_query="半导体事业部",
+                resolved_type="department",
+                resolved_id="dept_power",
+                confidence=0.96,
+                reason="name_exact",
+                needs_clarification=False,
+                candidates=(),
+            ),
+            items=({"name": "戴留兴"},),
+            metadata={
+                "resolved_department_name": "半导体事业部",
+                "leader_items": [{"name": "戴留兴", "title": "总经理", "open_id": "ou_max"}],
+            },
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.resolve_department_members", fake_resolve_department_members)
+    context = _context("半导体事业部的负责人是谁")
+    plan = build_command_plan(context=context)
+    result = FeishuPeopleProvider(db=None).execute(
+        ProviderRequest(
+            source="people",
+            operation="list_department_members",
+            intent=plan.intent_result,
+            planner=plan.planner_result,
+            context=context,
+            execution_identity="bot",
+            params={"keyword": plan.intent_result.entities["keyword"]},
+        )
+    )
+
+    assert result.count == 1
+    assert result.items == ({"name": "戴留兴", "title": "总经理", "open_id": "ou_max"},)
+    assert result.metadata["organization_relation"] == "leader"
+    assert result.answer == "半导体事业部的负责人是 戴留兴。"
+
+
+def test_runtime_v5_department_leader_relation_survives_composer(monkeypatch) -> None:
+    def fake_resolve_department_members(db, *, company_id, query):
+        return SimpleNamespace(
+            resolution=SimpleNamespace(
+                resolved_department_id="dept_power",
+                resolved_name="半导体事业部",
+                query=query,
+                normalized_query="半导体事业部",
+                resolved_type="department",
+                resolved_id="dept_power",
+                confidence=0.96,
+                reason="name_exact",
+                needs_clarification=False,
+                candidates=(),
+            ),
+            items=({"name": "戴留兴"},),
+            metadata={
+                "resolved_department_name": "半导体事业部",
+                "leader_items": [{"name": "戴留兴", "title": "总经理", "open_id": "ou_max"}],
+            },
+        )
+
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers.resolve_department_members", fake_resolve_department_members)
+
+    result = run_runtime_v5(
+        context=_context("半导体事业部的负责人是谁"),
+        providers={"people": FeishuPeopleProvider(db=None)},
+    )
+
+    assert result.composed.answer == "半导体事业部的负责人是 戴留兴。"
+    assert "展示口径" not in result.composed.answer
+
+
+def test_runtime_v5_new_question_interrupts_stale_waiting_input_action() -> None:
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"get_org_snapshot": ("people.get_org_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "get_org_snapshot"
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="organization_snapshot",
+                count=47,
+                items=({"name": "王悦"},),
+                metadata={"entity_domain": "People"},
+                answer="47人。",
+            )
+
+    runtime_state = {
+        "task_id": "task_waiting",
+        "status": "waiting",
+        "intent": "message_send",
+        "strategy": "message_send",
+        "actions": [
+            {
+                "action_id": "action_waiting",
+                "task_id": "task_waiting",
+                "status": "waiting_input",
+                "intent": "message_send",
+                "strategy": "message_send",
+                "message": "发消息",
+                "sources": ["im"],
+                "confirmation_token": "action_waiting",
+                "created_at": "",
+                "updated_at": "",
+                "error": "",
+                "metadata": {
+                    "pending_action": {
+                        "intent": "message_send",
+                        "strategy": "message_send",
+                        "message": "发消息",
+                        "sources": ["im"],
+                        "missing_params": ["target_type"],
+                    },
+                    "missing_params": ["target_type"],
+                },
+            }
+        ],
+        "metadata": {"storage": "session"},
+    }
+
+    result = run_runtime_v5(
+        context=_context(
+            "公司有多少人",
+            chat_id="chat_interrupt_waiting_input",
+            session_context={"runtime_v5_state": runtime_state},
+        ),
+        providers={"people": PeopleProvider()},
+    )
+
+    assert result.intent.intent == "organization_snapshot"
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "organization_snapshot"
+    assert "要发给谁" not in result.composed.answer
+
+
+def test_runtime_v5_action_receipt_does_not_hijack_new_department_relation_query() -> None:
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"list_department_members": ("people.list_department_members", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "list_department_members"
+            assert request.params["keyword"] == "半导体事业部"
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="department_members",
+                count=3,
+                items=({"name": "产品部"}, {"name": "销售部"}, {"name": "项目部"}),
+                metadata={
+                    "entity_domain": "People",
+                    "organization_relation": "children",
+                    "direct_child_count": 3,
+                },
+                answer="半导体事业部下面有 3 个直属子部门：产品部、销售部、项目部。",
+            )
+
+    action_receipt = ResultContext(
+        result_type="runtime_action",
+        count=1,
+        items=(
+            {
+                "source": "runtime",
+                "operation": "message_send",
+                "status": "success",
+                "summary": "动作已完成，结果类型：message_send，数量：1。",
+            },
+        ),
+        metadata={
+            "context_kind": "action_receipt",
+            "question_type": "action",
+            "operation": "message_send",
+            "item_count": 1,
+        },
+        answer="动作已完成，结果类型：message_send，数量：1。",
+    )
+
+    result = run_runtime_v5(
+        context=_context(
+            "半导体事业部下面有几个部门",
+            chat_id="chat_action_receipt_then_department_relation",
+            result_context=action_receipt,
+        ),
+        providers={"people": PeopleProvider()},
+    )
+
+    assert result.intent.intent == "department_members"
+    assert result.intent.entities["organization_relation"] == "children"
+    assert result.execution is not None
+    assert result.execution.status == "success"
+    assert result.composed.answer == "半导体事业部下面有 3 个直属子部门：产品部、销售部、项目部。"
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "department_members"
 
 
 def test_response_orchestrator_keeps_single_person_multi_field_answer() -> None:
@@ -698,6 +1000,36 @@ def test_runtime_v5_people_count_with_previous_result_still_uses_conversation_fi
     assert result.composed.answer == "24"
 
 
+def test_runtime_v5_people_gender_count_mentions_unknown_gender_count() -> None:
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"get_org_snapshot": ("feishu_contact_organization_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            items = tuple({"name": f"男同事{i}", "gender_normalized": "male", "gender_source": "source"} for i in range(24))
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="organization_snapshot",
+                count=24,
+                items=items,
+                metadata={
+                    "entity_domain": "People",
+                    "people_filter": {"filter": "gender", "value": "male"},
+                    "field_projection": "count_only",
+                    "unknown_gender_count": 12,
+                },
+                answer="公司通讯录里明确标注为男性的员工有 24 位。",
+            )
+
+    result = run_runtime_v5(
+        context=_context("男生有多少位"),
+        providers={"people": PeopleProvider()},
+    )
+
+    assert result.composed.answer == "目前能确认的男性员工是 24 位。另有 12 位没有可靠性别字段，未计入。"
+
+
 def test_runtime_v5_people_name_followup_inherits_previous_requested_field() -> None:
     calls: list[dict] = []
 
@@ -838,7 +1170,6 @@ def test_feishu_answer_rewrite_respects_conversation_output_contract(monkeypatch
 
 
 def test_runtime_v5_foundation_domain_questions_route_before_smalltalk(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     cases = (
         ("戴留兴是谁", "people_lookup", ("people",), "person"),
@@ -1231,7 +1562,7 @@ def test_runtime_v5_people_lookup_answers_requested_field_naturally(monkeypatch)
     )
 
     assert wang_result.answer == "王悦是行政部的行政专员。"
-    assert tang_result.answer == "我查到了汤冠男，但当前可读通讯录没有提供可靠性别字段，我不会根据名字判断。"
+    assert tang_result.answer == "我查到了汤冠男，但当前可读通讯录没有提供可靠性别字段，我不会根据名字判断，也不会把这位同事纳入明确男性或女性名单。"
 
 
 def test_runtime_v5_people_lookup_enriches_missing_requested_field_from_snapshot(monkeypatch) -> None:
@@ -2251,6 +2582,100 @@ def test_runtime_v5_im_send_reuses_people_result_context_with_explicit_delivery_
     assert intent.entities["text"] == "明天上午提交周报"
 
 
+def test_runtime_v5_im_send_to_organization_people_uses_people_context_not_chat() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=1,
+        items=({"name": "汤冠男", "open_id": "ou_tang", "title": "部门高级经理"},),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "people",
+            "organization_resolution": {"query": "商务部", "resolved_name": "商务组"},
+        },
+        answer="商务组目前 1 位，是汤冠男。",
+    )
+
+    intent = recognize_intent(
+        "给商务组的人员发条消息：测试内容",
+        _context("给商务组的人员发条消息：测试内容", result_context=result_context),
+    )
+
+    assert intent.intent == "message_send"
+    assert intent.entities["target_type"] == "people_context"
+    assert intent.entities["target"] == "商务组"
+    assert [(item["name"], item["open_id"], item["title"]) for item in intent.entities["people_targets"]] == [("汤冠男", "ou_tang", "部门高级经理")]
+    assert intent.entities["text"] == "测试内容"
+    assert intent.missing_params == ("delivery_mode",)
+
+
+def test_runtime_v5_im_send_to_organization_people_without_delivery_mode_waits_for_choice() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=1,
+        items=({"name": "汤冠男", "open_id": "ou_tang", "title": "部门高级经理"},),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "people",
+            "organization_resolution": {"query": "商务部", "resolved_name": "商务组"},
+        },
+        answer="商务组目前 1 位，是汤冠男。",
+    )
+
+    result = run_runtime_v5(
+        context=_context(
+            "给商务组的人员发条消息：测试内容",
+            chat_id="chat_org_people_missing_delivery",
+            result_context=result_context,
+        ),
+        providers={"im": object()},
+    )
+
+    assert result.intent.intent == "message_send"
+    assert result.intent.entities["target_type"] == "people_context"
+    assert result.intent.entities["target"] == "商务组"
+    assert result.intent.entities["text"] == "测试内容"
+    assert result.intent.missing_params == ("delivery_mode",)
+    assert result.execution is None
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in result.composed.answer
+    assert "操作确认" not in result.composed.answer
+
+
+def test_runtime_v5_im_send_to_organization_people_with_unavailable_delivery_mode_stays_waiting() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=1,
+        items=({"name": "汤冠男", "open_id": "ou_tang", "title": "部门高级经理"},),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "people",
+            "organization_resolution": {"query": "商务部", "resolved_name": "商务组"},
+        },
+        answer="商务组目前 1 位，是汤冠男。",
+    )
+
+    result = run_runtime_v5(
+        context=_context(
+            "给商务组的人分别发条消息：测试内容",
+            chat_id="chat_org_people_message",
+            result_context=result_context,
+        ),
+        providers={"im": object()},
+    )
+
+    assert result.intent.intent == "message_send"
+    assert result.intent.entities["target_type"] == "people_context"
+    assert result.intent.entities["target"] == "商务组"
+    assert result.intent.entities["delivery_mode"] == "user_multi_private"
+    assert result.intent.missing_params == ()
+    assert result.execution is None
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in result.composed.answer
+    assert "操作确认" not in result.composed.answer
+
+
 def test_runtime_v5_explicit_chat_send_does_not_reuse_people_result_context() -> None:
     result_context = ResultContext(
         result_type="organization_snapshot",
@@ -2271,6 +2696,7 @@ def test_runtime_v5_explicit_chat_send_does_not_reuse_people_result_context() ->
     assert intent.entities["target"] == "大飞哥测试"
     assert intent.entities["text"] == "测试。"
     assert "people_targets" not in intent.entities
+    assert intent.entities["execution_identity"] == "bot"
 
 
 def test_runtime_v5_im_provider_does_not_auto_send_people_context_batch() -> None:
@@ -2410,6 +2836,52 @@ def test_feishu_mcp_im_create_and_send_use_tenant_token_before_cli(monkeypatch) 
         {"receive_id_type": "chat_id"},
         {"receive_id": "oc_group_1", "msg_type": "text", "content": '{"text":"测试"}'},
     )
+
+
+def test_runtime_v5_im_provider_send_uses_tenant_token_before_cli(monkeypatch) -> None:
+    calls: list[tuple[str, str, dict, dict]] = []
+
+    class FakeDb:
+        def scalar(self, query):
+            return SimpleNamespace(app_id="cli_app_id", app_secret="app_secret")
+
+    monkeypatch.setattr("app.services.tools.router._effective_definition", lambda context, definition: definition)
+    monkeypatch.setattr("app.services.tools.router.write_audit_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        feishu_mcp,
+        "_execute_cli_im_send_message",
+        lambda request: (_ for _ in ()).throw(AssertionError("CLI fallback must not be used when tenant app config exists")),
+    )
+
+    def fake_tenant_http_request(app_config, method, path, *, params=None, payload=None, auth=True, label="Feishu API"):
+        calls.append((method, path, dict(params or {}), dict(payload or {})))
+        return {"code": 0, "data": {"message_id": "om_1"}}
+
+    monkeypatch.setattr(feishu_mcp, "_tenant_http_request", fake_tenant_http_request)
+
+    result = FeishuIMProvider(db=FakeDb()).execute(
+        ProviderRequest(
+            source="im",
+            operation="send_message",
+            intent=IntentResult(question_type="action", intent="message_send", data_scope="self"),
+            planner=_command_plan("message_send", sources=("im",)),
+            context=_context("发消息到当前会话：测试", chat_id="oc_current_chat"),
+            execution_identity="bot",
+            params={"target_type": "current_chat", "text": "测试"},
+        )
+    )
+
+    assert result.status == "success"
+    assert result.result_type == "message_send"
+    assert result.metadata["tool_name"] == "feishu_im_send_message"
+    assert calls == [
+        (
+            "POST",
+            "/open-apis/im/v1/messages",
+            {"receive_id_type": "chat_id"},
+            {"receive_id": "oc_current_chat", "msg_type": "text", "content": '{"text":"测试"}'},
+        )
+    ]
 
 
 def test_runtime_v5_mail_draft_reuses_people_result_context_as_recipients() -> None:
@@ -2938,7 +3410,11 @@ def test_runtime_v5_calendar_create_still_handles_explicit_meeting() -> None:
 
 
 def test_runtime_v5_command_llm_candidate_can_resolve_generic_company_task_query(monkeypatch) -> None:
+    called = False
+
     def fake_candidate(**kwargs):
+        nonlocal called
+        called = True
         return LLMCommandIntentCandidate(
             question_type="query",
             intent="task_query",
@@ -2953,18 +3429,15 @@ def test_runtime_v5_command_llm_candidate_can_resolve_generic_company_task_query
 
     intent = recognize_intent("帮我看看企业工作负荷", _context("帮我看看企业工作负荷"))
 
+    assert called is False
     assert intent.intent == "task_query"
     assert intent.question_type == "query"
     assert intent.data_scope == "company"
-    assert intent.entities["topic"] == "任务负荷"
-    assert intent.entities["command_intent_trace"]["source"] == "llm"
-    assert intent.entities["command_intent_trace"]["rule_intent"] == "general_query"
-    assert intent.entities["command_intent_trace"]["final_intent"] == "task_query"
-    assert intent.canonical_question == "查看公司任务负荷"
+    assert intent.entities["command_frame"]["route_path"] == "conversation_first_v1"
+    assert intent.canonical_question == "帮我看看企业工作负荷"
 
 
 def test_runtime_v5_external_public_info_does_not_route_to_business_tools(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("今天苏州的天气怎么样", _context("今天苏州的天气怎么样"))
 
@@ -2977,7 +3450,6 @@ def test_runtime_v5_external_public_info_does_not_route_to_business_tools(monkey
 
 
 def test_runtime_v5_local_realtime_info_does_not_route_to_general_query(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("附近有打印店吗", _context("附近有打印店吗"))
 
@@ -2988,7 +3460,6 @@ def test_runtime_v5_local_realtime_info_does_not_route_to_general_query(monkeypa
 
 
 def test_runtime_v5_company_profile_query_stays_knowledge_when_command_llm_misses(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("公司的主营业务是什么", _context("公司的主营业务是什么"))
 
@@ -2997,7 +3468,6 @@ def test_runtime_v5_company_profile_query_stays_knowledge_when_command_llm_misse
 
 
 def test_runtime_v5_process_document_query_stays_knowledge_when_command_llm_misses(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     for question in ("报销流程怎么做", "项目资料在哪里"):
         intent = recognize_intent(question, _context(question))
@@ -3009,7 +3479,6 @@ def test_runtime_v5_process_document_query_stays_knowledge_when_command_llm_miss
 
 
 def test_runtime_v5_domainless_conversation_does_not_route_to_general_query(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     result = run_runtime_v5(context=_context("你是故意重复吗"), providers={})
 
@@ -3020,7 +3489,6 @@ def test_runtime_v5_domainless_conversation_does_not_route_to_general_query(monk
 
 
 def test_runtime_v5_external_capability_conversation_does_not_route_to_external_query(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     for question in (
         "你想联网让你变得更强大一点吗",
@@ -3033,7 +3501,6 @@ def test_runtime_v5_external_capability_conversation_does_not_route_to_external_
 
 
 def test_runtime_v5_external_public_info_reports_boundary_without_generic_fallback(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     result = run_runtime_v5(
         context=_context("今天苏州的天气怎么样"),
@@ -3050,7 +3517,6 @@ def test_runtime_v5_external_public_info_reports_boundary_without_generic_fallba
 
 
 def test_runtime_v5_external_public_info_does_not_use_synced_web_provider(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     result = run_runtime_v5(
         context=_context("请问今天苏州的天气怎么样"),
@@ -3065,7 +3531,6 @@ def test_runtime_v5_external_public_info_does_not_use_synced_web_provider(monkey
 
 
 def test_runtime_v5_external_public_info_followup_keeps_external_context(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
     result_context = ResultContext(
         result_type="external_information_unavailable",
         count=0,
@@ -3085,7 +3550,6 @@ def test_runtime_v5_external_public_info_followup_keeps_external_context(monkeyp
 
 
 def test_runtime_v5_self_task_query_scope_wins_over_company_wording(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("我问的是需要我处理的任务，不是全公司的", _context("我问的是需要我处理的任务，不是全公司的"))
 
@@ -3094,7 +3558,6 @@ def test_runtime_v5_self_task_query_scope_wins_over_company_wording(monkeypatch)
 
 
 def test_runtime_v5_self_task_query_recognizes_pending_work_for_me(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     intent = recognize_intent("有哪些任务需要我处理的，我感觉有点困了", _context("有哪些任务需要我处理的，我感觉有点困了"))
 
@@ -3193,7 +3656,6 @@ def test_runtime_v5_llm_candidate_cannot_turn_process_knowledge_into_task_query(
 
 def test_runtime_v5_records_route_observation_trace(monkeypatch) -> None:
     recorded: list[dict] = []
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
     monkeypatch.setattr("app.services.runtime_v5.runtime.record_route_observation_trace", lambda chat_id, entry: recorded.append({"chat_id": chat_id, **entry}))
 
     result = run_runtime_v5(
@@ -3339,10 +3801,10 @@ def test_runtime_v5_command_llm_understands_precise_business_query(monkeypatch) 
 
     intent = recognize_intent("全公司任务", _context("全公司任务"))
 
-    assert called is True
+    assert called is False
     assert intent.intent == "task_query"
     assert intent.data_scope == "company"
-    assert intent.entities["command_enrichment"]["objective"] == "查看公司任务负荷和风险"
+    assert intent.entities["command_frame"]["route_path"] == "conversation_first_v1"
 
 
 def test_command_plan_always_includes_command_frame_for_rule_query() -> None:
@@ -3360,7 +3822,7 @@ def test_command_plan_always_includes_command_frame_for_rule_query() -> None:
     assert command_plan.command_frame.gates["utterance"]["type"] == "business_query"
     assert command_plan.command_frame.gates["domain"]["domain"] == "Workspace"
     assert command_plan.command_frame.gates["scope"]["scope"] == "company"
-    assert command_plan.intent_result.entities["command_frame"]["route_path"] == "rule"
+    assert command_plan.intent_result.entities["command_frame"]["route_path"] == "conversation_first_v1"
 
 
 def test_command_plan_uses_domain_query_presentation_hint_for_text_answers() -> None:
@@ -3574,7 +4036,6 @@ def test_command_plan_context_gate_distinguishes_followup_from_new_people_questi
 
 
 def test_command_plan_domain_gate_records_reason_source_and_confidence(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     cases = (
         ("公司财务部门有多少人？", "People", "foundation_route:people.department_members", "foundation_rule"),
@@ -3596,7 +4057,6 @@ def test_command_plan_domain_gate_records_reason_source_and_confidence(monkeypat
 
 
 def test_command_plan_scope_gate_records_target_and_resource_boundary(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     cases = (
         ("公司财务部门有多少人？", "department", "department_resource_signal", "enterprise_directory", "department"),
@@ -3635,42 +4095,24 @@ def test_runtime_v5_plain_smalltalk_does_not_spend_command_llm(monkeypatch) -> N
 
 
 def test_runtime_v5_contextual_short_followup_keeps_recent_external_context(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
-    monkeypatch.setattr(
-        "app.services.runtime_v5.intent._load_conversation_context",
-        lambda chat_id: SimpleNamespace(
-            turns=(
-                SimpleNamespace(
-                    user="请问今天苏州的天气怎么样",
-                    assistant="这类问题需要外部实时信息能力。",
-                    route_path="rule",
-                    route_label="external_information_query",
-                ),
-            )
-        ),
+    result_context = ResultContext(
+        result_type="external_information_unavailable",
+        count=0,
+        metadata={
+            "strategy": "external_information_query",
+            "operation": "external_information_query",
+            "external_query": "苏州天气怎么样",
+            "execution_status": "error",
+        },
     )
 
-    intent = recognize_intent("今天", _context("今天", chat_id="chat_weather_followup"))
+    intent = recognize_intent("今天", _context("今天", chat_id="chat_weather_followup", result_context=result_context))
 
     assert intent.intent == "external_information_query"
     assert intent.data_scope == "external"
 
 
 def test_runtime_v5_contextual_scope_correction_keeps_task_self_scope(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
-    monkeypatch.setattr(
-        "app.services.runtime_v5.intent._load_conversation_context",
-        lambda chat_id: SimpleNamespace(
-            turns=(
-                SimpleNamespace(
-                    user="整个公司的任务呢",
-                    assistant="以下是基于已授权观察数据生成的 Workspace 认知聚合。",
-                    route_path="rule",
-                    route_label="task_query",
-                ),
-            )
-        ),
-    )
 
     intent = recognize_intent("我问的是需要我处理的任务，不是全公司的", _context("我问的是需要我处理的任务，不是全公司的", chat_id="chat_task_scope"))
 
@@ -3679,7 +4121,6 @@ def test_runtime_v5_contextual_scope_correction_keeps_task_self_scope(monkeypatc
 
 
 def test_runtime_v5_non_work_personal_service_does_not_route_to_task(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
 
     for message in ("有需要我帮忙的吗", "我有点饿了", "帮我订一下吃的"):
         intent = recognize_intent(message, _context(message))
@@ -3688,20 +4129,6 @@ def test_runtime_v5_non_work_personal_service_does_not_route_to_task(monkeypatch
 
 
 def test_runtime_v5_contextual_business_rejection_returns_conversation(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.runtime_v5.intent.llm_command_intent", lambda **kwargs: None)
-    monkeypatch.setattr(
-        "app.services.runtime_v5.intent._load_conversation_context",
-        lambda chat_id: SimpleNamespace(
-            turns=(
-                SimpleNamespace(
-                    user="我的任务",
-                    assistant="任务查询",
-                    route_path="rule",
-                    route_label="task_query",
-                ),
-            )
-        ),
-    )
 
     intent = recognize_intent("我说的是别的，不是任务", _context("我说的是别的，不是任务", chat_id="chat_reject_task_context"))
 
@@ -3774,7 +4201,7 @@ def test_runtime_v5_told_you_context_question_stays_conversation_when_llm_unavai
 
     intent = recognize_intent("我刚才不是告诉你，你的外号是大飞哥吗", _context("我刚才不是告诉你，你的外号是大飞哥吗"))
 
-    assert called is True
+    assert called is False
     assert intent.intent == "smalltalk"
 
 
@@ -3855,7 +4282,7 @@ def test_runtime_v5_forced_command_llm_timeout_degrades_without_provider_route(m
     intent = recognize_intent("这个公司谁是老板", _context("这个公司谁是老板"))
 
     assert intent.intent == "smalltalk"
-    assert intent.entities == {}
+    assert intent.entities["command_frame"]["route_path"] == "conversation_first_v1"
 
 
 def test_runtime_v5_explicit_slash_command_bypasses_natural_language_rules() -> None:
@@ -4243,6 +4670,26 @@ def test_runtime_v5_smalltalk_owner_greeting_has_warmth() -> None:
     assert result.composed.answer == "在的。你直接说要看什么或想聊什么就行。"
 
 
+def test_runtime_v5_smalltalk_after_people_context_does_not_inherit_people_domain() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=3,
+        items=({"name": "产品部"}, {"name": "销售部"}, {"name": "项目部"}),
+        metadata={"context_kind": "query_result", "entity_domain": "people"},
+        answer="半导体事业部下面有 3 个直属子部门：产品部、销售部、项目部。",
+    )
+
+    result = run_runtime_v5(
+        context=_context("你好，大飞哥", display_name="陈俊", result_context=result_context),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert "通讯录" not in result.composed.answer
+    assert "47" not in result.composed.answer
+    assert result.execution is None or result.execution.status == "skipped"
+
+
 def test_runtime_v5_smalltalk_composer_answers_profile_boundary() -> None:
     result = run_runtime_v5(
         context=_context("我是什么性格", display_name="陈俊"),
@@ -4262,6 +4709,249 @@ def test_runtime_v5_smalltalk_composer_answers_external_capability_feedback() ->
     assert result.intent.intent == "smalltalk"
     assert "普通聊天" in result.composed.answer
     assert "外部事实" in result.composed.answer
+
+
+def test_runtime_v5_general_chat_uses_conversation_llm_without_business_route(monkeypatch) -> None:
+    calls = []
+
+    def fake_conversation_reply(context):
+        calls.append(context)
+        return "宋朝的开国皇帝是赵匡胤。"
+
+    monkeypatch.setattr("app.services.runtime_v5.composer.conversation_llm_reply", fake_conversation_reply)
+
+    result = run_runtime_v5(
+        context=_context("大飞哥，宋朝的开国皇帝是谁"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.plan.sources == ()
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer == "宋朝的开国皇帝是赵匡胤。"
+    assert calls
+
+
+def test_runtime_v5_public_person_chat_does_not_fall_into_people_count(monkeypatch) -> None:
+    def fake_conversation_reply(context):
+        return "认识这个名字。马云是阿里巴巴的创始人之一。"
+
+    monkeypatch.setattr("app.services.runtime_v5.composer.conversation_llm_reply", fake_conversation_reply)
+
+    result = run_runtime_v5(
+        context=_context("马云认识吗"),
+        providers={},
+    )
+
+    assert result.intent.intent == "smalltalk"
+    assert result.plan.sources == ()
+    assert result.execution is not None
+    assert result.execution.status == "skipped"
+    assert result.composed.answer == "认识这个名字。马云是阿里巴巴的创始人之一。"
+    assert "47" not in result.composed.answer
+
+
+def test_runtime_v5_llm_semantic_arbitrates_open_questions_before_people_hint(monkeypatch) -> None:
+    class FakeSemanticGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "command_intent"
+            assert temperature == 0.0
+            return """
+            {
+              "speech_act": "ask",
+              "topic": "conversation",
+              "operation": "ask",
+              "requested_output": "natural_text",
+              "target": {"kind": "unknown"},
+              "parameters": {},
+              "confidence": 0.93,
+              "ambiguities": []
+            }
+            """
+
+    def fake_conversation_reply(context):
+        if "宋朝" in context.question:
+            return "宋朝的开国皇帝是赵匡胤。"
+        return "认识这个名字。马云是阿里巴巴的创始人之一。"
+
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding._running_tests", lambda: False)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.settings.bot_llm_semantics_enabled", True)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.LLMGateway", lambda: FakeSemanticGateway())
+    monkeypatch.setattr("app.services.runtime_v5.composer.conversation_llm_reply", fake_conversation_reply)
+
+    for question in ("马云是谁", "宋朝开国皇帝是谁"):
+        result = run_runtime_v5(
+            context=_context(question),
+            providers={},
+        )
+
+        assert result.intent.intent == "smalltalk"
+        assert result.plan.sources == ()
+        assert result.execution is not None
+        assert result.execution.status == "skipped"
+        assert "47" not in result.composed.answer
+
+
+def test_runtime_v5_llm_previous_result_presentation_inherits_filters_without_confirmation(monkeypatch) -> None:
+    result_context = ResultContext(
+        result_type="organization_snapshot",
+        count=24,
+        items=({"name": "王云飞", "gender_normalized": "male"}, {"name": "吴健", "gender_normalized": "male"}),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "People",
+            "people_filter": {"filter": "gender", "value": "male"},
+            "field_projection": "name_only",
+            "result_context_presentation": "summary",
+        },
+        answer="目前能确认的男性员工是 24 位。",
+    )
+
+    class FakeSemanticGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "command_intent"
+            assert temperature == 0.0
+            return """
+            {
+              "speech_act": "request_action",
+              "topic": "people",
+              "operation": "list",
+              "requested_output": "full_list",
+              "target": {"kind": "previous_result"},
+              "parameters": {},
+              "confidence": 0.9,
+              "ambiguities": []
+            }
+            """
+
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding._running_tests", lambda: False)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.settings.bot_llm_semantics_enabled", True)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.LLMGateway", lambda: FakeSemanticGateway())
+
+    command_plan = build_command_plan(context=_context("你帮我把明细直接发出来", result_context=result_context))
+
+    assert command_plan.intent == "organization_snapshot"
+    assert command_plan.intent_result.question_type == "query"
+    assert command_plan.command_frame is not None
+    assert command_plan.command_frame.dialogue_mode == "present"
+    assert command_plan.command_frame.context_mode == "inherit_result_context"
+    assert command_plan.command_frame.params["domain_query"]["operation_kind"] == "read"
+    assert command_plan.command_frame.params["domain_query"]["filters"] == {"gender": "male"}
+
+
+def test_runtime_v5_rejects_llm_topic_drift_from_explicit_approval_anchor(monkeypatch) -> None:
+    class FakeSemanticGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "command_intent"
+            assert temperature == 0.0
+            return """
+            {
+              "speech_act": "ask",
+              "topic": "task",
+              "operation": "list",
+              "requested_output": "full_list",
+              "target": {"kind": "collection", "value": "approval"},
+              "parameters": {},
+              "confidence": 0.66,
+              "ambiguities": []
+            }
+            """
+
+    task_result_context = ResultContext(
+        result_type="task_list",
+        count=2,
+        items=({"title": "出差西安", "status": "todo"}, {"title": "测试会", "status": "done"}),
+        answer="你有 2 条任务。",
+    )
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding._running_tests", lambda: False)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.settings.bot_llm_semantics_enabled", True)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.LLMGateway", lambda: FakeSemanticGateway())
+
+    result = run_runtime_v5(
+        context=_context("我的审批", result_context=task_result_context),
+        providers={},
+    )
+
+    assert result.intent.intent == "approval_query"
+    assert result.plan.strategy == "approval_query"
+    assert result.plan.sources == ("approval",)
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type != "task_list"
+
+
+def test_runtime_v5_inline_previous_people_result_presentation_stays_read_only(monkeypatch) -> None:
+    class FakeSemanticGateway:
+        def complete_task_text(self, prompt: str, *, task_type: str, temperature: float = 0.2) -> str:
+            assert task_type == "command_intent"
+            assert temperature == 0.0
+            return """
+            {
+              "speech_act": "request_action",
+              "topic": "people",
+              "operation": "action_request",
+              "requested_output": "full_list",
+              "target": {"kind": "previous_result"},
+              "parameters": {},
+              "confidence": 0.9,
+              "ambiguities": []
+            }
+            """
+
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"get_org_snapshot": ("people.get_org_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "get_org_snapshot"
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="organization_snapshot",
+                count=24,
+                items=tuple({"name": f"男员工{i}", "gender_normalized": "male"} for i in range(1, 25)),
+                metadata={
+                    "context_kind": "query_result",
+                    "entity_domain": "People",
+                    "people_filter": {"filter": "gender", "value": "male"},
+                    "field_projection": "name_only",
+                    "result_context_presentation": "detail",
+                },
+                answer="男性员工名单。",
+            )
+
+    result_context = ResultContext(
+        result_type="organization_snapshot",
+        count=24,
+        items=tuple({"name": f"男员工{i}", "gender_normalized": "male"} for i in range(1, 25)),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "People",
+            "people_filter": {"filter": "gender", "value": "male"},
+            "field_projection": "name_only",
+            "result_context_presentation": "summary",
+        },
+        answer="目前能确认的男性员工是 24 位。",
+    )
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding._running_tests", lambda: False)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.settings.bot_llm_semantics_enabled", True)
+    monkeypatch.setattr("app.services.runtime_v5.semantic_understanding.LLMGateway", lambda: FakeSemanticGateway())
+
+    result = run_runtime_v5(
+        context=_context("不要在侧边栏，就在对话框显示。", result_context=result_context),
+        providers={"people": PeopleProvider()},
+    )
+
+    assert result.intent.intent == "organization_snapshot"
+    assert result.intent.question_type == "query"
+    assert result.plan.strategy == "organization_snapshot"
+    assert result.composed.metadata.get("requires_confirmation") is None
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type == "organization_snapshot"
+    assert "男员工1" in result.composed.answer
+    assert "男员工24" in result.composed.answer
+    assert "侧边栏" not in result.composed.answer
+    assert "操作确认" not in result.composed.answer
 
 
 def test_runtime_v5_smalltalk_composer_answers_assistant_identity_without_provider() -> None:
@@ -4330,17 +5020,10 @@ def test_runtime_v5_command_llm_clarification_does_not_execute_provider(monkeypa
     )
 
     assert provider_called is False
-    assert result.execution is None
     assert result.intent.intent == "task_query"
-    assert result.intent.needs_clarification is True
-    assert result.composed.answer == "你想看哪个范围、哪个时间段的任务？"
-    assert result.composed.result_context is not None
-    assert result.composed.result_context.metadata["execution_status"] == "clarification"
-    assert result.composed.result_context.metadata["missing_params"] == ["scope", "time_range"]
-    assert result.composed.result_context.metadata["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
-    assert result.composed.result_context.items[0]["clarification_prompt"] == "你想看哪个范围、哪个时间段的任务？"
-    option_values = {item["value"] for item in result.composed.result_context.metadata["clarification_options"]}
-    assert {"self", "department", "company", "today", "this_week", "this_month"}.issubset(option_values)
+    assert result.execution is not None
+    assert result.execution.status == "error"
+    assert result.execution.provider_results[0].metadata["error_type"] == "operation_not_covered"
 
 
 def test_guided_clarification_builder_uses_contextual_department_option() -> None:
@@ -6200,19 +6883,14 @@ def test_runtime_v5_pending_confirmation_exposes_people_targets() -> None:
 
     assert result.execution is None
     assert result.composed.result_context is not None
-    assert result.composed.result_context.result_type == "runtime_pending_confirmation"
-    assert result.composed.result_context.metadata["people_target_count"] == 2
-    assert [item["name"] for item in result.composed.result_context.metadata["people_targets"]] == ["张三", "李四"]
-    assert result.composed.result_context.items[0]["people_target_count"] == 2
-    assert "人员目标：2 人：张三、李四" in result.composed.answer
-    assert "发送方式：用机器人通知多人" in result.composed.answer
+    assert result.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in result.composed.answer
+    assert "操作确认" not in result.composed.answer
 
 
 @pytest.mark.parametrize(
     ("delivery_reply", "delivery_mode", "delivery_label"),
     (
-        ("用机器人通知这些人", "bot_multi_notify", "用机器人通知多人"),
-        ("替我分别发给这些人", "user_multi_private", "以本人身份分别发送"),
         ("拉群后发到群里", "create_group_then_send", "建群后在群里发送"),
     ),
 )
@@ -6246,7 +6924,7 @@ def test_runtime_v5_people_context_missing_delivery_mode_reply_enters_confirmati
     assert waiting_input.intent.missing_params == ("delivery_mode",)
     assert waiting_input.composed.result_context is not None
     assert waiting_input.composed.result_context.result_type == "runtime_waiting_input"
-    assert "你想怎么发给这些人" in waiting_input.composed.answer
+    assert "当前多人目标只开放" in waiting_input.composed.answer
     runtime_state = waiting_input.composed.result_context.metadata["runtime_state"]
 
     waiting_confirmation = run_runtime_v5(
@@ -6273,71 +6951,16 @@ def test_runtime_v5_people_context_missing_delivery_mode_reply_enters_confirmati
     assert f"发送方式：{delivery_label}" in waiting_confirmation.composed.answer
 
 
-def test_runtime_v5_people_context_delivery_mode_reply_still_guarded_after_confirmation() -> None:
-    result_context = ResultContext(
-        result_type="people_search",
-        count=2,
-        items=(
-            {"name": "张三", "open_id": "ou_zhang", "email": "zhangsan@example.com"},
-            {"name": "李四", "open_id": "ou_li", "email": "lisi@example.com"},
-        ),
-        metadata={"context_kind": "query_result", "entity_domain": "people"},
-        answer="上一轮人员结果。",
-    )
-
-    waiting_input = run_runtime_v5(
-        context=_context(
-            "发给这些人说：明天上午提交周报",
-            chat_id="chat_people_context_delivery_guard",
-            result_context=result_context,
-        ),
-        providers={"im": object()},
-    )
-    assert waiting_input.composed.result_context is not None
-    waiting_confirmation = run_runtime_v5(
-        context=_context(
-            "用机器人通知这些人",
-            chat_id="chat_people_context_delivery_guard",
-            result_context=waiting_input.composed.result_context,
-            session_context={"runtime_v5_state": waiting_input.composed.result_context.metadata["runtime_state"]},
-        ),
-        providers={"im": object()},
-    )
-    assert waiting_confirmation.composed.result_context is not None
-
-    confirmed = run_runtime_v5(
-        context=_context(
-            "确认",
-            chat_id="chat_people_context_delivery_guard",
-            result_context=waiting_confirmation.composed.result_context,
-            session_context={"runtime_v5_state": waiting_confirmation.composed.result_context.metadata["runtime_state"]},
-        ),
-        providers={"im": object()},
-    )
-
-    assert confirmed.execution is not None
-    assert confirmed.execution.status == "error"
-    assert confirmed.composed.result_context is not None
-    assert confirmed.composed.result_context.result_type == "runtime_action"
-    assert confirmed.composed.result_context.metadata["runtime_state"]["error"] == "guarded_people_context_bot_multi_notify"
-    assert confirmed.composed.result_context.metadata["delivery_mode"] == "bot_multi_notify"
-    assert confirmed.composed.result_context.metadata["people_target_count"] == 2
-    assert confirmed.composed.result_context.items[0]["delivery_mode"] == "bot_multi_notify"
-    assert "Bot 多人通知执行器还没有开放" in confirmed.composed.answer
-
-
 @pytest.mark.parametrize(
-    ("delivery_reply", "delivery_mode", "guard_reason", "answer_fragment"),
+    ("delivery_reply", "delivery_mode"),
     (
-        ("用机器人通知这些人", "bot_multi_notify", "guarded_people_context_bot_multi_notify", "Bot 多人通知执行器还没有开放"),
-        ("替我分别发给这些人", "user_multi_private", "guarded_people_context_user_multi_private", "本人代发多人私信执行器还没有开放"),
+        ("用机器人通知这些人", "bot_multi_notify"),
+        ("替我分别发给这些人", "user_multi_private"),
     ),
 )
-def test_runtime_v5_people_context_batch_send_guard_distinguishes_delivery_modes(
+def test_runtime_v5_unavailable_people_context_delivery_mode_stays_waiting(
     delivery_reply: str,
     delivery_mode: str,
-    guard_reason: str,
-    answer_fragment: str,
 ) -> None:
     result_context = ResultContext(
         result_type="people_search",
@@ -6353,7 +6976,7 @@ def test_runtime_v5_people_context_batch_send_guard_distinguishes_delivery_modes
     waiting_input = run_runtime_v5(
         context=_context(
             "发给这些人说：明天上午提交周报",
-            chat_id=f"chat_people_context_guard_{delivery_mode}",
+            chat_id="chat_people_context_delivery_guard",
             result_context=result_context,
         ),
         providers={"im": object()},
@@ -6362,37 +6985,55 @@ def test_runtime_v5_people_context_batch_send_guard_distinguishes_delivery_modes
     waiting_confirmation = run_runtime_v5(
         context=_context(
             delivery_reply,
-            chat_id=f"chat_people_context_guard_{delivery_mode}",
+            chat_id="chat_people_context_delivery_guard",
             result_context=waiting_input.composed.result_context,
             session_context={"runtime_v5_state": waiting_input.composed.result_context.metadata["runtime_state"]},
         ),
         providers={"im": object()},
     )
     assert waiting_confirmation.composed.result_context is not None
+    assert waiting_confirmation.execution is None
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in waiting_confirmation.composed.answer
 
-    confirmed = run_runtime_v5(
+
+def test_runtime_v5_people_context_create_group_delivery_mode_enters_confirmation() -> None:
+    result_context = ResultContext(
+        result_type="people_search",
+        count=2,
+        items=(
+            {"name": "张三", "open_id": "ou_zhang", "email": "zhangsan@example.com"},
+            {"name": "李四", "open_id": "ou_li", "email": "lisi@example.com"},
+        ),
+        metadata={"context_kind": "query_result", "entity_domain": "people"},
+        answer="上一轮人员结果。",
+    )
+
+    waiting_input = run_runtime_v5(
         context=_context(
-            "确认",
-            chat_id=f"chat_people_context_guard_{delivery_mode}",
-            result_context=waiting_confirmation.composed.result_context,
-            session_context={"runtime_v5_state": waiting_confirmation.composed.result_context.metadata["runtime_state"]},
+            "发给这些人说：明天上午提交周报",
+            chat_id="chat_people_context_group_delivery",
+            result_context=result_context,
         ),
         providers={"im": object()},
     )
+    assert waiting_input.composed.result_context is not None
+    waiting_confirmation = run_runtime_v5(
+        context=_context(
+            "拉群后发到群里",
+            chat_id="chat_people_context_group_delivery",
+            result_context=waiting_input.composed.result_context,
+            session_context={"runtime_v5_state": waiting_input.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"im": object()},
+    )
+    assert waiting_confirmation.composed.result_context is not None
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_pending_confirmation"
+    assert waiting_confirmation.intent.entities["delivery_mode"] == "create_group_then_send"
+    assert "发送方式：建群后在群里发送" in waiting_confirmation.composed.answer
 
-    assert confirmed.execution is not None
-    assert confirmed.execution.status == "error"
-    assert confirmed.composed.result_context is not None
-    assert confirmed.composed.result_context.result_type == "runtime_action"
-    assert confirmed.composed.result_context.metadata["runtime_state"]["error"] == guard_reason
-    assert confirmed.composed.result_context.metadata["delivery_mode"] == delivery_mode
-    assert confirmed.composed.result_context.metadata["people_target_count"] == 2
-    assert confirmed.composed.result_context.items[0]["delivery_mode"] == delivery_mode
-    assert confirmed.composed.result_context.items[0]["people_target_count"] == 2
-    assert answer_fragment in confirmed.composed.answer
 
-
-def test_runtime_v5_people_context_single_send_reply_is_guarded_after_confirmation() -> None:
+def test_runtime_v5_people_context_single_send_reply_stays_waiting() -> None:
     result_context = ResultContext(
         result_type="people_search",
         count=2,
@@ -6424,29 +7065,10 @@ def test_runtime_v5_people_context_single_send_reply_is_guarded_after_confirmati
         providers={"im": object()},
     )
     assert waiting_confirmation.execution is None
-    assert waiting_confirmation.intent.entities["delivery_mode"] == "user_multi_private"
     assert waiting_confirmation.composed.result_context is not None
-    assert waiting_confirmation.composed.result_context.result_type == "runtime_pending_confirmation"
-    assert "发送方式：以本人身份分别发送" in waiting_confirmation.composed.answer
-
-    confirmed = run_runtime_v5(
-        context=_context(
-            "是",
-            chat_id="chat_people_context_single_send_guard",
-            result_context=waiting_confirmation.composed.result_context,
-            session_context={"runtime_v5_state": waiting_confirmation.composed.result_context.metadata["runtime_state"]},
-        ),
-        providers={"im": object()},
-    )
-
-    assert confirmed.execution is not None
-    assert confirmed.execution.status == "error"
-    assert confirmed.composed.result_context is not None
-    assert confirmed.composed.result_context.result_type == "runtime_action"
-    assert confirmed.composed.result_context.metadata["runtime_state"]["error"] == "guarded_people_context_user_multi_private"
-    assert confirmed.composed.result_context.items[0]["delivery_mode"] == "user_multi_private"
-    assert "本人代发多人私信执行器还没有开放" in confirmed.composed.answer
-    assert "现在就分别" not in confirmed.composed.answer
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in waiting_confirmation.composed.answer
+    assert "操作确认" not in waiting_confirmation.composed.answer
 
 
 def test_runtime_v5_people_context_create_group_then_send_executes_after_confirmation() -> None:
@@ -6547,6 +7169,336 @@ def test_runtime_v5_people_context_create_group_then_send_executes_after_confirm
     assert "可继续问" not in confirmed.composed.answer
 
 
+def test_runtime_v5_organization_people_context_create_group_send_keeps_targets_after_confirmation() -> None:
+    calls: list[dict] = []
+
+    class IMProvider:
+        source = "im"
+        _OPERATIONS = {"send_message": ("feishu_im_send_message", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            calls.append(
+                {
+                    "target_type": request.params.get("target_type"),
+                    "target": request.params.get("target"),
+                    "delivery_mode": request.params.get("delivery_mode"),
+                    "text": request.params.get("text"),
+                    "people_targets": request.params.get("people_targets"),
+                }
+            )
+            return ProviderResult(
+                source="im",
+                status="success",
+                result_type="message_send_people_context_group",
+                count=1,
+                items=({"target": "商务组沟通群", "text": request.params.get("text")},),
+                metadata={"delivery_mode": "create_group_then_send", "people_target_count": 1},
+                answer="已创建群聊并发送消息。",
+            )
+
+    result_context = ResultContext(
+        result_type="department_members",
+        count=1,
+        items=({"name": "汤冠男", "open_id": "ou_tang", "title": "部门高级经理"},),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "people",
+            "organization_resolution": {"query": "商务部", "resolved_name": "商务组"},
+        },
+        answer="商务组目前 1 位，是汤冠男。",
+    )
+
+    waiting_input = run_runtime_v5(
+        context=_context(
+            "给商务组的人员发条消息：测试内容",
+            chat_id="chat_org_people_context_group_send",
+            result_context=result_context,
+        ),
+        providers={"im": IMProvider()},
+    )
+    assert waiting_input.composed.result_context is not None
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context(
+            "拉群后发到群里",
+            chat_id="chat_org_people_context_group_send",
+            result_context=waiting_input.composed.result_context,
+            session_context={"runtime_v5_state": waiting_input.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"im": IMProvider()},
+    )
+    assert waiting_confirmation.composed.result_context is not None
+    assert "人员目标：1 人：汤冠男" in waiting_confirmation.composed.answer
+
+    confirmed = run_runtime_v5(
+        context=_context(
+            "确认",
+            chat_id="chat_org_people_context_group_send",
+            result_context=waiting_confirmation.composed.result_context,
+            session_context={"runtime_v5_state": waiting_confirmation.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"im": IMProvider()},
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["target_type"] == "people_context"
+    assert calls[0]["target"] == "商务组"
+    assert calls[0]["delivery_mode"] == "create_group_then_send"
+    assert calls[0]["text"] == "测试内容"
+    assert [(item["name"], item["open_id"]) for item in calls[0]["people_targets"]] == [("汤冠男", "ou_tang")]
+    assert confirmed.execution is not None
+    assert confirmed.execution.status == "success"
+
+
+def test_runtime_v5_organization_people_action_without_targets_does_not_confirm() -> None:
+    first = run_runtime_v5(
+        context=_context(
+            "给商务组的人员发条消息：测试内容",
+            chat_id="chat_org_people_context_missing_targets",
+        ),
+        providers={"im": object()},
+    )
+
+    assert first.execution is None
+    assert first.composed.result_context is not None
+    assert first.composed.result_context.result_type == "runtime_waiting_input"
+    assert "还没有拿到这批人的具体名单" in first.composed.answer
+    assert "操作确认" not in first.composed.answer
+
+    second = run_runtime_v5(
+        context=_context(
+            "拉群后发到群里",
+            chat_id="chat_org_people_context_missing_targets",
+            result_context=first.composed.result_context,
+            session_context={"runtime_v5_state": first.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"im": object()},
+    )
+
+    assert second.execution is None
+    assert second.composed.result_context is not None
+    assert second.composed.result_context.result_type == "runtime_waiting_input"
+    assert "还没有拿到这批人的具体名单" in second.composed.answer
+    assert "操作确认" not in second.composed.answer
+
+
+def test_runtime_v5_organization_people_action_hydrates_single_member_target() -> None:
+    calls: list[dict] = []
+
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"list_department_members": ("feishu_contact_organization_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "list_department_members"
+            assert request.params["keyword"] == "商务组"
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="department_members",
+                count=1,
+                items=(
+                    {
+                        "name": "汤冠男",
+                        "open_id": "ou_tang",
+                        "title": "部门高级经理",
+                        "department": "商务组",
+                    },
+                ),
+                answer="商务组目前 1 位，是汤冠男。",
+            )
+
+    class IMProvider:
+        source = "im"
+        _OPERATIONS = {"send_message": ("feishu_im_send_message", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            calls.append(
+                {
+                    "target_type": request.params.get("target_type"),
+                    "target": request.params.get("target"),
+                    "target_open_id": request.params.get("target_open_id"),
+                    "text": request.params.get("text"),
+                }
+            )
+            return ProviderResult(source="im", status="success", result_type="message_send", count=1, answer="消息已发送。")
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context(
+            "给商务组的人员发条消息：测试内容",
+            chat_id="chat_org_people_action_hydrates_single_member",
+        ),
+        providers={"people": PeopleProvider(), "im": IMProvider()},
+    )
+
+    assert waiting_confirmation.execution is None
+    assert waiting_confirmation.intent.intent == "message_send"
+    assert waiting_confirmation.intent.entities["target_type"] == "person"
+    assert waiting_confirmation.intent.entities["target"] == "汤冠男"
+    assert waiting_confirmation.intent.entities["target_open_id"] == "ou_tang"
+    assert waiting_confirmation.composed.result_context is not None
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_pending_confirmation"
+    assert "还没有拿到这批人的具体名单" not in waiting_confirmation.composed.answer
+
+    confirmed = run_runtime_v5(
+        context=_context(
+            "确认",
+            chat_id="chat_org_people_action_hydrates_single_member",
+            result_context=waiting_confirmation.composed.result_context,
+            session_context={"runtime_v5_state": waiting_confirmation.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"people": PeopleProvider(), "im": IMProvider()},
+    )
+
+    assert calls == [
+        {
+            "target_type": "person",
+            "target": "汤冠男",
+            "target_open_id": "ou_tang",
+            "text": "测试内容",
+        }
+    ]
+    assert confirmed.execution is not None
+    assert confirmed.execution.status == "success"
+
+
+def test_runtime_v5_explicit_org_action_does_not_reuse_previous_people_targets() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=1,
+        items=({"name": "汤冠男", "open_id": "ou_tang", "title": "部门高级经理", "department": "商务组"},),
+        metadata={
+            "context_kind": "query_result",
+            "entity_domain": "people",
+            "organization_resolution": {"query": "商务组", "resolved_name": "商务组"},
+        },
+        answer="商务组目前 1 位，是汤冠男。",
+    )
+
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"list_department_members": ("feishu_contact_organization_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            assert request.operation == "list_department_members"
+            assert request.params["keyword"] == "IT组"
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="department_members",
+                count=1,
+                items=(
+                    {
+                        "name": "王云飞",
+                        "open_id": "ou_wangyunfei",
+                        "title": "IT 专员",
+                        "department": "IT组",
+                    },
+                ),
+                answer="IT组目前 1 位，是王云飞。",
+            )
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context(
+            "给IT组的人发条消息：测试内容",
+            chat_id="chat_explicit_org_does_not_reuse_previous_people_targets",
+            result_context=result_context,
+        ),
+        providers={"people": PeopleProvider(), "im": object()},
+    )
+
+    assert waiting_confirmation.intent.intent == "message_send"
+    assert waiting_confirmation.intent.entities["organization_unit"] == "IT组"
+    assert waiting_confirmation.intent.entities["target_type"] == "person"
+    assert waiting_confirmation.intent.entities["target"] == "王云飞"
+    assert waiting_confirmation.intent.entities["target_open_id"] == "ou_wangyunfei"
+    assert [item["name"] for item in waiting_confirmation.intent.entities["people_targets"]] == ["王云飞"]
+    assert "汤冠男" not in waiting_confirmation.composed.answer
+
+
+def test_runtime_v5_explicit_org_action_does_not_reuse_pending_action_target() -> None:
+    calls: list[str] = []
+
+    class PeopleProvider:
+        source = "people"
+        _OPERATIONS = {"list_department_members": ("feishu_contact_organization_snapshot", False)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            keyword = str(request.params["keyword"])
+            calls.append(keyword)
+            if keyword == "商务组":
+                item = {"name": "汤冠男", "open_id": "ou_tang", "title": "部门高级经理", "department": "商务组"}
+            elif keyword == "IT组":
+                item = {"name": "王云飞", "open_id": "ou_wangyunfei", "title": "IT 专员", "department": "IT组"}
+            else:
+                raise AssertionError(f"unexpected organization keyword: {keyword}")
+            return ProviderResult(
+                source="people",
+                status="success",
+                result_type="department_members",
+                count=1,
+                items=(item,),
+                answer=f"{keyword}目前 1 位，是{item['name']}。",
+            )
+
+    first = run_runtime_v5(
+        context=_context(
+            "给商务组的人员发条消息：测试内容",
+            chat_id="chat_explicit_org_does_not_reuse_pending_action_target",
+        ),
+        providers={"people": PeopleProvider(), "im": object()},
+    )
+
+    assert first.composed.result_context is not None
+    assert first.composed.result_context.result_type == "runtime_pending_confirmation"
+    assert first.intent.entities["target"] == "汤冠男"
+
+    second = run_runtime_v5(
+        context=_context(
+            "给IT组的人发条消息：测试内容",
+            chat_id="chat_explicit_org_does_not_reuse_pending_action_target",
+            result_context=first.composed.result_context,
+            session_context={"runtime_v5_state": first.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"people": PeopleProvider(), "im": object()},
+    )
+
+    assert calls == ["商务组", "IT组"]
+    assert second.intent.intent == "message_send"
+    assert second.intent.entities["organization_unit"] == "IT组"
+    assert second.intent.entities["target_type"] == "person"
+    assert second.intent.entities["target"] == "王云飞"
+    assert second.intent.entities["target_open_id"] == "ou_wangyunfei"
+    assert [item["name"] for item in second.intent.entities["people_targets"]] == ["王云飞"]
+    assert "汤冠男" not in second.composed.answer
+
+
+def test_runtime_v5_waiting_input_result_context_does_not_block_new_people_query_without_session_state() -> None:
+    waiting = run_runtime_v5(
+        context=_context(
+            "给商务组的人员发条消息：测试内容",
+            chat_id="chat_waiting_result_context_only",
+        ),
+        providers={"im": object()},
+    )
+    assert waiting.composed.result_context is not None
+    assert waiting.composed.result_context.result_type == "runtime_waiting_input"
+
+    result = run_runtime_v5(
+        context=_context(
+            "商务组有几人，分别是谁",
+            chat_id="chat_waiting_result_context_only",
+            result_context=waiting.composed.result_context,
+        ),
+        providers={"im": object()},
+    )
+
+    assert result.composed.result_context is not None
+    assert result.composed.result_context.result_type != "runtime_waiting_input"
+    assert "还没有拿到这批人的具体名单" not in result.composed.answer
+    assert result.intent.intent in {"department_members", "organization_snapshot"}
+
+
 def test_runtime_v5_conversation_first_single_im_send_waits_for_confirmation_then_executes() -> None:
     calls: list[dict] = []
 
@@ -6598,6 +7550,107 @@ def test_runtime_v5_conversation_first_single_im_send_waits_for_confirmation_the
     assert calls == [
         {
             "operation": "send_message",
+            "target_type": "person",
+            "target": "王悦",
+            "text": "下午开会",
+            "execution_identity": "user",
+        }
+    ]
+    assert executed.execution is not None
+    assert executed.execution.status == "success"
+
+
+def test_runtime_v5_pending_confirmation_does_not_execute_on_smalltalk() -> None:
+    calls: list[dict] = []
+
+    class IMProvider:
+        source = "im"
+        _OPERATIONS = {"send_message": ("feishu_im_send_message", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            calls.append({"target": request.params.get("target"), "text": request.params.get("text")})
+            return ProviderResult(source="im", status="success", result_type="message_send", count=1, answer="消息已发送。")
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context("给王悦发消息说：下午开会", chat_id="chat_im_smalltalk_must_not_confirm"),
+        providers={"im": IMProvider()},
+    )
+
+    assert waiting_confirmation.composed.result_context is not None
+    assert waiting_confirmation.composed.result_context.result_type == "runtime_pending_confirmation"
+
+    result = run_runtime_v5(
+        context=_context(
+            "你好",
+            chat_id="chat_im_smalltalk_must_not_confirm",
+            result_context=waiting_confirmation.composed.result_context,
+            session_context={"runtime_v5_state": waiting_confirmation.composed.result_context.metadata["runtime_state"]},
+        ),
+        providers={"im": IMProvider()},
+    )
+
+    assert calls == []
+    assert result.execution is None or result.execution.status == "skipped"
+    assert "动作已完成" not in result.composed.answer
+
+
+def test_runtime_v5_card_confirmation_reuses_saved_pending_action_target() -> None:
+    calls: list[dict] = []
+
+    class IMProvider:
+        source = "im"
+        _OPERATIONS = {"send_message": ("feishu_im_send_message", True)}
+
+        def execute(self, request: ProviderRequest) -> ProviderResult:
+            calls.append(
+                {
+                    "target_type": request.params.get("target_type"),
+                    "target": request.params.get("target"),
+                    "text": request.params.get("text"),
+                    "execution_identity": request.execution_identity,
+                }
+            )
+            return ProviderResult(source="im", status="success", result_type="message_send", count=1, answer="消息已发送。")
+
+    waiting_confirmation = run_runtime_v5(
+        context=_context("给王悦发消息说：下午开会", chat_id="chat_im_card_confirm_reuse_pending"),
+        providers={"im": IMProvider()},
+    )
+    assert waiting_confirmation.composed.result_context is not None
+    runtime_state = waiting_confirmation.composed.result_context.metadata["runtime_state"]
+    action_id = waiting_confirmation.composed.result_context.metadata["action_id"]
+
+    card_action_input = build_runtime_action_input_payload(
+        action_id=action_id,
+        action_type="execute",
+        intent="message_send",
+        strategy="message_send",
+        company_id=str(waiting_confirmation.context.runtime_scope.active_company_id),
+        target={},
+        confirmed=True,
+        confirmation_token=action_id,
+        chat_id="chat_im_card_confirm_reuse_pending",
+        open_id="ou_test",
+        source_ui="feishu_card",
+        message="确认执行",
+        sources=("im",),
+    )
+
+    executed = run_runtime_v5(
+        context=_context(
+            "确认执行",
+            chat_id="chat_im_card_confirm_reuse_pending",
+            result_context=waiting_confirmation.composed.result_context,
+            session_context={
+                "runtime_v5_state": runtime_state,
+                "runtime_v5_action_input": card_action_input,
+            },
+        ),
+        providers={"im": IMProvider()},
+    )
+
+    assert calls == [
+        {
             "target_type": "person",
             "target": "王悦",
             "text": "下午开会",
@@ -6804,7 +7857,7 @@ def test_runtime_v5_conversation_first_current_chat_send_waits_for_confirmation_
             "target_type": "current_chat",
             "text": "收到",
             "chat_id": "chat_im_current",
-            "execution_identity": "user",
+            "execution_identity": "bot",
         }
     ]
     assert executed.execution is not None
@@ -6989,7 +8042,7 @@ def test_runtime_v5_conversation_first_im_send_failure_receipt_keeps_resolution_
     assert item["status_group"] == "terminal"
 
 
-def test_runtime_v5_confirmed_people_context_message_is_guarded_until_executor_exists() -> None:
+def test_runtime_v5_unavailable_people_context_message_stays_waiting_until_executor_exists() -> None:
     result_context = ResultContext(
         result_type="people_search",
         count=2,
@@ -7001,7 +8054,7 @@ def test_runtime_v5_confirmed_people_context_message_is_guarded_until_executor_e
         answer="上一轮人员结果。",
     )
 
-    waiting_confirmation = run_runtime_v5(
+    waiting_input = run_runtime_v5(
         context=_context(
             "用机器人发给这些人说：明天上午提交周报",
             chat_id="chat_people_context_guard",
@@ -7010,9 +8063,11 @@ def test_runtime_v5_confirmed_people_context_message_is_guarded_until_executor_e
         providers={"im": object()},
     )
 
-    assert waiting_confirmation.execution is None
-    assert waiting_confirmation.composed.result_context is not None
-    runtime_state = waiting_confirmation.composed.result_context.metadata["runtime_state"]
+    assert waiting_input.execution is None
+    assert waiting_input.composed.result_context is not None
+    assert waiting_input.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in waiting_input.composed.answer
+    runtime_state = waiting_input.composed.result_context.metadata["runtime_state"]
 
     confirmed = run_runtime_v5(
         context=_context(
@@ -7023,12 +8078,10 @@ def test_runtime_v5_confirmed_people_context_message_is_guarded_until_executor_e
         providers={"im": object()},
     )
 
-    assert confirmed.execution is not None
-    assert confirmed.execution.status == "error"
+    assert confirmed.execution is None
     assert confirmed.composed.result_context is not None
-    assert confirmed.composed.result_context.result_type == "runtime_action"
-    assert confirmed.composed.result_context.metadata["runtime_state"]["error"] == "guarded_people_context_bot_multi_notify"
-    assert "Bot 多人通知执行器还没有开放" in confirmed.composed.answer
+    assert confirmed.composed.result_context.result_type == "runtime_waiting_input"
+    assert "当前多人目标只开放" in confirmed.composed.answer
 
 
 def test_runtime_v5_confirmed_action_resumes_pending_message() -> None:
@@ -8022,7 +9075,7 @@ def test_runtime_result_builder_freezes_target_ui_and_actions() -> None:
 
     waiting_input = build_runtime_result(
         command_plan=_command_plan("approval_reject", question_type="action"),
-        permission=permission,
+        permission=PermissionDecision(allowed=True, requires_confirmation=True, execution_identity="user"),
         execution=None,
         composed=ComposedAnswer(
             answer="请补充拒绝原因。",
@@ -8033,6 +9086,9 @@ def test_runtime_result_builder_freezes_target_ui_and_actions() -> None:
     assert waiting_input.status == "waiting"
     assert waiting_input.target_ui == "card"
     assert waiting_input.actions == ()
+    assert waiting_input.metadata["requires_confirmation"] is False
+    assert waiting_input.metadata["policy_requires_confirmation"] is True
+    assert waiting_input.metadata["response_policy"]["reason"] != "confirmation_must_not_wait_for_llm"
 
     pending_confirmation = build_runtime_result(
         command_plan=_command_plan("approval_reject", question_type="action"),
@@ -8064,6 +9120,26 @@ def test_runtime_result_builder_freezes_target_ui_and_actions() -> None:
     )
     assert runtime_action.target_ui == "card"
     assert runtime_action.actions == ()
+
+
+def test_confirmation_card_includes_people_target_and_delivery_mode() -> None:
+    card = build_interactive_card(
+        card_hint="confirmation",
+        route_path="runtime_v5_confirmation",
+        raw_answer=(
+            "动作：发送飞书消息\n"
+            "请求：给商务组的人分别发条消息：测试内容\n"
+            "人员目标：1 人：汤冠男\n"
+            "发送方式：以本人身份分别发送\n"
+            "消息摘要：测试内容\n"
+            "确认编号：confirm_1\n"
+        ),
+        chat_id="oc_card_people_target",
+    )
+
+    summary = card["elements"][0]["text"]["content"]
+    assert "人员目标：1 人：汤冠男" in summary
+    assert "发送方式：以本人身份分别发送" in summary
 
 
 def test_runtime_result_builder_exposes_generic_sidepanel_for_large_people_result() -> None:

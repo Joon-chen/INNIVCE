@@ -21,6 +21,7 @@ Foundation
 - Identity & Scope
 - Context Store
 - Organization Foundation
+- Semantic Protocol
 
 Core Engines
 - Command Engine
@@ -53,6 +54,7 @@ Observability
 - 组织关系：Organization Foundation。
 - LLM 表达：Response Orchestrator。
 - Provider 调用问题：Provider Layer。
+- 飞书同一会话消息乱序：Interface / Gateway 入口顺序控制，不属于 Command Engine 路由问题。
 
 ## Status
 
@@ -68,6 +70,7 @@ Observability
 | `ORGANIZATION_FOUNDATION_V1.md` | ACTIVE | Foundation: 组织事实层 |
 | `UNIFIED_POLICY_ENGINE_V0.md` | ACTIVE | 唯一权限系统 |
 | `CAPABILITY_REGISTRY_MODEL.md` | ACTIVE | Foundation: Domain -> Capability -> Skill -> Provider |
+| `app/services/semantic_protocol/` | ACTIVE | Foundation Contract: AI OS 统一语义协议 |
 | `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` | ACTIVE | Cognitive Engine V1 |
 | `CURRENT_MISSION.md` | ACTIVE | 当前任务 |
 
@@ -86,3 +89,9 @@ Observability
 - Runtime、Cognitive Engine、LLM 只能消费 Policy Filter 之后的数据。
 - People Domain 不等同于通讯录。
 - Contact Directory 只是 Organization Foundation 的数据集。
+- Semantic Schema 属于 Foundation Contract；LLM 只是 SemanticFrame Producer 之一。
+- Semantic Protocol 是 Foundation Contract，不是 Foundation Engine，不包含业务知识、关键词入口或业务域规则。
+- 迁移到 Conversation First V1 的域不得再由旧 Intent 规则抢路由；未迁移能力只能作为 legacy island 兼容。
+- 自学习必须通过 Trace、Regression、Schema/Alias/Prompt 更新和发布流程完成，禁止线上自动新增路由规则。
+- Command Engine 修复必须优先落在 Semantic Understanding、Dialogue Resolver、Context Contract 或 Response Orchestrator，不得以飞书测试短句为单位新增业务域入口。
+- Interface / Gateway 必须保持同一用户会话内消息顺序；异步执行可以跨会话并行，但不得让同一 `chat_id` 的后发消息先完成并污染上下文或可见回复顺序。

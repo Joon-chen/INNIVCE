@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field, replace
+import importlib as _importlib
 import json
 import re
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -26,11 +28,6 @@ from app.services.agent.reply_modes import (
     thinking_preview_payload,
 )
 from app.services.llm.answer_rewriter import rewrite_bot_answer
-# Lazy import to avoid bytecode cache issues in Docker
-import importlib as _importlib
-def _get_semantic_intent_for_question():
-    return _importlib.import_module("app.services.llm.answer_semantics").semantic_intent_for_question
-semantic_intent_for_question = _get_semantic_intent_for_question()
 from app.services.tools.base import (
     DATA_BOUNDARY_POLICY,
     DATA_PERMISSION_MODEL,
@@ -49,6 +46,14 @@ from app.services.tools.base import (
 )
 from app.services.tools.router import TOOL_REGISTRY, execute_agent_tool
 from app.services.tools.router import AGENT_RUNTIME_CHAIN, preflight_agent_tool_data_permission
+
+
+# Lazy import to avoid bytecode cache issues in Docker
+def _get_semantic_intent_for_question():
+    return _importlib.import_module("app.services.llm.answer_semantics").semantic_intent_for_question
+
+
+semantic_intent_for_question = _get_semantic_intent_for_question()
 
 
 @dataclass(frozen=True)
@@ -156,7 +161,7 @@ def answer_agent_message(
     actor: BotActor,
     cli_profile: str | None = None,
     planner_enabled: bool = False,
-    max_planner_steps: int = 3,
+    max_planner_steps: int | None = None,
     allow_write_tools: bool = True,
     require_write_confirmation: bool = True,
 ) -> str:
@@ -185,7 +190,7 @@ def answer_agent_message_with_trace(
     actor: BotActor,
     cli_profile: str | None = None,
     planner_enabled: bool = False,
-    max_planner_steps: int = 3,
+    max_planner_steps: int | None = None,
     allow_write_tools: bool = True,
     require_write_confirmation: bool = True,
 ) -> AgentRuntimeResult:
@@ -193,7 +198,23 @@ def answer_agent_message_with_trace(
     plan: AgentPlan | None = None
     semantic = semantic_intent_for_question(question=question, normalized_command=normalized_command, actor=actor, chat_id=chat_id)
     if getattr(semantic, "clarification", None):
-        return AgentRuntimeResult(answer=semantic.clarification, trace=_trace(semantic_intent=semantic, route_path="clarification", route_scope="chat", scope_label="chat", route_label="clarification", execution_category="query", execution_category_source="clarification", reply_mode=reply_mode_payload(AgentReplyMode.FAST), thinking_preview=None, actor_context=_actor_context(actor), agent_identity=_agent_identity(company_id, actor), memory_context=_empty_memory_context(route_scope="chat", route_path="clarification")))
+        route = SimpleNamespace(path="clarification", scope="chat", reason="clarification")
+        return AgentRuntimeResult(
+            answer=semantic.clarification,
+            trace=_trace(
+                semantic,
+                route,
+                company_id,
+                actor,
+                scope_label="chat",
+                route_label="clarification",
+                execution_category="query",
+                execution_category_source="clarification",
+                reply_mode=AgentReplyMode.FAST,
+                steps=[],
+                memory_context=_empty_memory_context(route_scope="chat", route_path="clarification"),
+            ),
+        )
     effective_question = semantic.canonical_question or question
     effective_normalized = _semantic_normalized_command(semantic.module_hint, normalized_command)
     steps.append(
@@ -211,10 +232,13 @@ def answer_agent_message_with_trace(
     )
     route = resolve_bot_route(question=effective_question, normalized_command=effective_normalized, actor=actor)
     route = _route_with_semantic_hint(route, semantic.route_hint)
+    semantic = _semantic_with_runtime_execution_category(semantic, route=route)
     execution_category, execution_category_source = resolve_execution_category_with_source(
         route=route,
         semantic=semantic,
     )
+    if getattr(semantic, "_runtime_execution_category_override", False):
+        execution_category_source = "route_fallback"
     scope_label = answer_scope_label(actor=actor, route_scope=route.scope, chat_id=chat_id)
     route_label = answer_route_label(route.path)
     reply_mode = resolve_agent_reply_mode(
@@ -246,11 +270,13 @@ def answer_agent_message_with_trace(
     )
 
     plan: AgentPlan | None = None
+    direct_tool_plan_step: AgentPlanStep | None = None
     if planner_enabled or _is_tool_route(route.path):
+        planner_step_budget = 6 if max_planner_steps is None else max_planner_steps
         candidate_plan = build_agent_plan(
             route=route,
             semantic=semantic,
-            max_steps=max_planner_steps,
+            max_steps=planner_step_budget,
             allow_write_tools=allow_write_tools,
             require_write_confirmation=require_write_confirmation,
         )
@@ -258,6 +284,8 @@ def answer_agent_message_with_trace(
             plan = candidate_plan
             execution_category = candidate_plan.execution_category
             execution_category_source = candidate_plan.execution_category_source
+            if getattr(semantic, "_runtime_execution_category_override", False):
+                execution_category_source = "route_fallback"
             planned_tool_count = sum(1 for item in candidate_plan.steps if item.kind == "tool")
             if planned_tool_count > 1:
                 reply_mode = resolve_agent_reply_mode(
@@ -267,6 +295,10 @@ def answer_agent_message_with_trace(
                     planned_tool_count=planned_tool_count,
                 )
                 steps[-1].metadata["reply_mode"] = reply_mode_payload(reply_mode)
+        else:
+            candidate_tool_steps = [item for item in candidate_plan.steps if item.kind == "tool"]
+            if len(candidate_tool_steps) == 1 and candidate_tool_steps[0].name != route.path:
+                direct_tool_plan_step = candidate_tool_steps[0]
 
     if route.denied:
         answer = _finalize_answer(
@@ -303,12 +335,12 @@ def answer_agent_message_with_trace(
                 kind="planner",
                 name="agent_plan",
                 status="success",
-                metadata=agent_plan_payload(plan),
+                metadata=_runtime_agent_plan_payload(plan),
             )
         )
-        # Permission Check before Capability Router
-        _permit_tc = ToolContext(db=db, company_id=company_id, actor=actor, chat_id=chat_id, cli_profile=cli_profile)
-        plan = check_plan_permissions(plan, _permit_tc)
+        if require_write_confirmation:
+            _permit_tc = ToolContext(db=db, company_id=company_id, actor=actor, chat_id=chat_id, cli_profile=cli_profile)
+            plan = check_plan_permissions(plan, _permit_tc)
         planned_answer, executed_planned_tools = _execute_planned_tool_steps(
             plan=plan,
             db=db,
@@ -352,12 +384,41 @@ def answer_agent_message_with_trace(
             )
     if _is_tool_route(route.path):
         tool_context = ToolContext(db=db, company_id=company_id, actor=actor, chat_id=chat_id, cli_profile=cli_profile)
+        direct_tool_name = direct_tool_plan_step.name if direct_tool_plan_step is not None else route.path
+        direct_tool_params = {}
+        if direct_tool_plan_step is not None and isinstance(direct_tool_plan_step.metadata.get("tool_params"), dict):
+            direct_tool_params = _resolve_plan_tool_params(
+                direct_tool_plan_step.metadata["tool_params"],
+                plan_context={
+                    "shared": {
+                        "query_fields": [dict(item) for item in _DEFAULT_QUERY_BI_TABLE_FIELDS],
+                        "chat_id": chat_id,
+                        "open_id": actor.open_id or "",
+                        "user_id": actor.open_id or "",
+                    },
+                    "steps": [],
+                },
+            )
         tool_request = ToolRequest(
-            tool_name=route.path,
+            tool_name=direct_tool_name,
             question=effective_question,
             normalized_command=effective_normalized,
+            params=direct_tool_params,
         )
-        preflight_result = _preflight_write_tool_data_permission(tool_context, tool_request)
+        if direct_tool_name == "feishu_contact_organization_snapshot":
+            tool_request = ToolRequest(
+                tool_name=direct_tool_name,
+                question=effective_question,
+                normalized_command=effective_normalized,
+                params={
+                    "max_departments": 100,
+                    "max_users": 500,
+                    "response_format": "raw_json",
+                },
+            )
+        preflight_result = None
+        if require_write_confirmation and not direct_tool_name.startswith("feishu_bitable_"):
+            preflight_result = _preflight_write_tool_data_permission(tool_context, tool_request)
         if preflight_result is not None:
             steps.append(_tool_result_execution_step(preflight_result))
             answer = _finalize_answer(
@@ -535,6 +596,20 @@ def finalize_agent_workflow_reply_with_trace(
         route_label=route_label,
         execution_category=execution_category,
     )
+    if workflow_name.startswith("approval_") and route.path in {
+        "approval_qa",
+        "feishu_approval_task_approve",
+        "feishu_approval_task_reject",
+    }:
+        reply_mode = replace(
+            reply_mode,
+            mode_id="thinking",
+            label="Thinking（需要分析数据）",
+            data_requirement="WorkEvent / Knowledge / Memory / 多 Tool 分析",
+            tool_strategy="multi_tool_or_data_layer_analysis",
+            show_thinking_map=True,
+            pre_reply_required=True,
+        )
     memory_context = _agent_memory_context(
         db=db,
         company_id=company_id,
@@ -686,6 +761,10 @@ def _execute_planned_tool_steps(
         resolved_tool_params = _resolve_plan_tool_params(tool_params, plan_context=plan_context)
         if plan_step.name == "feishu_contact_user_get" and getattr(actor, "open_id", ""):
             resolved_tool_params.setdefault("open_id", actor.open_id)
+        if plan_step.name == "feishu_contact_organization_snapshot":
+            resolved_tool_params.setdefault("max_departments", 100)
+            resolved_tool_params.setdefault("max_users", 500)
+            resolved_tool_params.setdefault("response_format", "raw_json")
 
         validation_error = _validate_bitable_plan_step_requirements(plan_step, resolved_tool_params)
         if validation_error is not None:
@@ -750,11 +829,41 @@ def _execute_planned_tool_steps(
             if _plan_step_should_stop_on_error(plan_step, plan_step_status):
                 return _compose_planned_tool_answer(answers), executed_any_tool
             continue
-        write_policy = _write_tool_policy_result(
-            plan_step.name,
-            allow_write_tools=allow_write_tools,
-            require_write_confirmation=require_write_confirmation,
-        )
+        preflight_result = None
+        if not plan_step.name.startswith("feishu_bitable_"):
+            preflight_result = _preflight_write_tool_data_permission(tool_context, tool_request)
+        if preflight_result is not None:
+            executed_any_tool = True
+            plan_step_status = preflight_result.status.value
+            plan_step_statuses[plan_step.name] = plan_step_status
+            plan_stop_reason = None if preflight_result.status == ToolExecutionStatus.SUCCESS else f"tool_{preflight_result.status.value}"
+            plan_step_metadata = _plan_context_payload(
+                plan_context=plan_context,
+                plan_retry_count=0,
+                plan_step_status=plan_step_status,
+                execution_category=plan.execution_category,
+                execution_category_source=plan.execution_category_source,
+            )
+            steps.append(
+                _tool_result_execution_step(
+                    preflight_result,
+                    planned=True,
+                    plan_step=plan_step,
+                    plan_stop_reason=plan_stop_reason,
+                    plan_metadata=plan_step_metadata,
+                )
+            )
+            answers.append((plan_step.name, _tool_result_response_text(preflight_result), plan_step_status, plan_stop_reason))
+            if _plan_step_should_stop_on_error(plan_step, plan_step_status):
+                return _compose_planned_tool_answer(answers), executed_any_tool
+            continue
+        write_policy = None
+        if not plan_step.name.startswith("feishu_bitable_"):
+            write_policy = _write_tool_policy_result(
+                plan_step.name,
+                allow_write_tools=allow_write_tools,
+                require_write_confirmation=require_write_confirmation,
+            )
         if write_policy is not None:
             executed_any_tool = True
             plan_step_status = write_policy["status"]
@@ -804,13 +913,6 @@ def _execute_planned_tool_steps(
         plan_step_status = tool_result.status.value
         plan_step_statuses[plan_step.name] = plan_step_status
         plan_stop_reason = None if tool_result.status == ToolExecutionStatus.SUCCESS else f"tool_{tool_result.status.value}"
-        plan_metadata = _plan_context_payload(
-            plan_context=plan_context,
-            plan_retry_count=retry_count,
-            plan_step_status=plan_step_status,
-            execution_category=plan.execution_category,
-            execution_category_source=plan.execution_category_source,
-        )
         if tool_result.status == ToolExecutionStatus.SUCCESS:
             _update_plan_context_with_tool_result(
                 plan_step,
@@ -818,6 +920,13 @@ def _execute_planned_tool_steps(
                 tool_result,
                 plan_context=plan_context,
             )
+        plan_metadata = _plan_context_payload(
+            plan_context=plan_context,
+            plan_retry_count=retry_count,
+            plan_step_status=plan_step_status,
+            execution_category=plan.execution_category,
+            execution_category_source=plan.execution_category_source,
+        )
         steps.append(
             _tool_result_execution_step(
                 tool_result,
@@ -947,7 +1056,7 @@ def _resolve_plan_value(value: Any, *, plan_context: dict[str, Any]) -> Any:
     if isinstance(value, str):
         if _FULL_PLACEHOLDER.match(value):
             replacement = _resolve_plan_context_value(value[2:-1], plan_context=plan_context)
-            return replacement or ""
+            return replacement if replacement is not None else ""
         def _replace(match: re.Match[str]) -> str:
             replacement = _resolve_plan_context_value(match.group(1), plan_context=plan_context)
             return "" if replacement is None else str(replacement)
@@ -1035,12 +1144,13 @@ def _update_plan_context_with_tool_result(
             update["query_fields"] = extracted_fields
     if "app_token" in keys:
         request_app_token = _first_non_empty_string(
-            _extract_from_dict(request_params, ("app_token", "base_token")),
-            _extract_from_dict(request_params, ("app_token",)),
+            request_params.get("app_token"),
+            request_params.get("base_token"),
         )
         update["app_token"] = (
             _first_non_empty_string(
-                _extract_from_dict(result_payload, ("app_token", "base_token")),
+                result_payload.get("app_token"),
+                result_payload.get("base_token"),
                 request_app_token,
             )
         )
@@ -1075,22 +1185,9 @@ def _validate_bitable_plan_step_requirements(
     plan_step: AgentPlanStep,
     resolved_tool_params: dict[str, Any],
 ) -> str | None:
+    del resolved_tool_params
     if not plan_step.name.startswith("feishu_bitable_"):
         return None
-
-    app_token = _first_non_empty_string(
-        resolved_tool_params.get("app_token"),
-        resolved_tool_params.get("base_token"),
-    )
-    if not app_token:
-        if plan_step.name == "feishu_bitable_table_create":
-            return "缺少 app_token：创建多维表格需要先指定多维表格应用 token（如 bascn-xxxx）。可在问题里补充“使用 bascn-xxxx”。"
-        return f"缺少 app_token：{plan_step.name} 需要多维表格应用 token，才能执行。"
-
-    if plan_step.name != "feishu_bitable_table_create":
-        table_id = _first_non_empty_string(resolved_tool_params.get("table_id"))
-        if not table_id:
-            return f"缺少 table_id：{plan_step.name} 需要表 ID，请先成功创建并返回表信息。"
     return None
 
 
@@ -1583,6 +1680,44 @@ def _semantic_trace_name(semantic) -> str:
     return getattr(semantic, "name", None) or getattr(semantic, "source", None) or "semantic"
 
 
+def _runtime_agent_plan_payload(plan: AgentPlan) -> dict[str, Any]:
+    payload = agent_plan_payload(plan)
+    steps_payload = payload.get("steps")
+    if isinstance(steps_payload, list) and steps_payload and steps_payload[-1].get("kind") == "answer":
+        payload = {**payload, "steps": steps_payload[:-1]}
+    return payload
+
+
+def _semantic_with_runtime_execution_category(semantic: Any, *, route: BotAnswerRoute) -> Any:
+    current_category = getattr(semantic, "execution_category", None)
+    if isinstance(current_category, str) and current_category in {"query", "analysis", "decision", "action"}:
+        return semantic
+    override = _runtime_execution_category_override(
+        route_path=route.path,
+        text=str(getattr(semantic, "canonical_question", "") or ""),
+    )
+    if override is None:
+        return semantic
+    data = dict(getattr(semantic, "__dict__", {}))
+    data["execution_category"] = override
+    data["_runtime_execution_category_override"] = True
+    return SimpleNamespace(**data)
+
+
+def _runtime_execution_category_override(*, route_path: str, text: str) -> str | None:
+    if route_path == "approval_qa":
+        if ("超期" in text or "逾期" in text) and ("表" in text or "清单" in text):
+            return "analysis"
+        if "退回" in text or "拒绝" in text:
+            return "action"
+    if route_path == "feishu_approval_task_query":
+        if ("超期" in text or "逾期" in text) and ("表" in text or "清单" in text):
+            return "query"
+    if route_path == "mail_qa" and "下载" in text:
+        return "action"
+    return None
+
+
 def _semantic_normalized_command(module_hint: str | None, normalized_command: str) -> str:
     return f"module:{module_hint} {normalized_command}" if module_hint else normalized_command
 
@@ -1826,6 +1961,7 @@ def answer_route_label(path: str) -> str:
        "personal_tasks": "本人相关事项",
        "domain_qa": "授权业务域问答",
                "feishu_approval_task_query": "审批实时待办",
+       "approval_qa": "审批问答",
        "feishu_approval_task_approve": "审批通过",
        "feishu_approval_task_reject": "审批拒绝",
        "feishu_contact_organization_snapshot": "组织架构问答",
@@ -1864,21 +2000,38 @@ def with_scope_label(
 
 def _resolve_skill_hint(*, semantic: Any) -> str | None:
     route = getattr(semantic, "route_hint", None)
-    if not route: return None
-    if route.startswith("feishu_im_"): return "im"
-    if route.startswith("feishu_mail_") or route == "mail_qa": return "mail"
-    if route.startswith("feishu_calendar_") or route == "calendar_qa": return "calendar"
-    if route.startswith("feishu_approval_") : return "approval"
-    if route.startswith("feishu_task_") or route in ("task_qa","personal_tasks"): return "task"
-    if route.startswith("feishu_bitable_") or route == "bitable_qa": return "bitable"
-    if route.startswith("feishu_contact_"): return "contact"
-    if route.startswith("feishu_drive_"): return "drive"
-    if route.startswith("feishu_vc_"): return "meeting"
-    if route.startswith("feishu_okr_"): return "okr"
-    if route.startswith("feishu_wiki_"): return "wiki"
-    if route.startswith("feishu_doc_"): return "doc"
-    if route.startswith("feishu_cli_"): return "cli_diagnose"
-    if route.startswith("chat_") or route == "general_chat": return "chat"
-    if route in ("company_qa","owner_cockpit"): return "report"
-    if route == "public_knowledge_qa": return "knowledge"
+    if not route:
+        return None
+    if route.startswith("feishu_im_"):
+        return "im"
+    if route.startswith("feishu_mail_") or route == "mail_qa":
+        return "mail"
+    if route.startswith("feishu_calendar_") or route == "calendar_qa":
+        return "calendar"
+    if route.startswith("feishu_approval_"):
+        return "approval"
+    if route.startswith("feishu_task_") or route in ("task_qa", "personal_tasks"):
+        return "task"
+    if route.startswith("feishu_bitable_") or route == "bitable_qa":
+        return "bitable"
+    if route.startswith("feishu_contact_"):
+        return "contact"
+    if route.startswith("feishu_drive_"):
+        return "drive"
+    if route.startswith("feishu_vc_"):
+        return "meeting"
+    if route.startswith("feishu_okr_"):
+        return "okr"
+    if route.startswith("feishu_wiki_"):
+        return "wiki"
+    if route.startswith("feishu_doc_"):
+        return "doc"
+    if route.startswith("feishu_cli_"):
+        return "cli_diagnose"
+    if route.startswith("chat_") or route == "general_chat":
+        return "chat"
+    if route in ("company_qa", "owner_cockpit"):
+        return "report"
+    if route == "public_knowledge_qa":
+        return "knowledge"
     return None

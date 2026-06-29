@@ -171,6 +171,18 @@ Runtime 禁止字符串 contains 解析：
 - 陈俊。
 - 负责人。
 
+Organization Relation 是 Organization Foundation 对 Command Engine 暴露的稳定关系口径：
+
+- `members`：组织成员。
+- `direct_members`：直属成员。
+- `recursive_members`：含下级组织的去重成员。
+- `children`：直属子部门或子组织。
+- `parent`：上级组织。
+- `leader`：组织负责人。
+- `manager / reports_to`：人员管理关系。
+
+People Runtime 只能消费已解析的 `resolved_department_id / resolved_user_id / organization_relation`，不得把“下面几个部门”“负责人是谁”等自然语言再次字符串解析。组织别名、部门误称和中英文简称应进入 Alias Dictionary，例如“商务部 -> 商务组”“市场部 -> 市场组”“IT -> IT组”。
+
 ## 8. Role Model
 
 Role Model 是本地组织角色模型，不等同于飞书职位。

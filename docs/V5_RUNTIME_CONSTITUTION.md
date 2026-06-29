@@ -174,9 +174,38 @@ Foundation 保存事实，不保存业务逻辑；Engine 做决策，不保存�
 Conversation First 入口不得继续堆业务域关键词路由。Command Engine 只允许保留两类低成本确定性定义：
 
 - Semantic Field：把用户表达中的字段词标准化为 canonical field，例如 People 的 `title / leader / mobile / email / gender`。字段定义是跨层合同，不是业务入口规则；Semantic Understanding、Dialogue Resolver、Provider 参数和 Response Orchestrator 必须消费同一份字段定义。
+- Organization Relation：把组织对象上的关系请求标准化为 canonical relation，例如 `members / children / parent / leader / manager / reports_to`。关系定义属于 Foundation Contract，不属于 LLM、Provider 或业务入口规则；“下面几个部门 / 下设子部门 / 负责人是谁”必须先进入 SemanticFrame，再由 Organization Foundation 解析组织事实。
 - Conversation Reference：把“这些人 / 他们 / 行政的 3 人 / 上一轮名单 / 第 N 个”等表达标准化为对 `ConversationState.previous_result_reference` 或 `active_collection` 的引用。引用解析只决定上下文对象，不决定权限、Provider 或最终执行。
 
-发送、建群、邮件、会议、任务等动作如果引用上一轮集合，必须先解析为 `recipient_ref=previous_collection` 或等价 CommandFrame 上下文合同，再交给 Policy 和 Runtime。旧入口规则只能补缺失槽位，禁止覆盖 Conversation First 已经解析出的上下文对象。
+发送、建群、邮件、会议、任务等动作如果引用上一轮集合，必须先解析为 `recipient_ref=previous_collection` 或等价 CommandFrame 上下文合同，再交给 Policy 和 Runtime。V1 热路径不得直接调用旧 Intent 规则抢路由；未迁移域只能作为 `legacy island` 被隔离，不得覆盖 Conversation First 已经解析出的上下文对象。
+
+Semantic Protocol 是 AI OS 内部统一语义协议，属于 Foundation Contract，不是 Foundation Engine、Intent Rule、Prompt、LLM 或 Command Engine 内部实现。它只定义 `SemanticFrame`、枚举、Schema 和 Validator，不沉淀业务知识、关键词入口、People Semantic 或 Knowledge Semantic。LLM、结构化 UI、Workflow、Webhook、API 都可以作为 Producer 生成 `SemanticFrame`，但任何 Producer 都不得决定 Capability、Provider、Runtime、权限、Identity 或 Credential。
+
+LLM Semantic Understanding 可以纠偏口语、泛知识、跨域和上下文引用，但 deterministic fallback 必须守住同一条安全边界。LLM 超时、关闭或输出被拒绝时，系统不得退化为把普通常识问题继承到上一轮 People 结果、把 Workspace / Process 显式锚点吞进旧上下文，或把上一轮结果的展示请求升级为发送、建群、写邮件等动作。上一轮结构化结果的 `明细 / 名单 / 对话框显示 / 聊天框显示` 属于 presentation contract，默认 read-only；只有用户明确提出发送对象、内容和方式后，才进入写动作确认链路。
+
+### 2.4 Learning Loop
+
+Intent 不允许在线自动学习并修改路由规则。系统只允许可审计学习闭环：
+
+```text
+Trace / Failure
+-> Attribution
+-> Semantic Sample
+-> Regression
+-> Schema / Prompt / Alias / Resolver Hint update
+-> Review and Release
+```
+
+学习归属必须放回既有架构：
+
+- 口语理解问题：Command Engine 的 Semantic Understanding prompt/examples。
+- 稳定语义缺口：Foundation Contract 的 Semantic Schema。
+- 组织简称或误称：Organization Foundation 的 Alias Dictionary。
+- 数据缺口：Foundation Sync。
+- 权限差异：Policy Engine。
+- 表达问题：Response Orchestrator。
+
+禁止新增 Intent Learning Engine、Cognitive Permission、Runtime Permission 或业务域专属 Intent。
 
 ## 3. Foundation Layer
 
@@ -435,9 +464,9 @@ Command Engine 禁止：
 
 V1 范围：
 
-- 接入：People、Knowledge。
-- 不接入：Task 写动作、Approval 写动作、Mail 写动作、全量 Provider 迁移。
-- 后续任何入口 Bug 必须归因到 ConversationState、SemanticFrame、DialogueResolver、Policy 或 Response Orchestrator，不得继续新增业务域关键词入口。
+- 解释链统一接入：所有自然语言必须先进入 ConversationState / Semantic Understanding / SemanticFrame / DialogueResolver / CommandFrame。
+- Runtime Provider 迁移可以分阶段推进，但未迁移能力不得绕过 CommandFrame 重新解释原始自然语言。
+- 后续任何入口 Bug 必须归因到 ConversationState、Semantic Understanding、Semantic Protocol、DialogueResolver、Policy 或 Response Orchestrator，不得继续新增业务域关键词入口。
 
 Explicit Command Guard V1：
 
@@ -828,6 +857,7 @@ Interaction Layer
 - 展示 RuntimeResult / InteractionPayload。
 - 收集用户输入。
 - 将动作转换为 RuntimeActionInput。
+- 维护同一会话内的用户消息顺序；同一 `chat_id` 的普通消息必须按接收顺序进入 `Command -> Policy -> Runtime -> Response` 链路，不得被同会话后续快速查询或卡片反超。
 
 禁止：
 
@@ -836,6 +866,7 @@ Interaction Layer
 - 自己生成业务 Result。
 - 自己解释业务状态。
 - 查询数据库补业务状态。
+- 重排同一会话内普通消息流；Card action 可以保留独立快速响应，但不得污染普通消息的上下文和可见回复顺序。
 
 ### 5.1 Provider / Tool Boundary
 

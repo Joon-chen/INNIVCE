@@ -1,12 +1,14 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
+from app.core.config import settings
 from app.models.entities import ToolConfig
 from app.services.agent.policies import BotActor
 from app.services.tools.base import ToolContext, ToolDefinition, ToolExecutionStatus, ToolProvider, ToolRequest
 from app.services.tools.providers.feishu_api import FEISHU_API_CAPABILITIES, FeishuApiRisk, feishu_write_confirmation_token
 from app.services.tools.router import TOOL_REGISTRY, _execute_provider_tool, execute_agent_tool
 from app.services.tools.write_audit import write_target_metadata, write_target_summary
+from app.services.user_identity_authorizations import user_identity_authorization_url_status
 
 
 def test_execute_agent_tool_routes_company_qa(monkeypatch) -> None:
@@ -255,6 +257,8 @@ def test_execute_agent_tool_requires_personal_feishu_authorization_for_personal_
             pass
 
     company_id = uuid4()
+    base_url = settings.api_base_url.rstrip("/")
+    url_status = user_identity_authorization_url_status(base_url)
     result = execute_agent_tool(
         ToolContext(db=FakeDb(), company_id=company_id, actor=BotActor(role="member", access_scope="personal", open_id="ou_1")),
         ToolRequest(tool_name="personal_tasks", question="我的待办", normalized_command="我的待办"),
@@ -266,35 +270,22 @@ def test_execute_agent_tool_requires_personal_feishu_authorization_for_personal_
     assert result.metadata["required_user_identity_resources"] == ["user_identity_bundle"]
     assert result.metadata["authorization_actions"] == [
         {
-            "resource_type": "user_identity_bundle",
-            "label": "授权个人能力包",
-            "channel": "feishu_oauth",
-            "authorization_flow": "feishu_in_app_oauth",
-            "url": (
-                "http://127.0.0.1:8000/api/user-identity/oauth/feishu/start"
-                f"?company_id={company_id}&open_id=ou_1"
-            ),
-            "start_endpoint": "/api/user-identity/oauth/feishu/start",
-            "callback_endpoint": "/api/feishu/oauth/callback",
-            "instruction": "从大飞哥授权卡片打开飞书内授权页，由资源所有者本人确认授权；系统只按本人原始授权范围读取个人飞书资源。",
-            "fallback_debug_flow": "feishu_cli_split_flow",
-            "fallback_debug_url": (
-                "http://127.0.0.1:8000/user-auth/feishu-cli"
-                f"?company_id={company_id}&open_id=ou_1"
-            ),
-            "covered_resources": ["personal_feishu", "external_mail", "personal_dingtalk", "personal_wechat"],
-            "employee_reachable": False,
-            "local_only": True,
-            "api_base_url_status": {
-                "api_base_url": "http://127.0.0.1:8000",
-                "api_base_url_scheme": "http",
-                "api_base_url_host": "127.0.0.1",
-                "employee_reachable": False,
-                "local_only": True,
-                "production_requirement": "Set API_BASE_URL to a public HTTPS origin before employee rollout.",
-            },
-        }
-    ]
+                "resource_type": "user_identity_bundle",
+                "label": "授权个人能力包",
+                "channel": "feishu_oauth",
+                "authorization_flow": "feishu_in_app_oauth",
+                "url": f"{base_url}/api/user-identity/oauth/feishu/start?company_id={company_id}&open_id=ou_1",
+                "start_endpoint": "/api/user-identity/oauth/feishu/start",
+                "callback_endpoint": "/api/feishu/oauth/callback",
+                "instruction": "从大飞哥授权卡片打开飞书内授权页，由资源所有者本人确认授权；系统只按本人原始授权范围读取个人飞书资源。",
+                "fallback_debug_flow": "feishu_cli_split_flow",
+                "fallback_debug_url": f"{base_url}/user-auth/feishu-cli?company_id={company_id}&open_id=ou_1",
+                "covered_resources": ["personal_feishu", "external_mail", "personal_dingtalk", "personal_wechat"],
+                "employee_reachable": url_status["employee_reachable"],
+                "local_only": url_status["local_only"],
+                "api_base_url_status": url_status,
+            }
+        ]
     assert "一次整体授权" in result.metadata["first_use_guidance"]
     assert result.structured_result["authorization_actions"][0]["resource_type"] == "user_identity_bundle"
 
@@ -578,10 +569,11 @@ def test_tool_registry_definitions_are_traceable() -> None:
         "feishu_approval_task_add_sign",
         "feishu_approval_task_approve",
         "feishu_approval_task_query",
-        "feishu_approval_task_reject",
-        "feishu_approval_task_rollback",
-        "feishu_approval_task_transfer",
-        "feishu_bitable_field_create",
+            "feishu_approval_task_reject",
+            "feishu_approval_task_rollback",
+            "feishu_approval_task_transfer",
+            "feishu_bitable_base_create",
+            "feishu_bitable_field_create",
         "feishu_bitable_field_delete",
         "feishu_bitable_field_list",
         "feishu_bitable_field_update",
@@ -612,11 +604,13 @@ def test_tool_registry_definitions_are_traceable() -> None:
         "feishu_calendar_create_event",
         "feishu_cli_doctor",
         "feishu_cli_status",
-        "feishu_contact_department_children",
-        "feishu_contact_department_users",
-        "feishu_contact_organization_snapshot",
-        "feishu_contact_scope_list",
-        "feishu_doc_fetch",
+            "feishu_contact_department_children",
+            "feishu_contact_department_users",
+            "feishu_contact_organization_snapshot",
+            "feishu_contact_scope_list",
+            "feishu_contact_user_get",
+            "feishu_contact_user_search",
+            "feishu_doc_fetch",
         "feishu_drive_file_list",
         "feishu_drive_search",
         "feishu_im_auto_join_public_chats",
@@ -750,10 +744,11 @@ def test_tool_registry_definitions_are_traceable() -> None:
         "feishu_bitable_record_create": ToolProvider.FEISHU_MCP,
         "feishu_bitable_record_delete": ToolProvider.FEISHU_MCP,
         "feishu_bitable_record_remove_attachment": ToolProvider.FEISHU_MCP,
-        "feishu_bitable_record_update": ToolProvider.FEISHU_MCP,
-        "feishu_bitable_record_upload_attachment": ToolProvider.FEISHU_MCP,
-        "feishu_bitable_record_upsert": ToolProvider.FEISHU_MCP,
-            "feishu_bitable_field_create": ToolProvider.FEISHU_MCP,
+            "feishu_bitable_record_update": ToolProvider.FEISHU_MCP,
+            "feishu_bitable_record_upload_attachment": ToolProvider.FEISHU_MCP,
+            "feishu_bitable_record_upsert": ToolProvider.FEISHU_MCP,
+            "feishu_bitable_base_create": ToolProvider.FEISHU_MCP,
+                "feishu_bitable_field_create": ToolProvider.FEISHU_MCP,
             "feishu_bitable_field_delete": ToolProvider.FEISHU_MCP,
             "feishu_bitable_field_list": ToolProvider.FEISHU_MCP,
             "feishu_bitable_field_update": ToolProvider.FEISHU_MCP,
@@ -774,10 +769,12 @@ def test_tool_registry_definitions_are_traceable() -> None:
             "feishu_bitable_view_set_visible_fields": ToolProvider.FEISHU_MCP,
         "feishu_calendar_create_event": ToolProvider.FEISHU_MCP,
         "feishu_contact_department_children": ToolProvider.FEISHU_MCP,
-        "feishu_contact_department_users": ToolProvider.FEISHU_MCP,
-        "feishu_contact_organization_snapshot": ToolProvider.FEISHU_MCP,
-        "feishu_contact_scope_list": ToolProvider.FEISHU_MCP,
-        "feishu_drive_file_list": ToolProvider.FEISHU_MCP,
+            "feishu_contact_department_users": ToolProvider.FEISHU_MCP,
+            "feishu_contact_organization_snapshot": ToolProvider.FEISHU_MCP,
+            "feishu_contact_scope_list": ToolProvider.FEISHU_MCP,
+            "feishu_contact_user_get": ToolProvider.FEISHU_MCP,
+            "feishu_contact_user_search": ToolProvider.FEISHU_MCP,
+            "feishu_drive_file_list": ToolProvider.FEISHU_MCP,
         "feishu_cli_doctor": ToolProvider.DEVOPS,
         "feishu_cli_status": ToolProvider.DEVOPS,
         "feishu_im_auto_join_public_chats": ToolProvider.FEISHU_MCP,
@@ -820,7 +817,8 @@ def test_tool_registry_definitions_are_traceable() -> None:
     }
     for name, definition in TOOL_REGISTRY.items():
         assert definition.name == name
-        assert definition.provider == expected_providers.get(name, ToolProvider.LOCAL)
+        default_provider = ToolProvider.FEISHU_MCP if name.startswith("feishu_") else ToolProvider.LOCAL
+        assert definition.provider == expected_providers.get(name, default_provider)
         assert definition.audit_action.startswith("tool.")
 
 
@@ -2293,5 +2291,3 @@ def test_execute_agent_tool_does_not_inject_active_feishu_app_config_for_mcp_pro
     assert result.answer == "飞书任务结果"
     assert "app_config" not in captured["request"].params
     assert len(db.added) == 1
-
-

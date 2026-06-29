@@ -70,6 +70,13 @@ def classify_response_request(*, question: str = "", answer: str = "", intent: s
 
     compact_question = _compact(question)
     compact_answer = _compact(answer)
+    if _identity_fact_answer(compact_answer) and _contains_any(
+        compact_question,
+        ("我叫什么", "我的名字", "我是谁", "你知道我叫什么", "你知道我是谁"),
+    ):
+        return ResponseClassification("fact", fact_kind="identity", llm_allowed=False, reason="identity_fact")
+    if "性格" in compact_question and ("沟通偏好" in compact_answer or "不把你简单贴性格标签" in compact_answer):
+        return ResponseClassification("fact", fact_kind="unknown", llm_allowed=False, reason="profile_boundary_fact")
     if (
         intent == "smalltalk"
         and (

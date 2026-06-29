@@ -77,22 +77,6 @@ async def dispatch_command_reply(
     route_path: str | None = normalized
     route_label: str | None = None
 
-    if settings.feishu_bot_runtime_v5_enabled:
-        reply, agent_runtime_trace = _employee_agent_reply(db, app_config, command, normalized, identity, chat_id, handlers)
-        used_agent_runtime = True
-        route_path = _agent_trace_value(agent_runtime_trace, "route_path") or "runtime_v5"
-        route_label = _agent_trace_value(agent_runtime_trace, "route_label") or "Runtime V5"
-        return CommandDispatchResult(
-            handled=True,
-            reply=reply,
-            used_agent_runtime=used_agent_runtime,
-            final_answer_owner="agent_runtime",
-            route_path=route_path,
-            route_label=route_label,
-            agent_identity=_dispatch_agent_identity(app_config, identity, agent_runtime_trace),
-            agent_runtime_trace=agent_runtime_trace,
-        )
-
     if normalized == "帮助":
         reply, agent_runtime_trace = _workflow_agent_reply(
             db,
@@ -402,7 +386,7 @@ async def dispatch_command_reply(
             normalized=normalized,
             identity=identity,
             chat_id=chat_id,
-            route_path="feishu_approval_task_query",
+            route_path="approval_qa",
             raw_reply="已取消刚才准备执行的审批操作。",
             workflow_name="approval_cancel_pending_action",
         )
@@ -421,7 +405,7 @@ async def dispatch_command_reply(
             question=command,
             identity=identity,
             chat_id=chat_id,
-            company_id=str(app_config.company_id) if app_config else None,
+            company_id=str(getattr(app_config, "company_id", None)) if getattr(app_config, "company_id", None) else None,
         )
         if _pg.is_result_followup and not settings.feishu_bot_runtime_v5_enabled:
             reply = _pg.rule_reply or ""
@@ -482,7 +466,9 @@ def _save_result_context(chat_id: str | None, question: str, answer: str, route_
         return
     try:
         from app.core.config import settings as _st
-        import redis as _rd, json as _rj
+        import json as _rj
+        import redis as _rd
+
         _rc = _rd.Redis.from_url(_st.redis_url, decode_responses=True)
         _rc.setex(f'feishu:result:{chat_id}', 600, _rj.dumps({"question": question, "answer": answer}, ensure_ascii=False))
     except Exception:

@@ -8,11 +8,12 @@ from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Company, FeishuAppConfig, MemoryFact, OrganizationUser, Resource, Snapshot, WorkEvent
+from app.models.entities import BotUserAccess, Company, FeishuAppConfig, MemoryFact, OrganizationUser, Resource, Snapshot, WorkEvent
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -43,7 +44,7 @@ from app.services.organization_foundation import resolve_department_members
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
 from app.services.runtime_v5.domain_query import domain_query_fields, domain_query_payload
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
-from app.services.runtime_v5.models import ProviderRequest, ProviderResult, RuntimeContext
+from app.services.runtime_v5.models import ProviderRequest, ProviderResult, RuntimeContext, RuntimeIdentity
 from app.services.runtime_v5.people_resolver import (
     asks_people_list,
     filter_people_by_department,
@@ -184,6 +185,7 @@ class FeishuPeopleProvider(FeishuResourceProvider):
 
         if request.operation == "list_department_members":
             keyword = str(request.params.get("keyword") or request.intent.canonical_question or "").strip()
+            relation = _organization_relation_from_request(request)
             foundation_result = resolve_department_members(
                 self.db,
                 company_id=request.context.runtime_scope.active_company_id,
@@ -194,22 +196,35 @@ class FeishuPeopleProvider(FeishuResourceProvider):
                 items = foundation_result.items
                 foundation_metadata = getattr(foundation_result, "metadata", {})
                 foundation_metadata = foundation_metadata if isinstance(foundation_metadata, dict) else {}
+                relation_items, relation_answer, relation_count = _department_relation_result(
+                    relation=relation,
+                    keyword=keyword,
+                    items=items,
+                    metadata=foundation_metadata,
+                    resolution=resolution,
+                )
+                result_items = relation_items if relation else items
                 return ProviderResult(
                     source="people",
                     status="success",
                     result_type="department_members",
-                    count=len(items),
-                    items=items,
+                    count=relation_count if relation else len(items),
+                    items=result_items,
                     metadata={
                         **people_context_metadata(capability="people.list_department_members"),
                         "keyword": keyword,
                         "organization_foundation": True,
                         "organization_resolution": _organization_resolution_metadata(resolution),
+                        "organization_relation": relation,
                         **_department_membership_result_metadata(foundation_metadata),
                     },
-                    answer=_department_members_answer(keyword, items, resolution=resolution)
-                    if resolution.resolved_department_id
-                    else _organization_resolution_failure_answer(keyword, resolution),
+                    answer=(
+                        relation_answer
+                        if relation_answer
+                        else _department_members_answer(keyword, items, resolution=resolution)
+                        if resolution.resolved_department_id
+                        else _organization_resolution_failure_answer(keyword, resolution)
+                    ),
                     error="" if resolution.resolved_department_id else "organization_resolution_not_resolved",
                 )
             result, payload = self._organization_snapshot_payload(request)
@@ -1263,6 +1278,11 @@ class FeishuIMProvider(FeishuResourceProvider):
             params["target_name"] = chat.get("name")
             return params
         if target_type == "person":
+            direct_open_id = str(request.params.get("target_open_id") or request.params.get("open_id") or request.params.get("user_id") or "").strip()
+            if direct_open_id:
+                params["user_id"] = direct_open_id
+                params["target_name"] = str(request.params.get("target_name") or request.params.get("target") or "").strip()
+                return params
             person = self._resolve_person(request, str(request.params.get("target") or ""))
             if isinstance(person, ProviderResult):
                 return person
@@ -1988,6 +2008,13 @@ class FeishuCalendarProvider(FeishuResourceProvider):
                 user_fallback = self._execute_calendar_query_with_user_fallback(request)
                 if user_fallback is not None:
                     return user_fallback
+                tool_result = self._execute_calendar_query_tool_if_allowed(
+                    request,
+                    tool_name=tool_name,
+                    query_path=query_path,
+                )
+                if tool_result is not None and tool_result.status == "success":
+                    return tool_result
                 boundary = _enterprise_realtime_boundary_result(
                     request,
                     source="calendar",
@@ -2007,6 +2034,13 @@ class FeishuCalendarProvider(FeishuResourceProvider):
                 )
                 if cognitive_aggregation is not None:
                     return cognitive_aggregation
+                tool_result = self._execute_calendar_query_tool_if_allowed(
+                    request,
+                    tool_name=tool_name,
+                    query_path=query_path,
+                )
+                if tool_result is not None and tool_result.status == "success":
+                    return tool_result
                 boundary = _enterprise_realtime_boundary_result(
                     request,
                     source="calendar",
@@ -2024,6 +2058,13 @@ class FeishuCalendarProvider(FeishuResourceProvider):
             user_fallback = self._execute_calendar_query_with_user_fallback(request)
             if user_fallback is not None:
                 return user_fallback
+            tool_result = self._execute_calendar_query_tool_if_allowed(
+                request,
+                tool_name=tool_name,
+                query_path=query_path,
+            )
+            if tool_result is not None and tool_result.status == "success":
+                return tool_result
             boundary = _enterprise_realtime_boundary_result(
                 request,
                 source="calendar",
@@ -2034,25 +2075,7 @@ class FeishuCalendarProvider(FeishuResourceProvider):
             )
             if boundary is not None:
                 return boundary
-            result = self._execute_tool(
-                request,
-                tool_name=tool_name,
-                params={**_calendar_query_tool_params(request), "response_format": "raw_json"},
-            )
-            status = _provider_status(result)
-            payload = _tool_payload(result)
-            raw_items = _items_from_payload(payload)
-            items = tuple(_calendar_item(item) for item in raw_items)
-            return ProviderResult(
-                source="calendar",
-                status=status,
-                result_type="calendar_event_list",
-                count=len(items),
-                items=items,
-                metadata={"operation": request.operation, "tool_name": tool_name, **_provider_error_metadata(result)},
-                answer=_calendar_list_answer(items),
-                error=result.error or "",
-            )
+            return tool_result or self._execute_calendar_query_tool(request, tool_name=tool_name)
         if request.operation == "create_event":
             return self._execute_calendar_create_with_user_token(request, params=_calendar_tool_params(request))
         return ProviderResult(
@@ -2066,6 +2089,51 @@ class FeishuCalendarProvider(FeishuResourceProvider):
             },
             answer=f"日程能力已进入 V5，但这个操作还没有接入：{request.operation}。",
             error=f"unsupported_operation:{request.operation}",
+        )
+
+    def _execute_calendar_query_tool_if_allowed(
+        self,
+        request: ProviderRequest,
+        *,
+        tool_name: str,
+        query_path: str,
+    ) -> ProviderResult | None:
+        if query_path == "self_user_token_required":
+            actor = _bot_actor_from_runtime_context(request.context)
+            if not _has_authorized_user_identity_bundle(self.db, request) and not (
+                actor.can_query_company
+                and _runtime_identity_has_company_domain(request.context.identity)
+                and not _message_explicit_self_scope(request.context.current_message)
+            ):
+                return None
+        if query_path == "tenant_query_not_integrated":
+            actor = _bot_actor_from_runtime_context(request.context)
+            if not actor.can_query_company or not _runtime_identity_has_company_domain(request.context.identity):
+                return None
+        return self._execute_calendar_query_tool(request, tool_name=tool_name)
+
+    def _execute_calendar_query_tool(self, request: ProviderRequest, *, tool_name: str) -> ProviderResult:
+        result = self._execute_tool(
+            request,
+            tool_name=tool_name,
+            params={**_calendar_query_tool_params(request), "response_format": "raw_json"},
+        )
+        status = _provider_status(result)
+        payload = _tool_payload(result)
+        raw_items = _items_from_payload(payload)
+        items = tuple(_calendar_item(item) for item in raw_items)
+        answer = _calendar_list_answer(items)
+        if not items and status == "success" and str(result.answer or "").strip():
+            answer = str(result.answer).strip()
+        return ProviderResult(
+            source="calendar",
+            status=status,
+            result_type="calendar_event_list",
+            count=len(items),
+            items=items,
+            metadata={"operation": request.operation, "tool_name": tool_name, **_provider_error_metadata(result)},
+            answer=answer,
+            error=result.error or "",
         )
 
     def _execute_calendar_query_with_tenant_token(self, request: ProviderRequest) -> ProviderResult | None:
@@ -4183,6 +4251,8 @@ def _workspace_cognitive_aggregation_result(
     scope = _resource_scope_for_request(request)
     if scope not in {"DEPARTMENT", "COMPANY", "TEAM"} or db is None:
         return None
+    if not _supports_workspace_cognitive_projection_read(db):
+        return None
     company_id = request.context.runtime_scope.active_company_id
     if company_id is None:
         return None
@@ -4315,6 +4385,14 @@ def _workspace_cognitive_gap_result(
     )
 
 
+def _supports_workspace_cognitive_projection_read(db: Session) -> bool:
+    return callable(getattr(db, "scalars", None)) and callable(getattr(db, "flush", None))
+
+
+def _supports_workspace_cognitive_projection_write(db: Session) -> bool:
+    return callable(getattr(db, "add", None)) and callable(getattr(db, "flush", None))
+
+
 def _visible_workspace_projection_events(
     *,
     request: ProviderRequest,
@@ -4426,7 +4504,7 @@ def _append_workspace_task_observations_from_items(
     db: Session | None,
     items: tuple[dict[str, Any], ...],
 ) -> None:
-    if db is None or not items:
+    if db is None or not items or not _supports_workspace_cognitive_projection_write(db):
         return
     company_id = request.context.runtime_scope.active_company_id
     if company_id is None:
@@ -4450,7 +4528,7 @@ def _append_workspace_calendar_observations_from_items(
     db: Session | None,
     items: tuple[dict[str, Any], ...],
 ) -> None:
-    if db is None or not items:
+    if db is None or not items or not _supports_workspace_cognitive_projection_write(db):
         return
     company_id = request.context.runtime_scope.active_company_id
     if company_id is None:
@@ -4589,6 +4667,39 @@ def _allows_self_user_query_fallback(request: ProviderRequest) -> bool:
         and contract.get("credential_mode") == "TENANT_TOKEN"
         and contract.get("actor_identity") == "BOT"
     )
+
+
+def _has_authorized_user_identity_bundle(db: Session | None, request: ProviderRequest) -> bool:
+    if db is None:
+        return False
+    company_id = request.context.runtime_scope.active_company_id
+    open_id = str(request.context.identity.open_id or "").strip()
+    if company_id is None or not open_id:
+        return False
+    access = db.scalar(
+        select(BotUserAccess)
+        .where(BotUserAccess.company_id == company_id)
+        .where(BotUserAccess.open_id == open_id)
+        .where(BotUserAccess.is_active.is_(True))
+    )
+    settings_data = access.settings if access is not None and isinstance(getattr(access, "settings", None), dict) else {}
+    raw_authorizations = settings_data.get("user_identity_authorizations")
+    authorizations = raw_authorizations if isinstance(raw_authorizations, dict) else {}
+    bundle = authorizations.get("user_identity_bundle")
+    if not isinstance(bundle, dict):
+        return False
+    owner_open_id = str(bundle.get("owner_open_id") or open_id).strip()
+    status = str(bundle.get("status") or "").strip()
+    return owner_open_id == open_id and status in {"authorized", "connected"}
+
+
+def _runtime_identity_has_company_domain(identity: RuntimeIdentity) -> bool:
+    domains = {str(domain).strip().lower() for domain in identity.domains if str(domain).strip()}
+    return "all" in domains or bool(domains)
+
+
+def _message_explicit_self_scope(message: str) -> bool:
+    return any(marker in str(message or "") for marker in ("我的", "我 ", "我　", "我想", "我要", "本人", "自己"))
 
 
 def _user_query_fallback_metadata(
@@ -5575,7 +5686,7 @@ def _focused_people_answer(item: dict[str, Any], *, question: str = "", requeste
         return f"{name}的" + "，".join(parts) + "。"
     if missing:
         if "可靠性别字段" in missing:
-            return f"我查到了{name}，但当前可读通讯录没有提供可靠性别字段，我不会根据名字判断。"
+            return f"我查到了{name}，但当前可读通讯录没有提供可靠性别字段，我不会根据名字判断，也不会把这位同事纳入明确男性或女性名单。"
         return f"我查到了{name}，但当前可读通讯录没有提供{ '、'.join(missing) }。"
     return ""
 
@@ -5594,6 +5705,58 @@ def _people_query_fields_from_text(text: str) -> tuple[str, ...]:
     if "邮箱" in compact:
         fields.append("email")
     return tuple(fields)
+
+
+def _organization_relation_from_request(request: ProviderRequest) -> str:
+    entities = request.intent.entities if isinstance(request.intent.entities, dict) else {}
+    relation = str(entities.get("organization_relation") or "").strip()
+    if relation:
+        return relation
+    domain_query = entities.get("domain_query") if isinstance(entities.get("domain_query"), dict) else {}
+    filters = domain_query.get("filters") if isinstance(domain_query.get("filters"), dict) else {}
+    return str(filters.get("organization_relation") or "").strip()
+
+
+def _department_relation_result(
+    *,
+    relation: str,
+    keyword: str,
+    items: tuple[dict[str, Any], ...],
+    metadata: dict[str, Any],
+    resolution: Any | None = None,
+) -> tuple[tuple[dict[str, Any], ...], str, int]:
+    if not relation:
+        return (), "", 0
+    resolved_name = _organization_resolved_name(resolution) or str(metadata.get("resolved_department_name") or "").strip() or keyword
+    if relation == "children":
+        child_items = tuple(
+            {
+                "name": str(item.get("name") or "").strip(),
+                "member_count": int(item.get("member_count") or 0),
+                "source_department_id": str(item.get("source_department_id") or "").strip(),
+                "resource_type": "organization_department",
+            }
+            for item in metadata.get("child_member_counts", [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        )
+        if not child_items:
+            return (), f"{resolved_name}下面暂时没有可见的直属子部门。", 0
+        names = "、".join(str(item.get("name") or "") for item in child_items)
+        return child_items, f"{resolved_name}下面有 {len(child_items)} 个直属子部门：{names}。", len(child_items)
+    if relation == "leader":
+        leader_items = tuple(
+            dict(item)
+            for item in metadata.get("leader_items", [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        )
+        if leader_items:
+            names = "、".join(str(item.get("name") or "") for item in leader_items)
+            return leader_items, f"{resolved_name}的负责人是 {names}。", len(leader_items)
+        leaders = tuple(str(item).strip() for item in metadata.get("leader_source_user_ids", []) if str(item).strip())
+        if leaders:
+            return (), f"{resolved_name}有负责人标识，但当前可读组织数据里还没有解析到中文姓名。", 0
+        return (), f"{resolved_name}当前没有可确认的负责人字段。", 0
+    return items, "", len(items)
 
 
 def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...], *, resolution: Any | None = None) -> str:
@@ -5685,7 +5848,12 @@ def _department_membership_result_metadata(metadata: dict[str, Any]) -> dict[str
             "direct_member_count": metadata.get("direct_member_count"),
             "display_member_count": metadata.get("display_member_count"),
             "source_member_count": metadata.get("source_member_count"),
+            "resolved_department_name": metadata.get("resolved_department_name"),
+            "resolved_department_id": metadata.get("resolved_department_id"),
+            "direct_child_count": metadata.get("direct_child_count"),
             "child_member_counts": metadata.get("child_member_counts"),
+            "leader_items": metadata.get("leader_items"),
+            "leader_source_user_ids": metadata.get("leader_source_user_ids"),
             "count_basis": metadata.get("count_basis"),
         }.items()
         if value not in (None, "", (), [])
@@ -6710,11 +6878,69 @@ def _calendar_list_answer(items: tuple[dict[str, Any], ...]) -> str:
     lines = [f"查询到 {len(items)} 条日程："]
     for index, item in enumerate(items[:20], start=1):
         title = str(item.get("title") or "未命名日程")
-        start = str(item.get("start") or "").strip()
-        end = str(item.get("end") or "").strip()
-        time_text = f"（{start} - {end}）" if start or end else ""
+        time_text = _calendar_time_range_text(item.get("start"), item.get("end"))
         lines.append(f"{index}. {title}{time_text}")
     return "\n".join(lines)
+
+
+def _calendar_time_range_text(start: Any, end: Any) -> str:
+    start_text, start_date = _calendar_time_text(start)
+    end_text, end_date = _calendar_time_text(end)
+    if not start_text and not end_text:
+        return ""
+    if start_text and end_text:
+        if start_date and start_date == end_date and " " in end_text:
+            end_text = end_text.split(" ", 1)[1]
+        return f"（{start_text} - {end_text}）"
+    return f"（{start_text or end_text}）"
+
+
+def _calendar_time_text(value: Any) -> tuple[str, str]:
+    if value in (None, ""):
+        return "", ""
+    if isinstance(value, dict):
+        if value.get("date"):
+            text = str(value.get("date") or "").strip()
+            return text, text
+        timestamp = value.get("timestamp")
+        if timestamp not in (None, ""):
+            return _calendar_timestamp_text(timestamp, timezone_name=str(value.get("timezone") or "Asia/Shanghai"))
+        for key in ("date_time", "datetime", "time"):
+            if value.get(key):
+                return _calendar_time_text(value.get(key))
+        return "", ""
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo else value.replace(tzinfo=UTC)
+        local = parsed.astimezone(ZoneInfo("Asia/Shanghai"))
+        return local.strftime("%Y-%m-%d %H:%M"), local.strftime("%Y-%m-%d")
+    text = str(value).strip()
+    if not text:
+        return "", ""
+    if text.isdigit():
+        return _calendar_timestamp_text(text, timezone_name="Asia/Shanghai")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text, text[:10] if len(text) >= 10 else ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    local = parsed.astimezone(ZoneInfo("Asia/Shanghai"))
+    return local.strftime("%Y-%m-%d %H:%M"), local.strftime("%Y-%m-%d")
+
+
+def _calendar_timestamp_text(value: Any, *, timezone_name: str) -> tuple[str, str]:
+    try:
+        timestamp = float(str(value).strip())
+    except (TypeError, ValueError):
+        return "", ""
+    if timestamp > 10_000_000_000:
+        timestamp = timestamp / 1000
+    try:
+        tz = ZoneInfo(timezone_name or "Asia/Shanghai")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("Asia/Shanghai")
+    parsed = datetime.fromtimestamp(timestamp, tz)
+    return parsed.strftime("%Y-%m-%d %H:%M"), parsed.strftime("%Y-%m-%d")
 
 
 def _im_tool_params(request: ProviderRequest) -> dict[str, Any]:

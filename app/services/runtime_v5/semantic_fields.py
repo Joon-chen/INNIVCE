@@ -27,6 +27,7 @@ PEOPLE_FIELD_ALIASES: dict[str, str] = {
     "直属上级": "leader",
     "上级": "leader",
     "领导": "leader",
+    "负责人": "leader",
     "gender": "gender",
     "sex": "gender",
     "性别": "gender",
@@ -57,7 +58,7 @@ def people_fields_from_text(text: str) -> tuple[str, ...]:
     fields: list[str] = []
     for canonical, aliases in (
         ("title", ("岗位", "职位", "职务")),
-        ("leader", ("直属上级", "上级", "领导")),
+        ("leader", ("直属上级", "上级", "领导", "负责人")),
         ("mobile", ("电话", "号码", "手机号", "手机")),
         ("email", ("邮箱",)),
         ("gender", ("男还是女", "女还是男", "男性还是女性", "是男是女", "性别")),

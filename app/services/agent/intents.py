@@ -78,6 +78,7 @@ def classify_bot_intent(text: str, *, normalized_command: str | None = None) -> 
         return BotIntent(
             name="approval_advice",
             canonical_command="审批建议",
+            route_hint="approval_qa",
             module_hint="approvals",
             canonical_question=text,
             confidence=0.9,

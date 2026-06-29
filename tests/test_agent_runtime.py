@@ -17,7 +17,7 @@ from app.services.agent.runtime import (
 )
 from app.services.agent.planner import AgentPlan, AgentPlanStep
 from app.services.agent.policies import BotActor, BotAnswerRoute
-from app.services.tools.base import ToolExecutionStatus, ToolProvider, ToolResult, SHARED_TOOL_COUNT
+from app.services.tools.base import ToolExecutionStatus, ToolProvider, ToolResult
 
 
 def _stub_tool(monkeypatch, *, answer: str, capture: dict):
@@ -11911,7 +11911,6 @@ def test_answer_route_label_for_capabilities() -> None:
     assert answer_route_label("feishu_approval_task_query") == "审批实时待办"
     assert answer_route_label("owner_cockpit") == "老板驾驶舱"
     assert answer_route_label("feishu_task_create") == "创建任务"
-
 
 
 

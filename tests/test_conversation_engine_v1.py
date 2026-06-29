@@ -6,7 +6,6 @@ import pytest
 
 from app.services.runtime_v5.command_layer import build_command_plan
 from app.services.runtime_v5.composer import compose_answer
-from app.services.runtime_v5.conversation_hints import build_conversation_hints
 from app.services.runtime_v5.conversation_state import build_conversation_state
 from app.services.runtime_v5.dialogue_resolver import (
     conversation_first_intent_result,
@@ -17,7 +16,8 @@ from app.services.runtime_v5.permission import check_runtime_permission
 from app.services.runtime_v5.planner import plan_task
 from app.services.runtime_v5.response_orchestration import build_response_policy
 from app.services.runtime_v5.runtime_result import build_runtime_result
-from app.services.runtime_v5.semantic_frame import understand_semantics
+from app.services.runtime_v5.semantic_understanding import build_deterministic_signals, understand_semantics
+from app.services.semantic_protocol import SemanticFrame
 
 
 COMPANY_ID = UUID("091fb8ae-443d-49b2-9c67-5e5f1353f2d5")
@@ -131,7 +131,7 @@ CASES = [
     ("工程师有多少人", None, "", "People", "ask", "count", "organization_snapshot", "organization", True, False, "instant", "工程师"),
     ("研发部有哪些人", None, "", "People", "ask", "list", "department_members", "department", True, False, "instant", "研发"),
     ("财务部多少人", None, "", "People", "ask", "count", "department_members", "department", True, False, "instant", "财务"),
-    ("有谁的号码", None, "", "People", "ask", "field_lookup", "people_lookup", "person", True, False, "instant", "确认对象"),
+    ("有谁的号码", None, "", "People", "ask", "list", "organization_snapshot", "person", True, False, "instant", "47"),
     ("公司是做什么的", None, "", "Knowledge", "ask", "company_profile", "general_query", "company", True, False, "instant", "公司"),
     ("公司主营业务是什么", None, "", "Knowledge", "ask", "company_profile", "general_query", "company", True, False, "instant", "主营业务"),
     ("公司介绍在哪里", None, "", "Knowledge", "ask", "company_profile", "general_query", "company", True, False, "instant", "公司介绍"),
@@ -143,7 +143,7 @@ CASES = [
     ("第一个", KNOWLEDGE_RESULT, "Knowledge", "Knowledge", "followup", "followup", "general_query", "company", True, False, "instant", "第一个"),
     ("发给这些人", MALE_RESULT, "People", "Communication", "request_action", "action_request", "message_send", "organization", True, True, "instant", "消息内容"),
     ("用机器人发给这些人说今晚开会", MALE_RESULT, "People", "Communication", "request_action", "action_request", "message_send", "organization", True, True, "instant", "确认"),
-    ("给这些人发邮件", MALE_RESULT, "People", "Communication", "request_action", "action_request", "message_send", "organization", True, True, "instant", "消息内容"),
+    ("给这些人发邮件", MALE_RESULT, "People", "Communication", "request_action", "action_request", "mail_draft_create", "self", True, True, "instant", "收到"),
     ("是的", None, "", "Conversation", "answer", "confirm", "smalltalk", "self", True, False, "llm_enhanced", "确认"),
     ("是的", None, "Communication", "Communication", "confirm", "confirm", "smalltalk", "self", True, False, "llm_enhanced", "确认"),
     ("不用了", MALE_RESULT, "People", "People", "cancel", "cancel", "smalltalk", "self", True, False, "llm_enhanced", "取消"),
@@ -187,9 +187,9 @@ def test_conversation_first_v1_regression_contract(
     context = _context(message, result_context=result_context, session_context=PENDING_SEND if message == "是的" and expected_domain == "Communication" else None)
 
     state = build_conversation_state(context)
-    hints = build_conversation_hints(message, state)
-    semantic_frame = understand_semantics(message=message, state=state, hints=hints)
-    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=hints)
+    signals = build_deterministic_signals(message, state)
+    semantic_frame = understand_semantics(message=message, state=state, signals=signals)
+    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=signals)
     intent = conversation_first_intent_result(context=context, frame=command_frame)
     planner = plan_task(intent)
     policy = check_runtime_permission(context=context, intent=intent, plan=planner)
@@ -254,9 +254,9 @@ def test_conversation_first_department_followups_inherit_organization_collection
     context = _context(message, result_context=result_context)
 
     state = build_conversation_state(context)
-    hints = build_conversation_hints(message, state)
-    semantic_frame = understand_semantics(message=message, state=state, hints=hints)
-    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=hints)
+    signals = build_deterministic_signals(message, state)
+    semantic_frame = understand_semantics(message=message, state=state, signals=signals)
+    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=signals)
     intent = conversation_first_intent_result(context=context, frame=command_frame)
 
     assert state.previous_result_reference.collection_type == "department_people"
@@ -330,6 +330,101 @@ def test_conversation_first_organization_resolver_regression_cases(
         assert plan.intent_result.entities["keyword"] == expected_keyword
 
 
+def test_conversation_first_organization_relation_uses_previous_department_context() -> None:
+    plan = build_command_plan(context=_context("下面有几个部门", result_context=BUSINESS_GROUP_RESULT))
+
+    assert plan.intent == "department_members"
+    assert plan.command_frame is not None
+    assert plan.command_frame.context_mode == "inherit_result_context"
+    assert plan.intent_result.entities["keyword"] == "商务组"
+    assert plan.intent_result.entities["organization_relation"] == "children"
+    assert plan.intent_result.entities["domain_query"]["filters"]["organization_relation"] == "children"
+
+
+def test_dialogue_resolver_prefers_llm_semantic_frame_over_people_hint() -> None:
+    context = _context("宋朝开国皇帝是谁")
+    state = build_conversation_state(context)
+    hints = build_deterministic_signals(context.current_message, state)
+    semantic_frame = SemanticFrame(
+        speech_act="ask",
+        topic="knowledge",
+        target={"kind": "unknown"},
+        operation="knowledge_query",
+        requested_output="natural_text",
+        parameters={
+            "raw_message": context.current_message,
+            "previous_result": {"collection_type": "filtered_people"},
+            "filters": {"gender": "male"},
+        },
+        confidence=0.91,
+        source="llm_semantic_understanding_v1",
+    )
+
+    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=hints)
+
+    assert hints.domain_hint == "People"
+    assert command_frame.domain == "Knowledge"
+    assert command_frame.intent == "general_query"
+    assert command_frame.scope == "company"
+
+
+def test_dialogue_resolver_keeps_previous_result_presentation_read_only() -> None:
+    context = _context("你帮我把明细直接发出来", result_context=MALE_RESULT)
+    state = build_conversation_state(context)
+    hints = build_deterministic_signals(context.current_message, state)
+    semantic_frame = SemanticFrame(
+        speech_act="request_action",
+        topic="people",
+        target={"kind": "previous_result"},
+        operation="list",
+        requested_output="full_list",
+        parameters={
+            "raw_message": context.current_message,
+            "previous_result": {"collection_type": "filtered_people"},
+            "filters": {"gender": "male"},
+        },
+        confidence=0.9,
+        source="llm_semantic_understanding_v1",
+    )
+
+    command_frame = resolve_dialogue_to_command_frame(state=state, semantic_frame=semantic_frame, hints=hints)
+    intent = conversation_first_intent_result(context=context, frame=command_frame)
+    planner = plan_task(intent)
+    policy = check_runtime_permission(context=context, intent=intent, plan=planner)
+
+    assert command_frame.intent == "organization_snapshot"
+    assert command_frame.question_type == "query"
+    assert command_frame.dialogue_mode == "present"
+    assert command_frame.context_mode == "inherit_result_context"
+    assert command_frame.params["domain_query"]["operation_kind"] == "read"
+    assert command_frame.params["domain_query"]["filters"] == {"gender": "male"}
+    assert command_frame.gates["safety"]["confirmation_expected"] is False
+    assert policy.requires_confirmation is False
+
+
+def test_conversation_first_department_leader_is_organization_relation_not_people_lookup() -> None:
+    plan = build_command_plan(context=_context("半导体事业部的负责人是谁"))
+
+    assert plan.intent == "department_members"
+    assert plan.command_frame is not None
+    assert plan.intent_result.entities["keyword"] == "半导体事业部"
+    assert plan.intent_result.entities["people_query_field"] == "leader"
+    assert plan.intent_result.entities["organization_relation"] == "leader"
+    assert plan.intent_result.entities["domain_query"]["fields"] == ["leader"]
+    assert plan.intent_result.entities["domain_query"]["filters"]["organization_relation"] == "leader"
+
+
+def test_conversation_first_group_message_target_is_extracted_without_legacy_intent() -> None:
+    plan = build_command_plan(context=_context("发条消息给大飞哥测试群：测试内容。"))
+
+    assert plan.intent == "message_send"
+    assert plan.intent_result.entities["target_type"] == "chat"
+    assert plan.intent_result.entities["target"] == "大飞哥测试"
+    assert plan.intent_result.entities["text"] == "测试内容。"
+    assert "target_type" not in plan.intent_result.missing_params
+    assert "text" not in plan.intent_result.missing_params
+
+
 @pytest.mark.parametrize(
     "message",
     (
@@ -368,7 +463,7 @@ def test_conversation_first_collection_label_answer_fills_send_target() -> None:
     assert plan.intent == "message_send"
     assert plan.command_frame is not None
     assert plan.intent_result.entities["target_type"] == "people_context"
-    assert plan.intent_result.entities["target"] == "previous_result"
+    assert plan.intent_result.entities["target"] == "行政组"
     assert plan.intent_result.entities["people_target_count"] == "3"
     assert "target_type" not in plan.intent_result.missing_params
 
@@ -382,7 +477,7 @@ def test_conversation_first_collection_label_answer_fills_send_target() -> None:
         ("安排这些人明天下午3点到4点开会，主题：周报同步", "calendar_create"),
     ),
 )
-def test_conversation_first_v1_does_not_steal_non_v1_domains(message: str, expected_intent: str) -> None:
+def test_conversation_first_v1_handles_cross_domain_messages_without_legacy_intent(message: str, expected_intent: str) -> None:
     result_context = ResultContext(
         result_type="organization_snapshot",
         count=2,
@@ -398,7 +493,7 @@ def test_conversation_first_v1_does_not_steal_non_v1_domains(message: str, expec
 
     assert plan.intent == expected_intent
     assert plan.command_frame is not None
-    assert plan.command_frame.route_path != "conversation_first_v1" or expected_intent == "message_send"
+    assert plan.command_frame.route_path == "conversation_first_v1"
 
 
 def test_response_orchestrator_answers_people_count_without_template_or_card() -> None:

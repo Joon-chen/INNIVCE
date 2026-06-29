@@ -33,6 +33,8 @@ def execute_local_tool(context: ToolContext, request: ToolRequest) -> str:
         return answer_personal_tasks(context.db, company_id=context.company_id, actor=context.actor)
     if request.tool_name == "task_qa":
         return answer_task_question(context.db, company_id=context.company_id)
+    if request.tool_name == "approval_qa":
+        return answer_approval_question(context.db, company_id=context.company_id, question=request.question)
     if request.tool_name == "domain_qa":
         return answer_domain_question(context.db, company_id=context.company_id, actor=context.actor, question=request.question)
     if request.tool_name == "chat_qa":

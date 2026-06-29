@@ -85,7 +85,18 @@ def normalize_organization_name(value: Any) -> str:
         "是谁",
         "谁是",
         "分别",
+        "负责人",
+        "领导",
+        "直属上级",
+        "上级",
+        "下面",
+        "下设",
+        "子部门",
+        "下级部门",
+        "几个部门",
+        "多少个部门",
         "有哪些人",
+        "有哪些",
         "成员",
         "人员",
         "同事",
@@ -707,12 +718,33 @@ def _department_membership_metadata(
     displayed_count = len(direct_user_ids) + sum(int(item["member_count"] or 0) for item in child_counts)
     source_count = _department_metadata_count(root)
     unique_user_ids = {user.id for _membership, user in rows}
+    leader_keys = {str(item or "").strip() for item in (getattr(root, "leader_source_user_ids", None) or []) if str(item or "").strip()}
+    leader_items = tuple(
+        {
+            "name": user.name,
+            "open_id": user.open_id,
+            "user_id": user.source_user_id or "",
+            "title": user.job_title or "",
+            "department": root.name,
+        }
+        for membership, user in rows
+        if membership.organization_department_id == root.id
+        and (
+            str(getattr(membership, "role_in_department", "") or "") == "leader"
+            or {str(user.open_id or "").strip(), str(user.source_user_id or "").strip()} & leader_keys
+        )
+    )
     return {
         "unique_member_count": len(unique_user_ids),
         "direct_member_count": len(direct_user_ids),
         "display_member_count": displayed_count or source_count or len(unique_user_ids),
         "source_member_count": source_count,
+        "resolved_department_name": root.name,
+        "resolved_department_id": str(root.id),
+        "direct_child_count": len(direct_children),
         "child_member_counts": list(child_counts),
+        "leader_items": list(leader_items),
+        "leader_source_user_ids": list(leader_keys),
         "count_basis": "direct_members_plus_child_department_member_counts" if direct_children else "department_member_count",
     }
 
@@ -778,6 +810,7 @@ def _department_model_record(item: OrganizationDepartment) -> dict[str, Any]:
         "target_type": item.unit_type or ORG_TARGET_DEPARTMENT,
         "source_department_id": item.source_department_id,
         "open_department_id": item.open_department_id,
+        "parent_source_department_id": item.parent_source_department_id,
         "name": item.name,
         "normalized_name": item.normalized_name,
         "path_names": item.path_names or [],

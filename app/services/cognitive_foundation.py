@@ -446,9 +446,19 @@ def _latest_workspace_projection_events(events: list[WorkEvent] | tuple[WorkEven
         if not key[0] or not key[1]:
             continue
         existing = latest.get(key)
-        if existing is None or event.occurred_at >= existing.occurred_at:
+        if existing is None or _workspace_projection_sort_time(event) >= _workspace_projection_sort_time(existing):
             latest[key] = event
     return tuple(latest.values())
+
+
+def _workspace_projection_sort_time(event: WorkEvent) -> datetime:
+    projection = event.payload if isinstance(event.payload, dict) else {}
+    fields = projection.get("cognitive_fields") if isinstance(projection.get("cognitive_fields"), dict) else {}
+    for key in ("updated_at", "completed_at", "due_at", "start_at", "end_at"):
+        parsed = _parse_datetime(fields.get(key))
+        if parsed is not None:
+            return parsed
+    return event.occurred_at
 
 
 def _workspace_observation_object_id(object_type: str, raw_item: dict, index: int) -> str:

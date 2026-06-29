@@ -20,7 +20,6 @@ FEISHU_REALTIME_TOOL_NAMES = (
     "feishu_approval_instance_cancel",
     "feishu_approval_instance_cc",
     "feishu_approval_instance_get",
-    "feishu_approval_instance_initiated",
     "feishu_approval_instance_remind",
     "feishu_approval_task_add_sign",
     "feishu_approval_task_approve",

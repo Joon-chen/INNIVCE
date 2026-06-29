@@ -54,7 +54,7 @@ def build_approval_snapshot(
     if app_config is None:
         return {"ok": False, "error": "missing_feishu_app_config", "object_id": object_id}
 
-    running_snapshot = upsert_snapshot(
+    upsert_snapshot(
         db,
         company_id=company_uuid,
         object_type="approval",

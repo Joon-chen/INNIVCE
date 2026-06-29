@@ -8,7 +8,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 
 from app.models.entities import Account
-from app.services.feishu.approval import FeishuApprovalService, extract_approval_task_items
+from app.services.feishu.approval import FeishuApprovalService
 from app.services.feishu.bitable import FeishuBitableService
 from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.contact import FeishuContactService
@@ -223,16 +223,17 @@ def _execute_approval_task_query(request: ToolRequest) -> str:
     open_id = _optional_str(params, "user_id") or _optional_str(params, "open_id")
     if not open_id:
         raise ValueError("查询待审批任务缺少用户 open_id。")
-    result = _run_async(
-        service.fetch_user_pending_tasks(
-            open_id=open_id,
-            limit=_int_param(params, "page_size", 20),
-            names_by_code={},
-        )
-    )
-    if not result.get("available"):
-        raise RuntimeError(str(result.get("error") or "飞书审批任务查询失败。"))
-    items = result.get("items") if isinstance(result.get("items"), list) else []
+    query = {
+        "topic": str(params.get("topic") or "1"),
+        "page_size": _int_param(params, "page_size", 20),
+        "user_id_type": str(params.get("user_id_type") or "open_id"),
+        "user_id": open_id,
+    }
+    if params.get("definition_code"):
+        query["definition_code"] = str(params["definition_code"])
+    payload = _run_async(service.client.api_get("/open-apis/approval/v4/tasks", params=query))
+    data = _response_data(payload)
+    items = data.get("tasks") or data.get("items") or []
     if str(params.get("response_format") or "").strip() == "raw_json":
         return json.dumps({"available": True, "data": {"items": items}}, ensure_ascii=False)
     return _summary("飞书审批任务", items, title_keys=("title", "definition_name", "task_id"))
@@ -241,13 +242,13 @@ def _execute_approval_task_query(request: ToolRequest) -> str:
 def _execute_approval_instance_get(request: ToolRequest) -> str:
     params = request.params
     service = FeishuApprovalService(_app_config(params), client=params.get("client"))
-    payload = _run_async(
-        service.get_instance(
-            instance_code=_required_str(params, "instance_code"),
-            locale=_optional_str(params, "locale"),
-            user_id_type=str(params.get("user_id_type") or "open_id"),
-        )
-    )
+    query = {
+        "instance_code": _required_str(params, "instance_code"),
+        "user_id_type": str(params.get("user_id_type") or "open_id"),
+    }
+    if params.get("locale"):
+        query["locale"] = str(params["locale"])
+    payload = _run_async(service.client.api_get("/open-apis/approval/v4/instances/detail", params=query))
     data = _response_data(payload)
     title = _item_title(data, ("definition_name", "approval_name", "serial_number", "instance_code"))
     return f"飞书审批实例已读取：{title}" if title else "飞书审批实例已读取。"
@@ -1445,7 +1446,6 @@ FEISHU_API_READ_BINDINGS: dict[str, ReadToolHandler] = {
     "feishu_bitable_view_get_timebar": _execute_bitable_view_get_timebar,
     "feishu_bitable_view_get_visible_fields": _execute_bitable_view_get_visible_fields,
     "feishu_approval_instance_get": _execute_approval_instance_get,
-    "feishu_approval_instance_initiated": _execute_approval_instance_initiated,
     "feishu_approval_task_query": _execute_approval_task_query,
     "feishu_drive_file_list": _execute_drive_file_list,
     "feishu_im_chat_search": _execute_im_chat_search,

@@ -2,6 +2,8 @@ import asyncio
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
+
 from app.api.routes.feishu_event_routes import receive_event
 from app.services.feishu.commands import (
     _agent_runtime_tool_steps,
@@ -26,6 +28,12 @@ from app.services.gateway.card_responder import (
 from app.services.gateway.feishu import build_feishu_gateway_message, feishu_url_verification_challenge, should_reply_to_feishu_message
 from app.services.gateway.message import GatewayMessageKind
 from app.services.gateway.responder import send_feishu_interactive_reply, send_feishu_text_reply, update_feishu_message_content
+
+
+@pytest.fixture(autouse=True)
+def _enable_feishu_v5_runtime(monkeypatch):
+    monkeypatch.setattr("app.services.feishu.commands.settings.feishu_bot_ai_mode_enabled", True)
+    monkeypatch.setattr("app.services.feishu.commands.settings.feishu_bot_runtime_v5_enabled", True)
 
 
 def test_build_feishu_gateway_message_from_official_nested_event() -> None:
