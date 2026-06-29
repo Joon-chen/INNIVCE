@@ -658,6 +658,53 @@ def test_runtime_v5_department_member_answer_hides_identifier_names() -> None:
     assert "姓名不可确认" in answer
 
 
+def test_response_orchestrator_department_list_hides_identifier_names() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=3,
+        items=({"name": "李慧玲"}, {"name": "400704"}, {"name": "从倩"}),
+        metadata={
+            "entity_domain": "People",
+            "keyword": "人事",
+            "organization_resolution": {"query": "人事", "resolved_name": "人事组"},
+        },
+        answer="人事组目前 3 位：李慧玲、400704、从倩。",
+    )
+    execution = ExecutionResult(
+        strategy="department_members",
+        status="success",
+        provider_results=(ProviderResult(source="people", status="success", result_type="department_members", count=3),),
+        result_context=result_context,
+    )
+    intent = IntentResult(
+        question_type="query",
+        intent="department_members",
+        data_scope="department",
+        confidence=0.9,
+        entities={
+            "command_frame": {
+                "route_path": "conversation_first_v1",
+                "params": {
+                    "conversation_first_v1": True,
+                    "output_contract": {"mode": "full_list", "list_delivery": "inline_text"},
+                },
+            }
+        },
+    )
+
+    composed = compose_answer(
+        context=_context("哪3个"),
+        intent=intent,
+        permission=PermissionDecision(allowed=True),
+        execution=execution,
+    )
+
+    assert "李慧玲" in composed.answer
+    assert "从倩" in composed.answer
+    assert "400704" not in composed.answer
+    assert "姓名不可确认" in composed.answer
+
+
 def test_runtime_v5_department_leader_followup_uses_previous_department() -> None:
     result_context = ResultContext(
         result_type="department_members",

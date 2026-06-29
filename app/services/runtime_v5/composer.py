@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -407,22 +408,53 @@ def _people_list_contract_answer(*, result_context: ResultContext, metadata: dic
         return _human_readable_answer(result_context.answer) or "没有匹配到人员。"
     if mode in {"full_list", "detail"} and count > 8 and not force_inline:
         return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
-    names = [str(item.get("name") or "").strip() for item in items if str(item.get("name") or "").strip()]
+    names, hidden_identifier_count = _displayable_people_names(items)
     if not names:
         return _human_readable_answer(result_context.answer) or f"共 {count} 人。"
+    suffix = f"另有 {hidden_identifier_count} 位只有系统标识，姓名不可确认。" if hidden_identifier_count else ""
     if result_context.result_type == "department_members":
         department_intro = _department_list_intro(result_context=result_context, metadata=metadata)
         if department_intro:
             if count > 8 and not force_inline:
                 return _people_sidepanel_summary(result_context=result_context, metadata=metadata)
-            return f"{department_intro}{'、'.join(names)}。"
+            return f"{department_intro}{'、'.join(names)}。{suffix}"
     keyword = str(metadata.get("keyword") or "").strip()
     subject = f"{keyword} " if keyword else ""
     if len(names) == 1:
-        return f"{subject}这 1 位是：{names[0]}。"
+        return f"{subject}这 1 位是：{names[0]}。{suffix}"
     if force_inline:
-        return f"{subject}共 {count} 位：{'、'.join(names)}。"
-    return f"{subject}共 {count} 位：{'、'.join(names[:8])}。" if count <= 8 else _people_sidepanel_summary(result_context=result_context, metadata=metadata)
+        return f"{subject}共 {count} 位：{'、'.join(names)}。{suffix}"
+    return f"{subject}共 {count} 位：{'、'.join(names[:8])}。{suffix}" if count <= 8 else _people_sidepanel_summary(result_context=result_context, metadata=metadata)
+
+
+def _displayable_people_names(items: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> tuple[list[str], int]:
+    names: list[str] = []
+    hidden_count = 0
+    for item in items:
+        name = _displayable_people_name(str(item.get("name") or ""))
+        if name:
+            names.append(name)
+        else:
+            hidden_count += 1
+    return names, hidden_count
+
+
+def _displayable_people_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or _looks_like_identifier_name(text):
+        return ""
+    return text
+
+
+def _looks_like_identifier_name(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"\d{3,}", text):
+        return True
+    if re.fullmatch(r"(ou|on|oc|od|user|dept|department|open)[_\-]?[A-Za-z0-9._\-]{6,}", text, flags=re.IGNORECASE):
+        return True
+    return not re.search(r"[\u4e00-\u9fff]", text) and bool(re.search(r"\d{4,}", text))
 
 
 def _department_list_intro(*, result_context: ResultContext, metadata: dict[str, Any]) -> str:
