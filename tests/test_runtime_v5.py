@@ -3205,11 +3205,15 @@ def test_registered_knowledge_candidates_read_nested_document_type_and_skip_bita
             return [doc_resource, bitable_resource]
 
     class Db:
+        query = None
+
         def scalars(self, query):
+            self.query = query
             return Scalars()
 
+    db = Db()
     candidates = _registered_knowledge_resource_candidates(
-        Db(),
+        db,
         company_id=company_id,
         seed_text="报销流程怎么做",
         context="general",
@@ -3218,6 +3222,7 @@ def test_registered_knowledge_candidates_read_nested_document_type_and_skip_bita
 
     assert [item["title"] for item in candidates] == ["报销流程说明"]
     assert candidates[0]["document_type"] == "docx"
+    assert "business_domain" in str(db.query)
 
 
 def test_runtime_v5_placeholder_objective_does_not_render_as_intro() -> None:

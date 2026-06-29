@@ -3644,8 +3644,9 @@ def _registered_knowledge_resource_candidates(
         .where(Resource.company_id == company_id)
         .where(Resource.enabled.is_(True))
         .where(Resource.resource_type.in_(["drive_file", "doc", "wiki"]))
+        .where(or_(Resource.business_domain == "knowledge", Resource.resource_type.in_(["doc", "wiki"])))
         .order_by(Resource.updated_at.desc())
-        .limit(limit * 4)
+        .limit(max(limit * 30, 200))
     )
     resources = list(db.scalars(query).all())
     candidates = []
