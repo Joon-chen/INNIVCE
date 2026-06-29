@@ -218,6 +218,11 @@ def _intent(*, domain: str, state: ConversationState, semantic_frame: SemanticFr
             return "organization_snapshot"
         if (
             previous_result.get("collection_type") == "department_people"
+            and parameters.get("organization_relation") == "leader"
+        ):
+            return "department_members"
+        if (
+            previous_result.get("collection_type") == "department_people"
             and semantic_frame.operation in {"list", "followup", "exists"}
             and not parameters.get("field")
         ):

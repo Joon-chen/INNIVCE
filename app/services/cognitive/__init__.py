@@ -1,0 +1,1 @@
+"""Shared cognitive foundation helpers."""

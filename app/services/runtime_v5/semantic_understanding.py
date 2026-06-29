@@ -123,6 +123,11 @@ _PEOPLE_MARKERS = (
     "通讯录",
     "名单",
     "人员",
+    "人事",
+    "行政",
+    "财务",
+    "IT",
+    "it",
     "工程师",
     "部门",
     "董事长",
@@ -838,9 +843,9 @@ def _organization_unit_candidate(compact: str) -> str:
 
 def _bare_organization_unit_candidate(compact: str) -> str:
     patterns = (
-        r"(?:我们公司|我们|公司)(?:的)?(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})(?:是谁|有谁|有哪些|多少人|几人|几位|几个)$",
+        r"(?:我们公司|我们|公司)(?:的)?(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})(?:是谁|有谁|有哪些|多少人|几人|几位|几个)(?:呀|啊|呢|吗)?$",
         r"(?:有多少个|有多少位|有多少|多少个|多少位|多少|有几个|几个|有几位|几位|有几人|几人)(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})$",
-        r"(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})(?:有多少人|多少人|有几人|几人|有哪些人|有哪些|都有谁|是谁|名单)$",
+        r"(?P<unit>[A-Za-z0-9]{1,20}|[\u4e00-\u9fff]{1,8})(?:有多少人|多少人|有几人|几人|有哪些人|有哪些|都有谁|是谁|名单)(?:呀|啊|呢|吗)?$",
     )
     for pattern in patterns:
         match = re.search(pattern, compact, re.I)

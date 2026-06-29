@@ -74,15 +74,16 @@ Observability
 | `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` | ACTIVE | Cognitive Engine V1 |
 | `CURRENT_MISSION.md` | ACTIVE | 当前任务 |
 
-## Cognitive Foundation V1.1 Freeze
+## Cognitive Foundation V1.2 Freeze
 
-Cognitive V1.1 仍属于 Cognitive Engine，不新增 Memory 系统，不新增 Business Domain，也不新增 Provider。
+Cognitive V1.2 仍属于 Cognitive Engine，不新增 Memory 系统，不新增 Business Domain，也不新增 Provider。
 
 冻结链路：
 
 ```text
 Source Systems
 -> Shared File Intelligence
+-> Evidence Pack
 -> Evidence Builder
 -> WorkEvent (Evidence Carrier)
 -> Extractor Registry
@@ -104,6 +105,28 @@ version
 snapshot_status
 derived_from
 ```
+
+Evidence Pack 是通用证据结构，字段固定为：
+
+```text
+source_ref
+organization_binding
+visibility_binding
+content_profile
+outline
+key_claims
+entities
+topics
+relations
+metrics
+time_refs
+evidence_spans
+uncertainties
+quality
+derived_from
+```
+
+Evidence Pack 禁止出现 `company_* / customer_* / project_*` 业务字段；这些解释只能进入对应 Extractor Candidate。
 
 ## Compatibility Notes
 
@@ -129,3 +152,5 @@ derived_from
 - Cognitive Extractor 只能输出 Candidate，Snapshot 只能由 Snapshot Builder 融合生成。
 - Cognitive V1.1 不设计 MemoryCandidate / MemoryFact / Memory Pipeline；长期 Memory 属于 V2。
 - Snapshot 不得变成第二个 Knowledge Database；开放问答依赖一份 `understanding`，精确回答依赖 `structured`。
+- Evidence Pack 是共享认知基础服务的一部分，不得在 Company、Knowledge、Mail、IM、Approval 各自复制一套。
+- 通讯录和组织架构属于 Organization Foundation 基础数据；数字标识、工号、open_id 不得被展示为人员姓名或负责人姓名。

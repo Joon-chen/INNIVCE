@@ -28,7 +28,7 @@ from app.services.llm.prompt_audit import prompt_audit_payload
 from app.services.runtime_v5.clarification import build_clarification_guide
 from app.services.runtime_v5.clarification_reply import resolve_clarification_reply
 from app.services.runtime_v5.feishu_resource_providers import FeishuBaseProvider, FeishuCalendarProvider, FeishuIMProvider, FeishuPeopleProvider, FeishuTaskProvider, KnowledgeProvider
-from app.services.runtime_v5.feishu_resource_providers import _apply_people_domain_filters
+from app.services.runtime_v5.feishu_resource_providers import _apply_people_domain_filters, _department_members_answer
 from app.services.runtime_v5.feishu_resource_providers import _knowledge_event_item, _memory_item, _read_knowledge_document_candidate, _registered_knowledge_resource_candidates, _workevent_item
 from app.services.runtime_v5.feishu_resource_providers import WebProvider
 from app.services.runtime_v5.capability_router import CapabilityRouter
@@ -211,6 +211,7 @@ def test_runtime_v5_company_questions_route_to_general_knowledge_query(monkeypat
         "公司有哪些产品",
         "公司的优势是什么",
         "公司的联系方式是什么",
+        "这份资料里哪些信息还不明确",
     ):
         intent = recognize_intent(question, _context(question))
 
@@ -257,6 +258,7 @@ def test_runtime_v5_department_people_questions_route_to_department_members() ->
         ("半导体事业部都有多少人", "半导体事业部"),
         ("业务部有多少人", "业务部"),
         ("商务组有多少人", "商务组"),
+        ("公司的人事是谁呀", "人事"),
     )
     for question, keyword in cases:
         intent = recognize_intent(question, _context(question))
@@ -639,6 +641,45 @@ def test_runtime_v5_department_leader_relation_survives_composer(monkeypatch) ->
     assert "展示口径" not in result.composed.answer
 
 
+def test_runtime_v5_department_member_answer_hides_identifier_names() -> None:
+    answer = _department_members_answer(
+        "人事",
+        (
+            {"name": "李慧玲"},
+            {"name": "400704"},
+            {"name": "从倩"},
+        ),
+        resolution=SimpleNamespace(resolved_name="人事组"),
+    )
+
+    assert "李慧玲" in answer
+    assert "从倩" in answer
+    assert "400704" not in answer
+    assert "姓名不可确认" in answer
+
+
+def test_runtime_v5_department_leader_followup_uses_previous_department() -> None:
+    result_context = ResultContext(
+        result_type="department_members",
+        count=3,
+        items=({"name": "李慧玲"}, {"name": "400704"}, {"name": "从倩"}),
+        metadata={
+            "entity_domain": "People",
+            "resolved_department_name": "人事组",
+            "organization_resolution": {"resolved_name": "人事组"},
+            "keyword": "人事",
+        },
+        answer="人事组目前 3 人：李慧玲、从倩；另有 1 位只有系统标识，姓名不可确认。",
+    )
+
+    plan = build_command_plan(context=_context("谁是领导", result_context=result_context))
+
+    assert plan.intent == "department_members"
+    assert plan.intent_result.entities["keyword"] == "人事组"
+    assert plan.intent_result.entities["organization_relation"] == "leader"
+    assert plan.intent_result.entities["foundation_route"] == "people.department_members"
+
+
 def test_runtime_v5_new_question_interrupts_stale_waiting_input_action() -> None:
     class PeopleProvider:
         source = "people"
@@ -786,7 +827,7 @@ def test_response_orchestrator_keeps_single_person_multi_field_answer() -> None:
             "people_query_fields": ("title", "leader"),
             "domain_query": {"fields": ["title", "leader"]},
         },
-        answer="李慧玲的职位是高级人事专员，直属上级在通讯录里的显示名是 400704（人事经理，人事组），当前没有可确认的中文姓名。",
+        answer="李慧玲的职位是高级人事专员，直属上级有系统标识（人事经理，人事组），但当前没有可确认的中文姓名。",
     )
     execution = ExecutionResult(
         strategy="people_lookup",
@@ -803,6 +844,7 @@ def test_response_orchestrator_keeps_single_person_multi_field_answer() -> None:
     )
 
     assert composed.answer == result_context.answer
+    assert "400704" not in composed.answer
 
 
 def test_people_provider_contract_applies_domain_query_filters_to_items_and_count() -> None:
@@ -1759,7 +1801,8 @@ def test_runtime_v5_people_lookup_marks_identifier_leader_name_as_uncertain(monk
         )
     )
 
-    assert "显示名是 400704" in result.answer
+    assert "400704" not in result.answer
+    assert "系统标识" in result.answer
     assert "当前没有可确认的中文姓名" in result.answer
 
 
@@ -4275,6 +4318,7 @@ def test_command_plan_domain_gate_records_reason_source_and_confidence(monkeypat
         ("公司的客户有哪些", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
         ("公司的优势是什么", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
         ("公司的联系方式是什么", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
+        ("这份资料里哪些信息还不明确", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
         ("报销流程怎么做", "Knowledge", "foundation_route:knowledge.general", "foundation_rule"),
         ("我有多少封邮件", "Communication", "foundation_route:communication.mail", "foundation_rule"),
         ("我的任务", "Workspace", "workspace_signal", "rule"),

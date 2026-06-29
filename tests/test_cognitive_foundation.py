@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 
 from app.models.entities import Snapshot, WorkEvent
+from app.services.cognitive.evidence_pack import build_evidence_pack_from_text, evidence_pack_payload
 from app.services.approval_snapshot_builder import build_approval_snapshot_from_work_event
 from app.services.cognitive_foundation import (
     MEMORY_CANDIDATE_STATUS,
@@ -532,6 +533,40 @@ def test_cognitive_v1_company_profile_snapshot_builder_uses_evidence_carrier() -
     assert item["structured"]["products"] == ["GAUSTEK SRI 全系列产品", "测试测量产品系列"]
     assert "测试测量" in company_profile_snapshot_answer(item, query="公司是做什么的")
     assert "GAUSTEK SRI 全系列产品" in company_profile_snapshot_answer(item, query="公司有哪些产品")
+    assert "不明确" in company_profile_snapshot_answer(item, query="这份资料里哪些信息还不明确")
+
+
+def test_cognitive_v12_company_profile_consumes_generic_evidence_pack() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+    pack = build_evidence_pack_from_text(
+        "固势（苏州）科技有限公司 GAUSTEK SRI 全系列产品手册。资料覆盖测试测量、实验室、研发测试和工业场景，让测试更简单，让实验更高效。",
+        filename="固势宣传册.pdf",
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        source_object_type="pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+    )
+    evidence = EvidenceInput(
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+        timestamp=datetime.now(UTC),
+        extractor=COMPANY_PROFILE_EXTRACTOR,
+        summary="固势宣传册摘要",
+        metadata={"title": "固势宣传册.pdf", "evidence_pack": evidence_pack_payload(pack)},
+    )
+
+    event = append_evidence_work_event(db, company_id=company_id, evidence=evidence, object_type="company_profile", object_id=str(company_id))
+    snapshot = build_company_profile_snapshot(db, company_id=company_id, evidence_events=(event,), object_id=str(company_id))
+    item = company_profile_snapshot_item(snapshot)
+
+    assert snapshot.payload["derived_from"]["coverage"]["products"] == "supported"
+    assert snapshot.payload["derived_from"]["coverage"]["target_customers"] == "inferred"
+    assert "客户判断属于基于场景的推断" in item["understanding"]
+    assert "没有明确客户名单" in company_profile_snapshot_answer(item, query="客户有哪些")
 
 
 def test_cognitive_v1_extractor_registry_is_by_cognitive_object() -> None:

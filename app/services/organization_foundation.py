@@ -733,6 +733,7 @@ def _department_membership_metadata(
             str(getattr(membership, "role_in_department", "") or "") == "leader"
             or {str(user.open_id or "").strip(), str(user.source_user_id or "").strip()} & leader_keys
         )
+        and not _looks_like_identifier_name(user.name)
     )
     return {
         "unique_member_count": len(unique_user_ids),
@@ -754,6 +755,11 @@ def _department_metadata_count(department: OrganizationDepartment) -> int:
     if isinstance(metadata, dict):
         return _positive_int(metadata.get("member_count"))
     return 0
+
+
+def _looks_like_identifier_name(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and bool(re.fullmatch(r"[A-Za-z0-9._-]{3,}", text))
 
 
 def _department_record(item: dict[str, Any]) -> dict[str, Any]:

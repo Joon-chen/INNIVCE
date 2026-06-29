@@ -14,6 +14,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import BotUserAccess, Company, FeishuAppConfig, MemoryFact, OrganizationUser, Resource, Snapshot, WorkEvent
+from app.services.cognitive.evidence_pack import build_evidence_pack_from_text, evidence_pack_payload
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -3923,24 +3924,41 @@ def _company_profile_snapshot_from_knowledge_documents(
     try:
         for item in document_items:
             summary = str(item.get("summary") or "").strip()
+            source_text = str(item.get("content_preview") or summary).strip()
             source_object_id = str(item.get("document_id") or item.get("title") or "").strip()
-            if not summary or not source_object_id:
+            if not source_text or not source_object_id:
                 continue
+            organization_binding = {
+                "company_id": str(company_id),
+                "object_type": "company",
+                "object_id": str(company_id),
+            }
+            visibility_binding = {
+                "scope": "company",
+                "data_classification": "company",
+                "allowed_user_ids": [],
+                "allowed_departments": [],
+                "allowed_roles": [],
+            }
+            evidence_pack = build_evidence_pack_from_text(
+                source_text,
+                filename=str(item.get("title") or ""),
+                source_system=str(item.get("source") or "knowledge"),
+                source_object_id=source_object_id,
+                source_object_type=str(item.get("document_type") or item.get("resource_type") or ""),
+                organization_binding=organization_binding,
+                visibility_binding=visibility_binding,
+                metadata={
+                    "title": item.get("title") or "",
+                    "resource_type": item.get("resource_type") or "",
+                    "document_type": item.get("document_type") or "",
+                },
+            )
             evidence = EvidenceInput(
                 source_system=str(item.get("source") or "knowledge"),
                 source_object_id=source_object_id,
-                organization_binding={
-                    "company_id": str(company_id),
-                    "object_type": "company",
-                    "object_id": str(company_id),
-                },
-                visibility_binding={
-                    "scope": "company",
-                    "data_classification": "company",
-                    "allowed_user_ids": [],
-                    "allowed_departments": [],
-                    "allowed_roles": [],
-                },
+                organization_binding=organization_binding,
+                visibility_binding=visibility_binding,
                 timestamp=datetime.now(UTC),
                 extractor=COMPANY_PROFILE_EXTRACTOR,
                 summary=summary,
@@ -3948,6 +3966,7 @@ def _company_profile_snapshot_from_knowledge_documents(
                     "title": item.get("title") or "",
                     "resource_type": item.get("resource_type") or "",
                     "document_type": item.get("document_type") or "",
+                    "evidence_pack": evidence_pack_payload(evidence_pack),
                 },
             )
             evidence_events.append(
@@ -5878,7 +5897,7 @@ def _focused_people_answer(item: dict[str, Any], *, question: str = "", requeste
                     if part
                 )
                 suffix = f"（{leader_detail}）" if leader_detail else ""
-                parts.append(f"直属上级在通讯录里的显示名是 {leader}{suffix}，当前没有可确认的中文姓名")
+                parts.append(f"直属上级有系统标识{suffix}，但当前没有可确认的中文姓名")
             else:
                 parts.append(f"直属上级是{leader}")
         else:
@@ -5989,22 +6008,45 @@ def _department_members_answer(keyword: str, items: tuple[dict[str, Any], ...], 
         return f"我在当前可读通讯录里没找到「{keyword}」相关成员。可能是部门名称不一致，也可能这个部门不在当前授权范围里。"
     if len(items) == 1:
         name = str(items[0].get("name") or "未知").strip() or "未知"
+        display_name_value = _displayable_people_name(name)
+        if not display_name_value:
+            return f"{display_name}目前 1 位，但该成员在通讯录里只有系统标识，姓名不可确认。"
         if correction:
-            return f"{correction}目前只有 {name} 1 位。"
-        return f"{display_name}目前 1 位，是{name}。"
-    names = "、".join(str(item.get("name") or "未知").strip() or "未知" for item in items[:30])
+            return f"{correction}目前只有 {display_name_value} 1 位。"
+        return f"{display_name}目前 1 位，是{display_name_value}。"
+    names, hidden_count = _displayable_people_names(items[:30])
     header = f"{correction}{display_name}目前 {len(items)} 人" if correction else f"{display_name}目前 {len(items)} 人"
     if names and len(items) <= 30:
-        return f"{header}：{names}。"
+        suffix = f"；另有 {hidden_count} 位只有系统标识，姓名不可确认" if hidden_count else ""
+        return f"{header}：{names}{suffix}。"
     lines = [f"{header}："]
     for index, item in enumerate(items[:30], start=1):
-        name = str(item.get("name") or "未知")
+        name = _displayable_people_name(str(item.get("name") or "")) or "姓名不可确认"
         title = str(item.get("title") or "").strip()
         email = str(item.get("email") or "").strip()
         mobile = str(item.get("mobile") or "").strip()
         suffix = "，".join(part for part in (title, f"邮箱：{email}" if email else "", f"手机：{mobile}" if mobile else "") if part)
         lines.append(f"{index}. {name}" + (f"（{suffix}）" if suffix else ""))
     return "\n".join(lines)
+
+
+def _displayable_people_names(items: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> tuple[str, int]:
+    names = []
+    hidden_count = 0
+    for item in items:
+        name = _displayable_people_name(str(item.get("name") or ""))
+        if name:
+            names.append(name)
+        else:
+            hidden_count += 1
+    return "、".join(names), hidden_count
+
+
+def _displayable_people_name(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or _looks_like_identifier_name(text):
+        return ""
+    return text
 
 
 def _organization_requested_name(keyword: str, resolved_name: str) -> str:
