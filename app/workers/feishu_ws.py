@@ -1,4 +1,6 @@
 import asyncio
+from collections import deque
+from dataclasses import asdict, is_dataclass
 import json
 import logging
 import os
@@ -6,7 +8,6 @@ import signal
 import threading
 import time
 from typing import Any
-from uuid import UUID
 
 import redis
 from sqlalchemy import select
@@ -26,6 +27,9 @@ stop_event = threading.Event()
 redis_client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
 _last_event_time: float = time.time()
 _ws_watchdog_lock = threading.Lock()
+_conversation_queue_lock = threading.Lock()
+_conversation_queues: dict[str, deque[tuple[Any, dict[str, Any]]]] = {}
+_conversation_workers: set[str] = set()
 
 
 def main() -> None:
@@ -88,7 +92,7 @@ def _run_client_once(lark, app_config_id, app_id, app_secret):
             _last_event_time = time.time()
         payload = _event_to_payload(lark, data)
         logger.info("Feishu event received: %s", _event_summary(payload))
-        threading.Thread(target=_ingest_and_handle, args=(app_config_id, payload), daemon=True).start()
+        _enqueue_ingest_and_handle(app_config_id, payload)
 
     def on_card_action(data):
         payload = _event_to_payload(lark, data)
@@ -190,7 +194,7 @@ def _handle_stop(signum, frame):
 def _load_app_configs():
     db = SessionLocal()
     try:
-        stmt = select(FeishuAppConfig).where(FeishuAppConfig.is_active == True)
+        stmt = select(FeishuAppConfig).where(FeishuAppConfig.is_active.is_(True))
         return list(db.scalars(stmt).all())
     finally:
         db.close()
@@ -203,12 +207,88 @@ def _ingest_and_handle(app_config_id, payload):
         logger.exception("Feishu _ingest_and_handle failed")
 
 
+def _enqueue_ingest_and_handle(app_config_id, payload):
+    key = _conversation_queue_key(app_config_id, payload)
+    should_start = False
+    with _conversation_queue_lock:
+        queue = _conversation_queues.setdefault(key, deque())
+        queue.append((app_config_id, payload))
+        if key not in _conversation_workers:
+            _conversation_workers.add(key)
+            should_start = True
+    if should_start:
+        threading.Thread(target=_run_conversation_queue, args=(key,), daemon=True).start()
+
+
+def _run_conversation_queue(key: str) -> None:
+    while not stop_event.is_set():
+        with _conversation_queue_lock:
+            queue = _conversation_queues.get(key)
+            if not queue:
+                _conversation_queues.pop(key, None)
+                _conversation_workers.discard(key)
+                return
+            app_config_id, payload = queue.popleft()
+        _ingest_and_handle(app_config_id, payload)
+
+
+def _conversation_queue_key(app_config_id, payload: dict[str, Any]) -> str:
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    message = event.get("message") if isinstance(event.get("message"), dict) else {}
+    sender = event.get("sender") if isinstance(event.get("sender"), dict) else {}
+    sender_id = sender.get("sender_id") if isinstance(sender.get("sender_id"), dict) else {}
+    chat_id = str(message.get("chat_id") or "").strip()
+    sender_open_id = str(sender_id.get("open_id") or sender_id.get("user_id") or "").strip()
+    if chat_id:
+        return f"{app_config_id}:chat:{chat_id}"
+    if sender_open_id:
+        return f"{app_config_id}:sender:{sender_open_id}"
+    header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+    event_id = str(header.get("event_id") or event.get("event_id") or message.get("message_id") or id(payload))
+    return f"{app_config_id}:event:{event_id}"
+
+
+def _reset_conversation_queues_for_tests() -> None:
+    with _conversation_queue_lock:
+        _conversation_queues.clear()
+        _conversation_workers.clear()
+
+
 def _handle_command(app_config_id, payload):
+    result = _handle_command_result(app_config_id, payload)
+    if isinstance(result, dict):
+        return bool(result.get("handled"))
+    return bool(result)
+
+
+def _handle_command_result(app_config_id, payload):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _handle_command_result_in_new_session(app_config_id, payload)
+
+    result: dict[str, Any] = {}
+
+    def _runner():
+        try:
+            result["value"] = _handle_command_result_in_new_session(app_config_id, payload)
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _handle_command_result_in_new_session(app_config_id, payload):
     db = SessionLocal()
     try:
         app_config = db.get(FeishuAppConfig, app_config_id)
         if app_config is None:
-            return False
+            return {"handled": False, "status": "ignored", "reason": "missing_app_config"}
         result = asyncio.run(handle_feishu_command_result(db, app_config, payload))
         logger.info(
             "Feishu command handled: handled=%s status=%s route=%s reason=%s",
@@ -217,7 +297,11 @@ def _handle_command(app_config_id, payload):
             result.route_path,
             result.reason,
         )
-        return result.handled
+        if hasattr(result, "as_dict"):
+            return result.as_dict()
+        if is_dataclass(result):
+            return asdict(result)
+        return dict(result)
     finally:
         db.close()
 
@@ -239,13 +323,13 @@ def _ingest_and_handle_card_action(app_config_id, payload):
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return _ingest_and_handle_card_action_sync(app_config_id, payload)
+        return _handle_card_action_response_in_new_session(app_config_id, payload)
 
     result: dict[str, Any] = {}
 
     def _runner():
         try:
-            result["value"] = _ingest_and_handle_card_action_sync(app_config_id, payload)
+            result["value"] = _handle_card_action_response_in_new_session(app_config_id, payload)
         except Exception as exc:
             result["error"] = exc
 
@@ -257,14 +341,36 @@ def _ingest_and_handle_card_action(app_config_id, payload):
     return result.get("value")
 
 
+def _handle_card_action_response(app_config_id, payload):
+    return _ingest_and_handle_card_action(app_config_id, payload)
+
+
+def _handle_card_action_response_in_new_session(app_config_id, payload):
+    return _ingest_and_handle_card_action_sync(app_config_id, payload)
+
+
 def _ingest_and_handle_card_action_sync(app_config_id, payload):
     db = SessionLocal()
     try:
         app_config = db.get(FeishuAppConfig, app_config_id)
         if app_config is None:
             return None
-        ingest_feishu_event(db, app_config, payload)
-        return asyncio.run(handle_feishu_gateway_card_action_response(db, app_config, payload))
+        if callable(getattr(db, "scalar", None)):
+            ingest_feishu_event(db, app_config, payload)
+        response = asyncio.run(handle_feishu_gateway_card_action_response(db, app_config, payload))
+        if response is None:
+            gateway_message = build_feishu_gateway_message(payload)
+            if gateway_message.kind == GatewayMessageKind.CARD_ACTION:
+                write_gateway_message_audit(
+                    db,
+                    company_id=app_config.company_id,
+                    message=gateway_message,
+                    status="ignored",
+                    reason="unhandled_card_action",
+                    handled=False,
+                )
+                db.commit()
+        return response
     finally:
         db.close()
 
