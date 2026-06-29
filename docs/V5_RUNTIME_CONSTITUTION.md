@@ -628,20 +628,33 @@ Cognitive Engine 负责把 Operational Data 转为企业认知。
 冻结链路：
 
 ```text
-Operational Data
+Source Systems
+-> Shared File Intelligence
 -> WorkEvent
 -> Evidence
+-> Extractor Candidate
 -> Snapshot
 -> Insight
 ```
 
 职责：
 
-- WorkEvent：事实层，记录发生了什么。
-- Evidence：判断依据层，保存结构化证据与指标。
-- Snapshot：当前认知层，保存对象或主体的当前状态。
+- WorkEvent：Evidence Carrier，记录发生过的事件；不是 Evidence 本身。
+- Evidence：判断依据层，保存可追溯证据引用、摘要与来源绑定，不复制 PDF、Mail、Chat、Knowledge 正文。
+- Extractor Candidate：认知对象 Extractor 的候选输出；Extractor 不允许直接修改 Snapshot。
+- Snapshot Builder：唯一允许融合多个 Candidate / Evidence 并生成 Snapshot 的组件。
+- Snapshot：当前认知层，保存对象或主体的当前状态；V1.1 结构固定为 `identity / structured / understanding / evidence_refs / confidence / version / snapshot_status / derived_from`。
 - Insight：建议层，输出 Recommendation，不执行动作。
 - Profile / Style / Preference：用户风格、角色画像、偏好快照，属于 Cognitive Engine。
+
+Snapshot V1.1 冻结规则：
+
+- `structured` 只保存稳定事实，不继续扩散为无限业务字段。
+- `understanding` 只有一份，代表系统对对象的当前整体理解，不是文档摘要，也不是原文复制。
+- `snapshot_status` 管理生命周期，例如 `building / active / stale / failed`。
+- `derived_from` 保存调试来源，包括 Candidate、Extractor 和 Evidence 引用。
+- Runtime 有可用 Snapshot 时，必须优先从 Snapshot 回答；不得每次重新总结 PDF 或 Knowledge Chunk。
+- V1 不设计长期 Memory；Memory 属于 V2，来源应是稳定 Snapshot，而不是原始 Evidence。
 
 Cognitive Engine 禁止：
 
@@ -649,6 +662,8 @@ Cognitive Engine 禁止：
 - 绕过 Policy 暴露明细。
 - 把 WorkEvent 当实时 Operational Data。
 - 构建第二套 Runtime。
+- 把 Snapshot 扩展成第二个 Knowledge Database。
+- 让业务域各自实现 Extractor 或文件解析。
 
 Action 仍归 Runtime：
 

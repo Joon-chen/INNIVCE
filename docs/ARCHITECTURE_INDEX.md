@@ -74,6 +74,37 @@ Observability
 | `ENTERPRISE_COGNITIVE_FOUNDATION_V1.md` | ACTIVE | Cognitive Engine V1 |
 | `CURRENT_MISSION.md` | ACTIVE | 当前任务 |
 
+## Cognitive Foundation V1.1 Freeze
+
+Cognitive V1.1 仍属于 Cognitive Engine，不新增 Memory 系统，不新增 Business Domain，也不新增 Provider。
+
+冻结链路：
+
+```text
+Source Systems
+-> Shared File Intelligence
+-> Evidence Builder
+-> WorkEvent (Evidence Carrier)
+-> Extractor Registry
+-> Candidate
+-> Snapshot Builder
+-> Snapshot
+-> Runtime
+```
+
+Snapshot V1.1 结构固定为：
+
+```text
+identity
+structured
+understanding
+evidence_refs
+confidence
+version
+snapshot_status
+derived_from
+```
+
 ## Compatibility Notes
 
 | Document | Status | Role |
@@ -95,3 +126,6 @@ Observability
 - 自学习必须通过 Trace、Regression、Schema/Alias/Prompt 更新和发布流程完成，禁止线上自动新增路由规则。
 - Command Engine 修复必须优先落在 Semantic Understanding、Dialogue Resolver、Context Contract 或 Response Orchestrator，不得以飞书测试短句为单位新增业务域入口。
 - Interface / Gateway 必须保持同一用户会话内消息顺序；异步执行可以跨会话并行，但不得让同一 `chat_id` 的后发消息先完成并污染上下文或可见回复顺序。
+- Cognitive Extractor 只能输出 Candidate，Snapshot 只能由 Snapshot Builder 融合生成。
+- Cognitive V1.1 不设计 MemoryCandidate / MemoryFact / Memory Pipeline；长期 Memory 属于 V2。
+- Snapshot 不得变成第二个 Knowledge Database；开放问答依赖一份 `understanding`，精确回答依赖 `structured`。

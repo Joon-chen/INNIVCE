@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
@@ -9,12 +9,18 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models.entities import Snapshot, WorkEvent
-from app.services.cognitive_foundation import append_cognitive_work_event, upsert_snapshot
+from app.services.cognitive_foundation import append_cognitive_work_event, get_snapshot, upsert_snapshot
 
 
 EVIDENCE_PAYLOAD_VERSION = "evidence_v1"
-COMPANY_PROFILE_SNAPSHOT_TYPE = "company_profile_v1"
+COMPANY_PROFILE_SNAPSHOT_TYPE = "company_profile_v1_1"
+COMPANY_PROFILE_LEGACY_SNAPSHOT_TYPE = "company_profile_v1"
 COMPANY_PROFILE_EXTRACTOR = "CompanyProfileExtractor"
+SNAPSHOT_SCHEMA_VERSION = "snapshot_v1_1"
+SNAPSHOT_STATUS_BUILDING = "building"
+SNAPSHOT_STATUS_ACTIVE = "active"
+SNAPSHOT_STATUS_STALE = "stale"
+SNAPSHOT_STATUS_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -29,10 +35,20 @@ class EvidenceInput:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class CognitiveCandidate:
+    object_type: str
+    extractor: str
+    structured: dict[str, Any] = field(default_factory=dict)
+    understanding: str = ""
+    confidence: str = "low"
+    derived_from: dict[str, Any] = field(default_factory=dict)
+
+
 class CognitiveExtractor(Protocol):
     object_type: str
 
-    def extract(self, evidence_payloads: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    def extract(self, evidence_payloads: tuple[dict[str, Any], ...]) -> CognitiveCandidate:
         ...
 
 
@@ -95,7 +111,7 @@ def append_evidence_work_event(
 class CompanyProfileExtractor:
     object_type = "company_profile"
 
-    def extract(self, evidence_payloads: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    def extract(self, evidence_payloads: tuple[dict[str, Any], ...]) -> CognitiveCandidate:
         summaries = [str(payload.get("summary") or "").strip() for payload in evidence_payloads if _is_evidence_payload(payload)]
         text = "\n".join(summary for summary in summaries if summary)
         contacts = _extract_contacts(text)
@@ -104,7 +120,7 @@ class CompanyProfileExtractor:
         industry = _extract_industry(text)
         advantages = _extract_advantages(text)
         positioning = _company_positioning(text=text, business_scope=business_scope, products=products)
-        return {
+        structured = {
             "company_positioning": positioning,
             "business_scope": business_scope,
             "products": products,
@@ -113,6 +129,14 @@ class CompanyProfileExtractor:
             "advantages": advantages,
             "contacts": contacts,
         }
+        return CognitiveCandidate(
+            object_type=self.object_type,
+            extractor=COMPANY_PROFILE_EXTRACTOR,
+            structured=structured,
+            understanding=_company_understanding(structured, evidence_payloads),
+            confidence=_snapshot_confidence(structured),
+            derived_from=_candidate_derived_from(COMPANY_PROFILE_EXTRACTOR, evidence_payloads),
+        )
 
 
 def build_company_profile_snapshot(
@@ -129,9 +153,17 @@ def build_company_profile_snapshot(
     if not evidence_payloads:
         return None
     extractor = (registry or default_extractor_registry()).get("company_profile")
-    structured_fields = extractor.extract(evidence_payloads)
-    summary = _company_profile_summary(structured_fields)
-    evidence_refs = [{"work_event_id": str(event.id)} for event in evidence_events]
+    candidate = extractor.extract(evidence_payloads)
+    snapshot_payload = build_snapshot_payload(
+        db=db,
+        company_id=company_id,
+        object_type="company",
+        object_id=object_id or str(company_id),
+        snapshot_type=COMPANY_PROFILE_SNAPSHOT_TYPE,
+        candidates=(candidate,),
+        evidence_events=evidence_events,
+    )
+    summary = _company_profile_summary(snapshot_payload["structured"], snapshot_payload["understanding"])
     snapshot = upsert_snapshot(
         db,
         company_id=company_id,
@@ -143,40 +175,90 @@ def build_company_profile_snapshot(
         recommendation="",
         risk_level="unknown",
         source_event_ids=[str(event.id) for event in evidence_events],
-        payload={
-            "snapshot_version": COMPANY_PROFILE_SNAPSHOT_TYPE,
-            "structured_fields": structured_fields,
-            "confidence": _snapshot_confidence(structured_fields),
-            "evidence_refs": evidence_refs,
-            "last_updated": datetime.now(UTC).isoformat(),
-        },
+        payload=snapshot_payload,
     )
     return snapshot
 
 
+def build_snapshot_payload(
+    *,
+    db: Session,
+    company_id: UUID,
+    object_type: str,
+    object_id: str,
+    snapshot_type: str,
+    candidates: tuple[CognitiveCandidate, ...],
+    evidence_events: tuple[WorkEvent, ...],
+) -> dict[str, Any]:
+    structured = _merge_structured(candidate.structured for candidate in candidates)
+    understanding = _merge_understanding(candidates)
+    confidence = _merged_confidence(candidates, structured)
+    evidence_refs = [{"work_event_id": str(event.id)} for event in evidence_events]
+    version = _next_snapshot_version(db=db, company_id=company_id, object_type=object_type, object_id=object_id, snapshot_type=snapshot_type)
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "snapshot_version": snapshot_type,
+        "version": version,
+        "snapshot_status": SNAPSHOT_STATUS_ACTIVE,
+        "identity": {
+            "object_type": object_type,
+            "object_id": object_id,
+        },
+        "structured": structured,
+        "understanding": understanding,
+        "evidence_refs": evidence_refs,
+        "confidence": confidence,
+        "derived_from": {
+            "candidate_count": len(candidates),
+            "extractors": _dedupe(candidate.extractor for candidate in candidates),
+            "candidate_sources": [candidate.derived_from for candidate in candidates if candidate.derived_from],
+            "evidence_refs": [{"work_event_id": str(event.id)} for event in evidence_events],
+            "previous_snapshot_version": version - 1 if version > 1 else None,
+        },
+        "last_updated": datetime.now(UTC).isoformat(),
+    }
+
+
 def company_profile_snapshot_item(snapshot: Snapshot) -> dict[str, Any]:
     payload = snapshot.payload if isinstance(snapshot.payload, dict) else {}
-    fields = payload.get("structured_fields") if isinstance(payload.get("structured_fields"), dict) else {}
+    fields = _snapshot_structured(payload)
+    understanding = _snapshot_understanding(payload, snapshot.summary)
     return {
         "kind": "company_snapshot",
         "title": "公司画像",
         "summary": snapshot.summary,
         "source": "snapshot",
         "snapshot_type": snapshot.snapshot_type,
-        "version": payload.get("snapshot_version") or snapshot.snapshot_type,
+        "version": payload.get("version") or payload.get("snapshot_version") or snapshot.snapshot_type,
+        "schema_snapshot_version": payload.get("snapshot_version") or snapshot.snapshot_type,
+        "schema_version": payload.get("schema_version") or "",
+        "snapshot_status": payload.get("snapshot_status") or snapshot.status,
         "confidence": payload.get("confidence") or "medium",
+        "identity": payload.get("identity") if isinstance(payload.get("identity"), dict) else {},
+        "structured": fields,
         "structured_fields": fields,
+        "understanding": understanding,
         "evidence_refs": _evidence_refs_from_snapshot_payload(payload, snapshot),
+        "derived_from": payload.get("derived_from") if isinstance(payload.get("derived_from"), dict) else {},
     }
 
 
 def company_profile_snapshot_answer(item: dict[str, Any], *, query: str) -> str:
-    fields = item.get("structured_fields") if isinstance(item.get("structured_fields"), dict) else {}
+    fields = item.get("structured") if isinstance(item.get("structured"), dict) else {}
+    if not fields:
+        fields = item.get("structured_fields") if isinstance(item.get("structured_fields"), dict) else {}
+    understanding = str(item.get("understanding") or item.get("summary") or "").strip()
     compact = re.sub(r"\s+", "", query or "")
     if any(token in compact for token in ("产品", "产品线", "有哪些产品")):
-        return _list_answer("公司产品", _string_list(fields.get("products")), fallback="公司画像里暂时没有沉淀明确产品清单。")
+        return _structured_with_understanding(
+            _list_answer("公司产品", _string_list(fields.get("products")), fallback="公司画像里暂时没有沉淀明确产品清单。"),
+            understanding,
+        )
     if any(token in compact for token in ("客户", "服务谁", "面向谁")):
-        return _list_answer("目标客户", _string_list(fields.get("target_customers")), fallback="公司画像里暂时没有沉淀明确目标客户。")
+        return _structured_with_understanding(
+            _list_answer("目标客户", _string_list(fields.get("target_customers")), fallback="公司画像里暂时没有沉淀明确目标客户。"),
+            understanding,
+        )
     if any(token in compact for token in ("联系", "电话", "邮箱", "地址")):
         contacts = fields.get("contacts") if isinstance(fields.get("contacts"), dict) else {}
         parts = []
@@ -185,6 +267,8 @@ def company_profile_snapshot_answer(item: dict[str, Any], *, query: str) -> str:
             if values:
                 parts.append(f"{label}：" + "、".join(values))
         return "\n".join(parts) if parts else "公司画像里暂时没有沉淀联系方式。"
+    if understanding:
+        return understanding
     positioning = str(fields.get("company_positioning") or item.get("summary") or "").strip()
     lines = [positioning] if positioning else []
     business_scope = _string_list(fields.get("business_scope"))
@@ -218,10 +302,25 @@ def _evidence_refs_from_snapshot_payload(payload: dict[str, Any], snapshot: Snap
     return [str(item) for item in (snapshot.source_event_ids or []) if str(item).strip()]
 
 
-def _company_profile_summary(fields: dict[str, Any]) -> str:
+def _snapshot_structured(payload: dict[str, Any]) -> dict[str, Any]:
+    fields = payload.get("structured")
+    if isinstance(fields, dict):
+        return fields
+    legacy_fields = payload.get("structured_fields")
+    return legacy_fields if isinstance(legacy_fields, dict) else {}
+
+
+def _snapshot_understanding(payload: dict[str, Any], fallback: str) -> str:
+    understanding = str(payload.get("understanding") or "").strip()
+    return understanding or str(fallback or "").strip()
+
+
+def _company_profile_summary(fields: dict[str, Any], understanding: str = "") -> str:
     positioning = str(fields.get("company_positioning") or "").strip()
     if positioning:
         return positioning
+    if understanding:
+        return understanding
     business_scope = _string_list(fields.get("business_scope"))
     if business_scope:
         return "公司业务范围：" + "、".join(business_scope)
@@ -238,6 +337,118 @@ def _snapshot_confidence(fields: dict[str, Any]) -> str:
     if populated >= 2:
         return "medium"
     return "low"
+
+
+def _company_understanding(structured: dict[str, Any], evidence_payloads: tuple[dict[str, Any], ...]) -> str:
+    positioning = str(structured.get("company_positioning") or "").strip()
+    business_scope = _string_list(structured.get("business_scope"))
+    products = _string_list(structured.get("products"))
+    target_customers = _string_list(structured.get("target_customers"))
+    industry = _string_list(structured.get("industry"))
+    advantages = _string_list(structured.get("advantages"))
+
+    lines = []
+    if positioning:
+        lines.append(positioning)
+    elif business_scope:
+        lines.append("公司当前可确认的业务重点是" + "、".join(business_scope[:2]) + "。")
+
+    detail_parts = []
+    if products:
+        detail_parts.append("产品资料显示其产品体系包括" + "、".join(products[:3]))
+    if industry:
+        detail_parts.append("主要关联" + "、".join(industry[:3]) + "等场景")
+    if target_customers:
+        detail_parts.append("服务对象偏向" + "、".join(target_customers[:2]))
+    if detail_parts:
+        lines.append("；".join(detail_parts) + "。")
+    if advantages:
+        lines.append("资料中强调的特点包括" + "、".join(advantages[:3]) + "。")
+    if not lines:
+        evidence_titles = _dedupe(_source_title(payload) for payload in evidence_payloads)
+        if evidence_titles:
+            lines.append("当前认知主要来自" + "、".join(evidence_titles[:2]) + "，但资料不足以形成稳定公司画像。")
+    return "\n".join(lines).strip()
+
+
+def _candidate_derived_from(extractor: str, evidence_payloads: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    return {
+        "extractor": extractor,
+        "sources": [
+            {
+                "source_system": str(payload.get("source_system") or ""),
+                "source_object_id": str(payload.get("source_object_id") or ""),
+                "summary_chars": len(str(payload.get("summary") or "")),
+                "title": _source_title(payload),
+            }
+            for payload in evidence_payloads
+            if _is_evidence_payload(payload)
+        ],
+    }
+
+
+def _source_title(payload: dict[str, Any]) -> str:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return str(metadata.get("title") or payload.get("source_object_id") or "").strip()
+
+
+def _merge_structured(values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for fields in values:
+        if not isinstance(fields, dict):
+            continue
+        for key, value in fields.items():
+            if isinstance(value, dict):
+                current = merged.get(key) if isinstance(merged.get(key), dict) else {}
+                merged[key] = {
+                    subkey: _dedupe([*_string_list(current.get(subkey)), *_string_list(subvalue)])
+                    for subkey, subvalue in value.items()
+                }
+            elif isinstance(value, (list, tuple, set)):
+                merged[key] = _dedupe([*_string_list(merged.get(key)), *_string_list(value)])
+            elif value not in (None, "") and not merged.get(key):
+                merged[key] = value
+    return merged
+
+
+def _merge_understanding(candidates: tuple[CognitiveCandidate, ...]) -> str:
+    return "\n".join(_dedupe(candidate.understanding for candidate in candidates if candidate.understanding))
+
+
+def _merged_confidence(candidates: tuple[CognitiveCandidate, ...], structured: dict[str, Any]) -> str:
+    if any(candidate.confidence == "high" for candidate in candidates):
+        return "high"
+    if any(candidate.confidence == "medium" for candidate in candidates):
+        return "medium"
+    return _snapshot_confidence(structured)
+
+
+def _next_snapshot_version(
+    *,
+    db: Session,
+    company_id: UUID,
+    object_type: str,
+    object_id: str,
+    snapshot_type: str,
+) -> int:
+    try:
+        current = get_snapshot(db, company_id=company_id, object_type=object_type, object_id=object_id, snapshot_type=snapshot_type)
+    except Exception:
+        return 1
+    payload = current.payload if current is not None and isinstance(current.payload, dict) else {}
+    version = payload.get("version")
+    try:
+        return int(version) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _structured_with_understanding(answer: str, understanding: str) -> str:
+    if not understanding or understanding in answer:
+        return answer
+    if answer.startswith("公司画像里暂时没有沉淀"):
+        return answer + "\n" + understanding
+    return answer + "\n\n理解：" + understanding
 
 
 def _company_positioning(*, text: str, business_scope: list[str], products: list[str]) -> str:

@@ -22,6 +22,7 @@ from app.services.cognitive_foundation_v1 import (
     COMPANY_PROFILE_SNAPSHOT_TYPE,
     EVIDENCE_PAYLOAD_VERSION,
     EvidenceInput,
+    SNAPSHOT_STATUS_ACTIVE,
     append_evidence_work_event,
     build_company_profile_snapshot,
     build_evidence_payload,
@@ -515,10 +516,20 @@ def test_cognitive_v1_company_profile_snapshot_builder_uses_evidence_carrier() -
     assert snapshot is not None
     assert snapshot.snapshot_type == COMPANY_PROFILE_SNAPSHOT_TYPE
     assert snapshot.payload["snapshot_version"] == COMPANY_PROFILE_SNAPSHOT_TYPE
-    assert snapshot.payload["structured_fields"]["products"] == ["GAUSTEK SRI 全系列产品", "测试测量产品系列"]
+    assert snapshot.payload["version"] == 1
+    assert snapshot.payload["schema_version"] == "snapshot_v1_1"
+    assert snapshot.payload["snapshot_status"] == SNAPSHOT_STATUS_ACTIVE
+    assert snapshot.payload["structured"]["products"] == ["GAUSTEK SRI 全系列产品", "测试测量产品系列"]
+    assert "产品体系" in snapshot.payload["understanding"]
     assert snapshot.payload["evidence_refs"] == [{"work_event_id": str(event.id)}]
+    assert snapshot.payload["derived_from"]["extractors"] == [COMPANY_PROFILE_EXTRACTOR]
+    assert snapshot.payload["derived_from"]["evidence_refs"] == [{"work_event_id": str(event.id)}]
+    assert snapshot.payload["derived_from"]["previous_snapshot_version"] is None
     item = company_profile_snapshot_item(snapshot)
     assert item["evidence_refs"] == [str(event.id)]
+    assert item["snapshot_status"] == SNAPSHOT_STATUS_ACTIVE
+    assert item["version"] == 1
+    assert item["structured"]["products"] == ["GAUSTEK SRI 全系列产品", "测试测量产品系列"]
     assert "测试测量" in company_profile_snapshot_answer(item, query="公司是做什么的")
     assert "GAUSTEK SRI 全系列产品" in company_profile_snapshot_answer(item, query="公司有哪些产品")
 

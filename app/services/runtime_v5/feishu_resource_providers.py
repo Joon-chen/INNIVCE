@@ -36,6 +36,7 @@ from app.services.cognitive_foundation import (
 )
 from app.services.cognitive_foundation_v1 import (
     COMPANY_PROFILE_EXTRACTOR,
+    COMPANY_PROFILE_LEGACY_SNAPSHOT_TYPE,
     COMPANY_PROFILE_SNAPSHOT_TYPE,
     EvidenceInput,
     append_evidence_work_event,
@@ -3194,7 +3195,7 @@ class CompanyProfileProvider(FeishuResourceProvider):
                     "operation": request.operation,
                     "tool_name": "local_company_profile",
                     "retrieval_source": "snapshot",
-                    "snapshot_type": COMPANY_PROFILE_SNAPSHOT_TYPE,
+                    "snapshot_type": snapshot_item.get("snapshot_type") or COMPANY_PROFILE_SNAPSHOT_TYPE,
                     "snapshot_version": snapshot_item.get("version"),
                 },
                 answer=company_profile_snapshot_answer(snapshot_item, query=request.context.current_message),
@@ -3316,7 +3317,7 @@ class KnowledgeProvider(FeishuResourceProvider):
                         "tool_name": self._OPERATIONS[request.operation][0],
                         "knowledge_context": "company_profile",
                         "retrieval_source": "snapshot",
-                        "snapshot_type": COMPANY_PROFILE_SNAPSHOT_TYPE,
+                        "snapshot_type": snapshot_item.get("snapshot_type") or COMPANY_PROFILE_SNAPSHOT_TYPE,
                         "snapshot_version": snapshot_item.get("version"),
                         "document_count": 0,
                         "company_profile_count": 1,
@@ -3346,7 +3347,7 @@ class KnowledgeProvider(FeishuResourceProvider):
                         "tool_name": self._OPERATIONS[request.operation][0],
                         "knowledge_context": "company_profile",
                         "retrieval_source": "snapshot",
-                        "snapshot_type": COMPANY_PROFILE_SNAPSHOT_TYPE,
+                        "snapshot_type": snapshot_item.get("snapshot_type") or COMPANY_PROFILE_SNAPSHOT_TYPE,
                         "snapshot_version": snapshot_item.get("version"),
                         "document_count": len(document_items),
                         "company_profile_count": 1,
@@ -3890,16 +3891,20 @@ def _company_profile_knowledge_items(db: Session, *, company_id: Any, seed_text:
 def _company_profile_snapshot_item(db: Session, *, company_id: Any) -> dict[str, Any] | None:
     if not company_id:
         return None
-    try:
-        snapshot = get_completed_snapshot(
-            db,
-            company_id=company_id,
-            object_type="company",
-            object_id=str(company_id),
-            snapshot_type=COMPANY_PROFILE_SNAPSHOT_TYPE,
-        )
-    except Exception:
-        return None
+    snapshot = None
+    for snapshot_type in (COMPANY_PROFILE_SNAPSHOT_TYPE, COMPANY_PROFILE_LEGACY_SNAPSHOT_TYPE):
+        try:
+            snapshot = get_completed_snapshot(
+                db,
+                company_id=company_id,
+                object_type="company",
+                object_id=str(company_id),
+                snapshot_type=snapshot_type,
+            )
+        except Exception:
+            return None
+        if snapshot is not None:
+            break
     if snapshot is None:
         return None
     return company_profile_snapshot_item(snapshot)

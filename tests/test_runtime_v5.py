@@ -22,6 +22,7 @@ from app.services.runtime_v5.models import (
     RuntimeScope,
 )
 from app.services.cognitive_foundation import append_workspace_cognitive_event
+from app.services.cognitive_foundation_v1 import COMPANY_PROFILE_SNAPSHOT_TYPE, SNAPSHOT_STATUS_ACTIVE
 from app.services.llm.call_trace import record_llm_call_trace
 from app.services.llm.prompt_audit import prompt_audit_payload
 from app.services.runtime_v5.clarification import build_clarification_guide
@@ -3030,7 +3031,7 @@ def test_runtime_v5_company_profile_query_uses_snapshot_before_knowledge(monkeyp
         company_id=uuid4(),
         object_type="company",
         object_id="company-1",
-        snapshot_type="company_profile_v1",
+        snapshot_type=COMPANY_PROFILE_SNAPSHOT_TYPE,
         status="completed",
         summary="固势主要面向测试测量和实验场景，提供相关产品与解决方案。",
         recommendation="",
@@ -3038,8 +3039,11 @@ def test_runtime_v5_company_profile_query_uses_snapshot_before_knowledge(monkeyp
         reasons=[],
         source_event_ids=["event-1"],
         payload={
-            "snapshot_version": "company_profile_v1",
-            "structured_fields": {
+            "schema_version": "snapshot_v1_1",
+            "snapshot_version": COMPANY_PROFILE_SNAPSHOT_TYPE,
+            "version": 1,
+            "snapshot_status": SNAPSHOT_STATUS_ACTIVE,
+            "structured": {
                 "company_positioning": "固势主要面向测试测量和实验场景，提供相关产品与解决方案。",
                 "business_scope": ["测试测量相关产品与解决方案"],
                 "products": ["GAUSTEK SRI 全系列产品", "测试测量产品系列"],
@@ -3048,8 +3052,10 @@ def test_runtime_v5_company_profile_query_uses_snapshot_before_knowledge(monkeyp
                 "advantages": ["让测试更简单"],
                 "contacts": {"emails": ["Business@gaustek.com"], "phones": [], "addresses": []},
             },
+            "understanding": "固势主要面向测试测量和实验场景，产品资料显示其产品体系包括 GAUSTEK SRI 全系列产品。",
             "confidence": "medium",
             "evidence_refs": ["event-1"],
+            "derived_from": {"candidate_count": 1, "extractors": ["CompanyProfileExtractor"]},
         },
     )
 
@@ -3072,7 +3078,7 @@ def test_runtime_v5_company_profile_query_uses_snapshot_before_knowledge(monkeyp
     assert result.status == "success"
     assert result.result_type == "company_profile_knowledge"
     assert result.metadata["retrieval_source"] == "snapshot"
-    assert result.metadata["snapshot_type"] == "company_profile_v1"
+    assert result.metadata["snapshot_type"] == COMPANY_PROFILE_SNAPSHOT_TYPE
     assert result.items[0]["kind"] == "company_snapshot"
     assert "GAUSTEK SRI 全系列产品" in result.answer
     assert calls["knowledge_documents"] == 0
@@ -3126,7 +3132,7 @@ def test_runtime_v5_company_profile_query_builds_snapshot_from_knowledge_evidenc
     assert result.items[0]["kind"] == "company_snapshot"
     assert "测试测量" in result.answer
     assert any(getattr(item, "event_type", "") == "evidence.company_profile.observed" for item in db.added)
-    assert any(getattr(item, "snapshot_type", "") == "company_profile_v1" for item in db.added)
+    assert any(getattr(item, "snapshot_type", "") == COMPANY_PROFILE_SNAPSHOT_TYPE for item in db.added)
 
 
 def test_runtime_v5_company_profile_query_uses_official_knowledge_documents(monkeypatch) -> None:
