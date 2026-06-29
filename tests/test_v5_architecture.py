@@ -237,6 +237,23 @@ def test_file_intelligence_exports_extraction_result_contract() -> None:
     assert "def extractor_for(" in registry_text
 
 
+def test_cognitive_foundation_v1_does_not_introduce_memory_pipeline() -> None:
+    v1_text = Path("app/services/cognitive_foundation_v1.py").read_text()
+
+    forbidden_tokens = (
+        "MemoryCandidate",
+        "MemoryFact",
+        "write_memory_candidate",
+        "generate_memory_facts",
+        "memory_facts",
+    )
+
+    assert [token for token in forbidden_tokens if token in v1_text] == []
+    assert "append_evidence_work_event" in v1_text
+    assert "build_company_profile_snapshot" in v1_text
+    assert "ExtractorRegistry" in v1_text
+
+
 def test_v5_interaction_payload_consumer_boundary_is_render_only() -> None:
     portal_text = Path("app/services/portal_runtime.py").read_text()
     card_text = Path("app/services/feishu/confirmation_card_entrypoint.py").read_text()

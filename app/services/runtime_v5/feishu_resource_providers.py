@@ -34,6 +34,15 @@ from app.services.cognitive_foundation import (
     get_snapshot,
     upsert_snapshot,
 )
+from app.services.cognitive_foundation_v1 import (
+    COMPANY_PROFILE_EXTRACTOR,
+    COMPANY_PROFILE_SNAPSHOT_TYPE,
+    EvidenceInput,
+    append_evidence_work_event,
+    build_company_profile_snapshot,
+    company_profile_snapshot_answer,
+    company_profile_snapshot_item,
+)
 from app.services.feishu.calendar import FeishuCalendarService
 from app.services.feishu.drive import FeishuDriveService
 from app.services.feishu.meeting import FeishuMeetingService
@@ -3172,6 +3181,23 @@ class CompanyProfileProvider(FeishuResourceProvider):
                 answer="没有找到当前公司的档案信息。",
                 error="missing_company",
             )
+        snapshot_item = _company_profile_snapshot_item(self.db, company_id=company_id)
+        if snapshot_item:
+            return ProviderResult(
+                source="company_profile",
+                status="success",
+                result_type="company_profile",
+                count=1,
+                items=(snapshot_item,),
+                metadata={
+                    "operation": request.operation,
+                    "tool_name": "local_company_profile",
+                    "retrieval_source": "snapshot",
+                    "snapshot_type": COMPANY_PROFILE_SNAPSHOT_TYPE,
+                    "snapshot_version": snapshot_item.get("version"),
+                },
+                answer=company_profile_snapshot_answer(snapshot_item, query=request.context.current_message),
+            )
         item = {
             "name": company.name,
             "code": company.code,
@@ -3276,7 +3302,60 @@ class KnowledgeProvider(FeishuResourceProvider):
         seed_text = request.context.current_message
         company_profile_mode = _should_include_company_profile_context(seed_text) or request.intent.entities.get("knowledge_context") == "company_profile"
         if company_profile_mode:
+            snapshot_item = _company_profile_snapshot_item(self.db, company_id=company_id)
+            if snapshot_item:
+                return ProviderResult(
+                    source="knowledge",
+                    status="success",
+                    result_type="company_profile_knowledge",
+                    count=1,
+                    items=(snapshot_item,),
+                    metadata={
+                        "operation": request.operation,
+                        "tool_name": self._OPERATIONS[request.operation][0],
+                        "knowledge_context": "company_profile",
+                        "retrieval_source": "snapshot",
+                        "snapshot_type": COMPANY_PROFILE_SNAPSHOT_TYPE,
+                        "snapshot_version": snapshot_item.get("version"),
+                        "document_count": 0,
+                        "company_profile_count": 1,
+                        "evidence_sources": ["snapshot"],
+                        "result_context_presentation": "summary",
+                        "fact_count": 0,
+                        "event_count": 0,
+                    },
+                    answer=company_profile_snapshot_answer(snapshot_item, query=seed_text),
+                )
             document_items = _knowledge_document_items(self.db, request=request, company_id=company_id, seed_text=seed_text, context="company_profile")
+            snapshot_item = _company_profile_snapshot_from_knowledge_documents(
+                self.db,
+                company_id=company_id,
+                document_items=document_items,
+                actor=request.context.identity.open_id if request.context.identity else "bot",
+            )
+            if snapshot_item:
+                return ProviderResult(
+                    source="knowledge",
+                    status="success",
+                    result_type="company_profile_knowledge",
+                    count=1,
+                    items=(snapshot_item,),
+                    metadata={
+                        "operation": request.operation,
+                        "tool_name": self._OPERATIONS[request.operation][0],
+                        "knowledge_context": "company_profile",
+                        "retrieval_source": "snapshot",
+                        "snapshot_type": COMPANY_PROFILE_SNAPSHOT_TYPE,
+                        "snapshot_version": snapshot_item.get("version"),
+                        "document_count": len(document_items),
+                        "company_profile_count": 1,
+                        "evidence_sources": ["snapshot"],
+                        "result_context_presentation": "summary",
+                        "fact_count": 0,
+                        "event_count": 0,
+                    },
+                    answer=company_profile_snapshot_answer(snapshot_item, query=seed_text),
+                )
             company_items = _company_profile_knowledge_items(self.db, company_id=company_id, seed_text=seed_text)
             items = (*document_items, *company_items)
             return ProviderResult(
@@ -3805,6 +3884,87 @@ def _company_profile_knowledge_items(db: Session, *, company_id: Any, seed_text:
             "status": company.status,
         },
     )
+
+
+def _company_profile_snapshot_item(db: Session, *, company_id: Any) -> dict[str, Any] | None:
+    if not company_id:
+        return None
+    try:
+        snapshot = get_completed_snapshot(
+            db,
+            company_id=company_id,
+            object_type="company",
+            object_id=str(company_id),
+            snapshot_type=COMPANY_PROFILE_SNAPSHOT_TYPE,
+        )
+    except Exception:
+        return None
+    if snapshot is None:
+        return None
+    return company_profile_snapshot_item(snapshot)
+
+
+def _company_profile_snapshot_from_knowledge_documents(
+    db: Session,
+    *,
+    company_id: Any,
+    document_items: tuple[dict[str, Any], ...],
+    actor: str,
+) -> dict[str, Any] | None:
+    if not company_id or not document_items:
+        return None
+    evidence_events: list[WorkEvent] = []
+    try:
+        for item in document_items:
+            summary = str(item.get("summary") or "").strip()
+            source_object_id = str(item.get("document_id") or item.get("title") or "").strip()
+            if not summary or not source_object_id:
+                continue
+            evidence = EvidenceInput(
+                source_system=str(item.get("source") or "knowledge"),
+                source_object_id=source_object_id,
+                organization_binding={
+                    "company_id": str(company_id),
+                    "object_type": "company",
+                    "object_id": str(company_id),
+                },
+                visibility_binding={
+                    "scope": "company",
+                    "data_classification": "company",
+                    "allowed_user_ids": [],
+                    "allowed_departments": [],
+                    "allowed_roles": [],
+                },
+                timestamp=datetime.now(UTC),
+                extractor=COMPANY_PROFILE_EXTRACTOR,
+                summary=summary,
+                metadata={
+                    "title": item.get("title") or "",
+                    "resource_type": item.get("resource_type") or "",
+                    "document_type": item.get("document_type") or "",
+                },
+            )
+            evidence_events.append(
+                append_evidence_work_event(
+                    db,
+                    company_id=company_id,
+                    evidence=evidence,
+                    object_type="company_profile",
+                    object_id=str(company_id),
+                    actor=actor or "bot",
+                )
+            )
+        snapshot = build_company_profile_snapshot(
+            db,
+            company_id=company_id,
+            evidence_events=tuple(evidence_events),
+            object_id=str(company_id),
+        )
+    except Exception:
+        return None
+    if snapshot is None:
+        return None
+    return company_profile_snapshot_item(snapshot)
 
 
 def _company_profile_knowledge_answer(items: tuple[dict[str, Any], ...]) -> str:

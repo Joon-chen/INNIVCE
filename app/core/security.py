@@ -23,6 +23,9 @@ IDENTIFIER_KEYS = {
     "chat_id",
     "open_id",
     "external_id",
+    "work_event_id",
+    "source_event_id",
+    "evidence_event_id",
 }
 
 EMAIL_RE = re.compile(r"(?P<name>[A-Za-z0-9._%+-]{1,64})@(?P<domain>[A-Za-z0-9.-]+\.[A-Za-z]{2,})")

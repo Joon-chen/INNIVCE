@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,18 @@ from app.services.cognitive_foundation import (
     get_completed_snapshot,
     upsert_snapshot,
     write_memory_candidate,
+)
+from app.services.cognitive_foundation_v1 import (
+    COMPANY_PROFILE_EXTRACTOR,
+    COMPANY_PROFILE_SNAPSHOT_TYPE,
+    EVIDENCE_PAYLOAD_VERSION,
+    EvidenceInput,
+    append_evidence_work_event,
+    build_company_profile_snapshot,
+    build_evidence_payload,
+    company_profile_snapshot_answer,
+    company_profile_snapshot_item,
+    default_extractor_registry,
 )
 from app.services.runtime_v5 import feishu_resource_providers
 from app.services.runtime_v5.feishu_resource_providers import (
@@ -442,6 +455,78 @@ def test_upsert_snapshot_creates_and_updates_standard_snapshot() -> None:
     assert updated.summary == "付款申请"
     assert updated.recommendation == "需关注"
     assert updated.source_event_ids == ["event-2"]
+
+
+def test_cognitive_v1_evidence_payload_is_traceable_contract() -> None:
+    company_id = uuid4()
+    events_now = datetime.now(UTC)
+    evidence = EvidenceInput(
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+        timestamp=events_now,
+        extractor=COMPANY_PROFILE_EXTRACTOR,
+        summary="固势宣传册 公司介绍 全系列产品手册 让测试更简单 让实验更高效 Business@gaustek.com",
+        metadata={"title": "固势宣传册26--中文.pdf", "document_type": "file"},
+    )
+
+    payload = build_evidence_payload(evidence)
+
+    assert payload["payload_version"] == EVIDENCE_PAYLOAD_VERSION
+    assert payload["source_system"] == "registered_resource"
+    assert payload["source_object_id"] == "file_pdf"
+    assert payload["organization_binding"]["company_id"] == str(company_id)
+    assert payload["visibility_binding"]["scope"] == "company"
+    assert payload["timestamp"] == events_now.isoformat()
+    assert payload["extractor"] == COMPANY_PROFILE_EXTRACTOR
+    assert "固势宣传册" in payload["summary"]
+
+
+def test_cognitive_v1_company_profile_snapshot_builder_uses_evidence_carrier() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+    evidence = EvidenceInput(
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+        timestamp=datetime.now(UTC),
+        extractor=COMPANY_PROFILE_EXTRACTOR,
+        summary=(
+            "固势（苏州）科技有限公司 GAUSTEK SRI 全系列产品手册 "
+            "让测试更简单 让实验更高效 PRODUCT SERIES 产品系列 Business@gaustek.com"
+        ),
+        metadata={"title": "固势宣传册26--中文.pdf"},
+    )
+
+    event = append_evidence_work_event(
+        db,
+        company_id=company_id,
+        evidence=evidence,
+        object_type="company_profile",
+        object_id=str(company_id),
+        actor="ou_test",
+    )
+    snapshot = build_company_profile_snapshot(db, company_id=company_id, evidence_events=(event,), object_id=str(company_id))
+
+    assert event.event_type == "evidence.company_profile.observed"
+    assert event.payload["payload_version"] == EVIDENCE_PAYLOAD_VERSION
+    assert snapshot is not None
+    assert snapshot.snapshot_type == COMPANY_PROFILE_SNAPSHOT_TYPE
+    assert snapshot.payload["snapshot_version"] == COMPANY_PROFILE_SNAPSHOT_TYPE
+    assert snapshot.payload["structured_fields"]["products"] == ["GAUSTEK SRI 全系列产品", "测试测量产品系列"]
+    assert snapshot.payload["evidence_refs"] == [{"work_event_id": str(event.id)}]
+    item = company_profile_snapshot_item(snapshot)
+    assert item["evidence_refs"] == [str(event.id)]
+    assert "测试测量" in company_profile_snapshot_answer(item, query="公司是做什么的")
+    assert "GAUSTEK SRI 全系列产品" in company_profile_snapshot_answer(item, query="公司有哪些产品")
+
+
+def test_cognitive_v1_extractor_registry_is_by_cognitive_object() -> None:
+    extractor = default_extractor_registry().get("company_profile")
+
+    assert extractor.object_type == "company_profile"
 
 
 def test_write_memory_candidate_only_writes_candidate() -> None:

@@ -3011,6 +3011,119 @@ def test_runtime_v5_company_profile_query_does_not_render_raw_knowledge_events(m
     assert "文档事件" not in result.answer
 
 
+def test_runtime_v5_company_profile_query_uses_snapshot_before_knowledge(monkeypatch) -> None:
+    calls = {"knowledge_documents": 0}
+
+    def fail_if_called(*args, **kwargs):
+        calls["knowledge_documents"] += 1
+        return ()
+
+    monkeypatch.setattr("app.services.runtime_v5.feishu_resource_providers._knowledge_document_items", fail_if_called)
+
+    snapshot = SimpleNamespace(
+        id=uuid4(),
+        company_id=uuid4(),
+        object_type="company",
+        object_id="company-1",
+        snapshot_type="company_profile_v1",
+        status="completed",
+        summary="固势主要面向测试测量和实验场景，提供相关产品与解决方案。",
+        recommendation="",
+        risk_level="unknown",
+        reasons=[],
+        source_event_ids=["event-1"],
+        payload={
+            "snapshot_version": "company_profile_v1",
+            "structured_fields": {
+                "company_positioning": "固势主要面向测试测量和实验场景，提供相关产品与解决方案。",
+                "business_scope": ["测试测量相关产品与解决方案"],
+                "products": ["GAUSTEK SRI 全系列产品", "测试测量产品系列"],
+                "industry": ["测试测量"],
+                "target_customers": ["需要测试测量能力的研发、实验和生产团队"],
+                "advantages": ["让测试更简单"],
+                "contacts": {"emails": ["Business@gaustek.com"], "phones": [], "addresses": []},
+            },
+            "confidence": "medium",
+            "evidence_refs": ["event-1"],
+        },
+    )
+
+    class Db:
+        def scalar(self, query):
+            return snapshot
+
+    context = _context("公司有哪些产品")
+    result = KnowledgeProvider(db=Db()).execute(
+        ProviderRequest(
+            source="knowledge",
+            operation="search",
+            intent=IntentResult(question_type="query", intent="general_query", data_scope="company", entities={"knowledge_context": "company_profile"}),
+            planner=_command_plan("general_query", sources=("knowledge",)),
+            context=context,
+            execution_identity="bot",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.result_type == "company_profile_knowledge"
+    assert result.metadata["retrieval_source"] == "snapshot"
+    assert result.metadata["snapshot_type"] == "company_profile_v1"
+    assert result.items[0]["kind"] == "company_snapshot"
+    assert "GAUSTEK SRI 全系列产品" in result.answer
+    assert calls["knowledge_documents"] == 0
+
+
+def test_runtime_v5_company_profile_query_builds_snapshot_from_knowledge_evidence(monkeypatch) -> None:
+    document_item = {
+        "kind": "knowledge_document",
+        "title": "固势宣传册26--中文.pdf",
+        "summary": "固势（苏州）科技有限公司 GAUSTEK SRI 全系列产品手册 让测试更简单 让实验更高效 PRODUCT SERIES 产品系列 Business@gaustek.com",
+        "source": "registered_resource",
+        "resource_type": "drive_file",
+        "document_id": "file_pdf",
+        "document_type": "file",
+    }
+    monkeypatch.setattr(
+        "app.services.runtime_v5.feishu_resource_providers._knowledge_document_items",
+        lambda *args, **kwargs: (document_item,),
+    )
+
+    class Db:
+        def __init__(self):
+            self.added = []
+            self.flush_count = 0
+
+        def scalar(self, query):
+            return None
+
+        def add(self, item):
+            self.added.append(item)
+
+        def flush(self):
+            self.flush_count += 1
+
+    db = Db()
+    context = _context("公司是做什么的")
+    result = KnowledgeProvider(db=db).execute(
+        ProviderRequest(
+            source="knowledge",
+            operation="search",
+            intent=IntentResult(question_type="query", intent="general_query", data_scope="company", entities={"knowledge_context": "company_profile"}),
+            planner=_command_plan("general_query", sources=("knowledge",)),
+            context=context,
+            execution_identity="bot",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.metadata["retrieval_source"] == "snapshot"
+    assert result.metadata["document_count"] == 1
+    assert result.items[0]["kind"] == "company_snapshot"
+    assert "测试测量" in result.answer
+    assert any(getattr(item, "event_type", "") == "evidence.company_profile.observed" for item in db.added)
+    assert any(getattr(item, "snapshot_type", "") == "company_profile_v1" for item in db.added)
+
+
 def test_runtime_v5_company_profile_query_uses_official_knowledge_documents(monkeypatch) -> None:
     document_item = {
         "kind": "knowledge_document",
