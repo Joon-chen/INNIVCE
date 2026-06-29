@@ -4,6 +4,7 @@ from dataclasses import replace
 import re
 from typing import Any
 
+from app.services.runtime_v5.company_profile_query import looks_like_company_profile_query
 from app.services.runtime_v5.command_frame import command_frame_payload
 from app.services.runtime_v5.conversation_state import ConversationState, build_conversation_state
 from app.services.runtime_v5.models import CommandFrame, IntentResult, RuntimeContext
@@ -623,7 +624,7 @@ def _gates(
         },
         "route": {
             "path": "conversation_first_v1",
-            "foundation_route": _foundation_route(domain=domain, intent=intent, scope=scope),
+            "foundation_route": _foundation_route(domain=domain, intent=intent, scope=scope, semantic_frame=semantic_frame),
         },
     }
 
@@ -850,7 +851,7 @@ def _entities_from_frame(frame: CommandFrame) -> dict[str, Any]:
         entities["people_filter"] = parameters["filters"]
     if frame.intent == "general_query":
         entities["knowledge_context"] = "company_profile" if semantic.get("operation") == "company_profile" else "general"
-        entities["foundation_route"] = "knowledge.general"
+        entities["foundation_route"] = "knowledge.company_profile" if semantic.get("operation") == "company_profile" else "knowledge.general"
     if frame.intent in {"department_members", "organization_snapshot"}:
         entities["view"] = "people_aggregate" if frame.intent == "organization_snapshot" else "department_members"
         entities["foundation_route"] = "people.aggregate" if frame.intent == "organization_snapshot" else "people.department_members"
@@ -1136,7 +1137,7 @@ def _domain_reason(*, domain: str, intent: str, semantic_frame: SemanticFrame) -
         return "foundation_route:people.department_members"
     if domain == "People":
         return "foundation_route:people.organization_snapshot"
-    if domain == "Knowledge" and semantic_frame.operation == "company_profile":
+    if domain == "Knowledge" and (semantic_frame.operation == "company_profile" or looks_like_company_profile_query(_semantic_raw_message(semantic_frame))):
         return "foundation_route:knowledge.company_profile"
     if domain == "Knowledge":
         return "foundation_route:knowledge.general"
@@ -1175,13 +1176,17 @@ def _scope_reason(*, domain: str, scope: str, semantic_frame: SemanticFrame | No
     return f"conversation_first:{scope}"
 
 
-def _foundation_route(*, domain: str, intent: str, scope: str) -> str:
+def _foundation_route(*, domain: str, intent: str, scope: str, semantic_frame: SemanticFrame | None = None) -> str:
     if domain == "People" and intent == "people_lookup":
         return "people.person"
     if domain == "People" and scope == "department":
         return "people.department_members"
     if domain == "People":
         return "people.organization"
+    if domain == "Knowledge" and semantic_frame is not None and (
+        semantic_frame.operation == "company_profile" or looks_like_company_profile_query(_semantic_raw_message(semantic_frame))
+    ):
+        return "knowledge.company_profile"
     if domain == "Knowledge":
         return "knowledge.general"
     if domain == "Communication":
@@ -1193,6 +1198,11 @@ def _foundation_route(*, domain: str, intent: str, scope: str) -> str:
     if domain == "External":
         return "external.information"
     return ""
+
+
+def _semantic_raw_message(semantic_frame: SemanticFrame) -> str:
+    parameters = semantic_frame.parameters if isinstance(semantic_frame.parameters, dict) else {}
+    return str(parameters.get("raw_message") or "")
 
 
 def _gate_source(*, domain: str) -> str:

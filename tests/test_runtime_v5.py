@@ -206,12 +206,17 @@ def test_runtime_v5_company_questions_route_to_general_knowledge_query(monkeypat
         "公司的主营业务是什么",
         "公司是做什么的你知道吗",
         "能躬行科技公司是做什么的，你知道吗",
+        "公司的客户有哪些",
+        "公司有哪些产品",
+        "公司的联系方式是什么",
     ):
         intent = recognize_intent(question, _context(question))
 
         assert intent.intent == "general_query"
         assert intent.data_scope == "company"
         assert intent.entities.get("knowledge_context") == "company_profile"
+        assert intent.entities.get("foundation_route") == "knowledge.company_profile"
+        assert intent.entities["command_frame"]["response_intent"]["should_render_card"] is False
 
 
 def test_runtime_v5_company_questions_use_knowledge_source_not_people_or_workevent(monkeypatch) -> None:
@@ -4259,6 +4264,9 @@ def test_command_plan_domain_gate_records_reason_source_and_confidence(monkeypat
     cases = (
         ("公司财务部门有多少人？", "People", "foundation_route:people.department_members", "foundation_rule"),
         ("公司是做什么的", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
+        ("公司有哪些产品", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
+        ("公司的客户有哪些", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
+        ("公司的联系方式是什么", "Knowledge", "foundation_route:knowledge.company_profile", "foundation_rule"),
         ("报销流程怎么做", "Knowledge", "foundation_route:knowledge.general", "foundation_rule"),
         ("我有多少封邮件", "Communication", "foundation_route:communication.mail", "foundation_rule"),
         ("我的任务", "Workspace", "workspace_signal", "rule"),

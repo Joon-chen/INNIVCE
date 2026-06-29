@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.services.runtime_v5.company_profile_query import COMPANY_PROFILE_FIELD_MARKERS, looks_like_company_profile_query
 from app.services.runtime_v5.interaction_intent import classify_interaction_intent
 
 
@@ -94,18 +95,7 @@ _PEOPLE_AGGREGATE_MARKERS = (
     "人员构成",
     "组织规模",
 )
-_COMPANY_PROFILE_MARKERS = (
-    "公司介绍",
-    "公司情况",
-    "主营业务",
-    "主要业务",
-    "公司主营",
-    "业务范围",
-    "公司业务",
-    "做什么",
-    "干什么",
-    "是什么公司",
-)
+_COMPANY_PROFILE_MARKERS = COMPANY_PROFILE_FIELD_MARKERS
 
 
 def observe_command_route(
@@ -217,7 +207,7 @@ def _has_self_scope_signal(compact: str) -> bool:
 def _has_company_or_people_signal_without_workspace_signal(compact: str) -> bool:
     compact = compact.replace("多少个", "多少")
     has_people_signal = any(marker in compact for marker in _PEOPLE_AGGREGATE_MARKERS)
-    has_company_profile_signal = "公司" in compact and any(marker in compact for marker in _COMPANY_PROFILE_MARKERS)
+    has_company_profile_signal = looks_like_company_profile_query(compact)
     if not has_people_signal and not has_company_profile_signal:
         return False
     return not any(marker in compact for marker in _WORKSPACE_MARKERS)

@@ -10,6 +10,7 @@ from typing import Any
 from app.core.config import settings
 from app.services.llm.gateway import LLMGateway
 from app.services.llm.routing_policy import llm_route_for_task
+from app.services.runtime_v5.company_profile_query import looks_like_company_profile_query
 from app.services.runtime_v5.conversation_state import ConversationState
 from app.services.runtime_v5.semantic_fields import canonical_people_field
 from app.services.semantic_protocol import SemanticFrame, validate_semantic_frame
@@ -97,6 +98,9 @@ _KNOWLEDGE_MARKERS = (
     "主营业务",
     "业务介绍",
     "公司介绍",
+    "公司有哪些产品",
+    "公司的客户",
+    "公司联系方式",
     "制度",
     "流程",
     "文档",
@@ -153,6 +157,8 @@ def build_deterministic_signals(message: str, state: ConversationState) -> Deter
 def _domain_hint(*, compact: str, state: ConversationState) -> str:
     if compact.startswith("/"):
         return "System"
+    if looks_like_company_profile_query(compact):
+        return "Knowledge"
     if _is_plain_conversation(compact):
         return "Conversation"
     if _is_non_work_life_request(compact):
@@ -243,7 +249,7 @@ def _operation_hint(*, compact: str, state: ConversationState) -> str:
         return "followup" if compact == "继续" else "list"
     if _is_previous_result_presentation_request(compact=compact, state=state):
         return "list"
-    if any(token in compact for token in ("公司是做什么", "主营业务", "公司介绍")):
+    if looks_like_company_profile_query(compact):
         return "company_profile"
     if any(token in compact for token in ("制度", "流程", "文档", "资料", "知识库")):
         return "knowledge_query"
@@ -269,6 +275,8 @@ def _operation_hint(*, compact: str, state: ConversationState) -> str:
 
 
 def _requested_output_hint(*, compact: str) -> str:
+    if looks_like_company_profile_query(compact):
+        return "natural_text"
     if "数字" in compact and any(token in compact for token in ("只", "仅", "就行", "即可", "回答", "答")):
         return "numeric_only"
     if any(token in compact for token in ("只回答", "只要", "不用详情", "不需要详情", "只说")):

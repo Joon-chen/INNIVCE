@@ -51,6 +51,7 @@ from app.services.feishu.task import FeishuTaskService
 from app.services.llm.approval_advisor import generate_approval_llm_advice
 from app.services.organization_foundation import resolve_department_members
 from app.shared.file_intelligence import extract_file
+from app.services.runtime_v5.company_profile_query import looks_like_company_profile_query
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
 from app.services.runtime_v5.domain_query import domain_query_fields, domain_query_payload
 from app.services.runtime_v5.feishu_user_token import resolve_feishu_user_access_token
@@ -3997,12 +3998,7 @@ def _company_profile_knowledge_answer(items: tuple[dict[str, Any], ...]) -> str:
 
 
 def _should_include_company_profile_context(text: str) -> bool:
-    compact = re.sub(r"\s+", "", str(text or "").lower())
-    if not compact:
-        return False
-    if any(token in compact for token in ("我们公司", "咱们公司", "本公司", "公司介绍", "主营业务", "主要业务", "业务范围", "公司业务")):
-        return True
-    return "公司" in compact and any(token in compact for token in ("做什么", "干什么", "业务", "情况", "介绍", "收入来源"))
+    return looks_like_company_profile_query(text)
 
 
 def _knowledge_facts(

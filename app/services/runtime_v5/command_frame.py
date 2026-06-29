@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from typing import Any
 
+from app.services.runtime_v5.company_profile_query import looks_like_company_profile_query
 from app.services.runtime_v5.command_route_observer import observe_command_route
 from app.services.runtime_v5.intent_layers import build_intent_layer_decision
 from app.services.runtime_v5.models import CommandFrame, IntentResult, PlannerResult, RuntimeContext
@@ -262,10 +263,7 @@ def _should_render_card(*, intent: IntentResult, planner: PlannerResult) -> bool
 
 
 def _looks_like_company_profile_question(text: str) -> bool:
-    compact = str(text or "").replace(" ", "").lower()
-    if not any(token in compact for token in ("公司", "企业", "主营", "业务", "做什么", "干什么")):
-        return False
-    return any(token in compact for token in ("做什么", "干什么", "主营业务", "主要业务", "业务范围", "公司介绍", "介绍一下"))
+    return looks_like_company_profile_query(text)
 
 
 def _intro_intent(intent: IntentResult) -> str:
