@@ -536,6 +536,15 @@ def _company_snapshot_builder_prompt(
             "topics": list(pack.topics[:12]),
             "relations": [relation.__dict__ for relation in pack.relations[:10]],
             "uncertainties": [item.__dict__ for item in pack.uncertainties[:8]],
+            "evidence_spans": [
+                {
+                    "span_id": str(span.get("span_id") or ""),
+                    "page": span.get("page"),
+                    "text": str(span.get("text") or "")[:500],
+                }
+                for span in pack.evidence_spans[:80]
+                if isinstance(span, dict) and str(span.get("text") or "").strip()
+            ],
             "quality": pack.quality,
         }
         for pack in packs[:4]
@@ -548,8 +557,8 @@ def _company_snapshot_builder_prompt(
         f"structured={json.dumps(structured, ensure_ascii=False, default=str)[:2500]}\n"
         f"coverage={json.dumps(coverage, ensure_ascii=False, default=str)}\n"
         f"open_questions={json.dumps(list(open_questions), ensure_ascii=False, default=str)}\n"
-        f"evidence_packs={json.dumps(pack_payload, ensure_ascii=False, default=str)[:5000]}\n"
-        f"fallback_understanding={fallback[:1200]}\n"
+        f"evidence_packs={json.dumps(pack_payload, ensure_ascii=False, default=str)[:14000]}\n"
+        f"fallback_understanding={fallback[:1800]}\n"
     )
 
 

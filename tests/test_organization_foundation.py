@@ -33,8 +33,8 @@ class _ExecuteResult:
 
 
 class _OrganizationSession:
-    def __init__(self, *, departments, users, root, rows):
-        self._scalar_results = [departments, users, []]
+    def __init__(self, *, departments, users, root, rows, aliases=None):
+        self._scalar_results = [departments, users, aliases or []]
         self._root = root
         self._departments = departments
         self._rows = rows
@@ -440,6 +440,97 @@ def test_resolve_department_members_reports_display_and_unique_count_basis() -> 
         {"name": "销售部", "source_department_id": "dept_sales", "member_count": 2},
         {"name": "项目部", "source_department_id": "dept_project", "member_count": 4},
     ]
+
+
+def test_resolve_department_members_keeps_identifier_named_department_leader() -> None:
+    department_id = uuid4()
+    leader_id = uuid4()
+    department = SimpleNamespace(
+        id=department_id,
+        company_id=COMPANY_ID,
+        source_system="feishu",
+        source_department_id="hr_group",
+        open_department_id="",
+        parent_source_department_id="0",
+        name="人事组",
+        normalized_name=normalize_organization_name("人事组"),
+        unit_type=ORG_TARGET_GROUP,
+        status="active",
+        path_names=[],
+        leader_source_user_ids=["ou_hr"],
+        metadata_json={"member_count": 3},
+    )
+    leader = SimpleNamespace(
+        id=leader_id,
+        open_id="ou_hr",
+        source_user_id="ee_hr",
+        name="400704",
+        normalized_name="400704",
+        email="yuhong.zhao@gaustek.com",
+        mobile="",
+        job_title="人事经理",
+        status="active",
+        source_system="feishu",
+        metadata_json={},
+    )
+    rows = [(SimpleNamespace(organization_department_id=department_id, is_primary=True, role_in_department="leader"), leader)]
+    db = _OrganizationSession(departments=[department], users=[leader], root=department, rows=rows)
+
+    result = resolve_department_members(db, company_id=COMPANY_ID, query="人事组负责人是谁")
+
+    assert result is not None
+    assert result.metadata["leader_items"][0]["name"] == "400704"
+    assert result.metadata["leader_items"][0]["display_name_unverified"] is True
+
+
+def test_resolve_department_members_uses_user_alias_for_identifier_name() -> None:
+    department_id = uuid4()
+    leader_id = uuid4()
+    department = SimpleNamespace(
+        id=department_id,
+        company_id=COMPANY_ID,
+        source_system="feishu",
+        source_department_id="hr_group",
+        open_department_id="",
+        parent_source_department_id="0",
+        name="人事组",
+        normalized_name=normalize_organization_name("人事组"),
+        unit_type=ORG_TARGET_GROUP,
+        status="active",
+        path_names=[],
+        leader_source_user_ids=["ou_hr"],
+        metadata_json={"member_count": 3},
+    )
+    leader = SimpleNamespace(
+        id=leader_id,
+        open_id="ou_hr",
+        source_user_id="ee_hr",
+        name="400704",
+        normalized_name="400704",
+        email="yuhong.zhao@gaustek.com",
+        mobile="",
+        job_title="人事经理",
+        status="active",
+        source_system="feishu",
+        metadata_json={},
+    )
+    alias = SimpleNamespace(
+        alias="赵玉红",
+        normalized_alias=normalize_organization_name("赵玉红"),
+        target_type=ORG_TARGET_USER,
+        target_id=leader_id,
+        confidence=1.0,
+    )
+    rows = [(SimpleNamespace(organization_department_id=department_id, is_primary=True, role_in_department="leader"), leader)]
+    db = _OrganizationSession(departments=[department], users=[leader], root=department, rows=rows, aliases=[alias])
+
+    result = resolve_department_members(db, company_id=COMPANY_ID, query="人事组负责人是谁")
+
+    assert result is not None
+    assert result.items[0]["name"] == "赵玉红"
+    assert result.items[0]["source_name"] == "400704"
+    assert result.metadata["leader_items"][0]["name"] == "赵玉红"
+    assert result.metadata["leader_items"][0]["display_name_unverified"] is False
 
 
 def test_organization_resolver_does_not_guess_unit_suffix_when_ambiguous() -> None:

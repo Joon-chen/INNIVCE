@@ -227,6 +227,7 @@ def resolve_department_members(
         .where(OrganizationMembership.status == "active")
         .where(OrganizationUser.status == "active")
     ).all()
+    user_aliases = _user_aliases_by_target_id(directory.aliases)
     items = _dedupe_member_items(
         tuple(
             _member_item(
@@ -234,6 +235,7 @@ def resolve_department_members(
                 membership=membership,
                 resolution=resolution,
                 department=departments_by_id.get(membership.organization_department_id),
+                aliases_by_user_id=user_aliases,
             )
             for membership, user in rows
         ),
@@ -242,7 +244,7 @@ def resolve_department_members(
     return OrganizationMembersResult(
         resolution=resolution,
         items=items,
-        metadata=_department_membership_metadata(root=root_department, subtree_departments=subtree_departments, rows=rows),
+        metadata=_department_membership_metadata(root=root_department, subtree_departments=subtree_departments, rows=rows, aliases_by_user_id=user_aliases),
     )
 
 
@@ -696,6 +698,7 @@ def _department_membership_metadata(
     root: OrganizationDepartment,
     subtree_departments: tuple[OrganizationDepartment, ...],
     rows: list[tuple[OrganizationMembership, OrganizationUser]],
+    aliases_by_user_id: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     direct_user_ids = {
         user.id
@@ -721,11 +724,14 @@ def _department_membership_metadata(
     leader_keys = {str(item or "").strip() for item in (getattr(root, "leader_source_user_ids", None) or []) if str(item or "").strip()}
     leader_items = tuple(
         {
-            "name": user.name,
+            "name": _organization_user_display_name(user, aliases_by_user_id=aliases_by_user_id),
+            "source_name": user.name,
             "open_id": user.open_id,
             "user_id": user.source_user_id or "",
             "title": user.job_title or "",
             "department": root.name,
+            "display_name_unverified": _looks_like_identifier_name(user.name)
+            and not _preferred_user_alias(user, aliases_by_user_id=aliases_by_user_id),
         }
         for membership, user in rows
         if membership.organization_department_id == root.id
@@ -733,7 +739,6 @@ def _department_membership_metadata(
             str(getattr(membership, "role_in_department", "") or "") == "leader"
             or {str(user.open_id or "").strip(), str(user.source_user_id or "").strip()} & leader_keys
         )
-        and not _looks_like_identifier_name(user.name)
     )
     return {
         "unique_member_count": len(unique_user_ids),
@@ -849,17 +854,45 @@ def _alias_model_record(item: OrganizationAlias) -> dict[str, Any]:
     }
 
 
+def _user_aliases_by_target_id(aliases: tuple[dict[str, Any], ...]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in aliases:
+        if str(item.get("target_type") or "") != ORG_TARGET_USER:
+            continue
+        target_id = str(item.get("target_id") or "").strip()
+        alias = str(item.get("alias") or item.get("name") or "").strip()
+        if target_id and alias:
+            result[target_id] = alias
+    return result
+
+
+def _preferred_user_alias(user: OrganizationUser, *, aliases_by_user_id: dict[str, str] | None) -> str:
+    if not aliases_by_user_id:
+        return ""
+    return str(aliases_by_user_id.get(str(user.id)) or "").strip()
+
+
+def _organization_user_display_name(user: OrganizationUser, *, aliases_by_user_id: dict[str, str] | None = None) -> str:
+    alias = _preferred_user_alias(user, aliases_by_user_id=aliases_by_user_id)
+    if alias and (_looks_like_identifier_name(user.name) or alias != user.name):
+        return alias
+    return user.name
+
+
 def _member_item(
     user: OrganizationUser,
     *,
     membership: OrganizationMembership,
     resolution: OrganizationResolution,
     department: OrganizationDepartment | None = None,
+    aliases_by_user_id: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     department_name = department.name if department is not None else resolution.resolved_name
     department_id = str(department.id) if department is not None else resolution.resolved_department_id
+    display_name = _organization_user_display_name(user, aliases_by_user_id=aliases_by_user_id)
     return {
-        "name": user.name,
+        "name": display_name,
+        "source_name": user.name,
         "open_id": user.open_id,
         "user_id": user.source_user_id or "",
         "email": user.email or "",
@@ -872,6 +905,8 @@ def _member_item(
         "department_ids": [department_id] if department_id else [],
         "is_primary_department": membership.is_primary,
         "role_in_department": getattr(membership, "role_in_department", None) or "",
+        "display_name_unverified": _looks_like_identifier_name(user.name)
+        and not _preferred_user_alias(user, aliases_by_user_id=aliases_by_user_id),
         "source_system": user.source_system,
         "resource_plane": "foundation",
         "resource_type": "organization_user",

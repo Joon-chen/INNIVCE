@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = Field(default=20.0, ge=1.0)
     ocr_enabled: bool = True
     ocr_languages: str = "chi_sim+eng"
-    ocr_max_pdf_pages: int = Field(default=3, ge=1, le=10)
+    ocr_max_pdf_pages: int = Field(default=30, ge=1, le=100)
 
     auto_imap_sync_enabled: bool = False
     auto_imap_account_ids: str = ""

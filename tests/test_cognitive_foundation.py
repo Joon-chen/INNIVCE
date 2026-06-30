@@ -4,7 +4,8 @@ from uuid import uuid4
 import pytest
 
 from app.models.entities import Snapshot, WorkEvent
-from app.services.cognitive.evidence_pack import build_evidence_pack_from_text, evidence_pack_payload
+from app.services.cognitive.evidence_pack import build_evidence_pack_from_extraction, build_evidence_pack_from_text, evidence_pack_payload
+from app.shared.file_intelligence import ExtractionResult
 from app.services.approval_snapshot_builder import build_approval_snapshot_from_work_event
 from app.services.cognitive_foundation import (
     MEMORY_CANDIDATE_STATUS,
@@ -30,6 +31,7 @@ from app.services.cognitive_foundation_v1 import (
     company_profile_snapshot_answer,
     company_profile_snapshot_item,
     default_extractor_registry,
+    _company_snapshot_builder_prompt,
     _natural_understanding_text,
 )
 from app.services.runtime_v5 import feishu_resource_providers
@@ -607,6 +609,40 @@ def test_cognitive_v12_company_profile_uses_evidence_pack_spans_for_structure() 
     answer = company_profile_snapshot_answer(item, query="公司的产品竞争力如何")
     assert "资料中能直接支持的优势" in answer
     assert "不能可靠判断完整竞争力" in answer
+
+
+def test_cognitive_v12_company_snapshot_prompt_includes_page_evidence_spans() -> None:
+    pack = build_evidence_pack_from_extraction(
+        ExtractionResult(
+            success=True,
+            text="公司介绍 固势（苏州）科技有限公司\n产品系列 GAUSTEK SRI\n客户场景 研发 实验 生产",
+            filename="固势宣传册.pdf",
+            extractor="pdf_ocr",
+            page_count=3,
+            metadata={
+                "page_texts": [
+                    {"page": 1, "text": "公司介绍 固势（苏州）科技有限公司", "source": "ocr"},
+                    {"page": 2, "text": "产品系列 GAUSTEK SRI", "source": "ocr"},
+                    {"page": 3, "text": "客户场景 研发 实验 生产", "source": "ocr"},
+                ]
+            },
+        ),
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        source_object_type="pdf",
+    )
+
+    prompt = _company_snapshot_builder_prompt(
+        structured={"products": ["GAUSTEK SRI 全系列产品"]},
+        packs=(pack,),
+        coverage={"products": "supported"},
+        open_questions=("没有明确客户名单",),
+        fallback="fallback",
+    )
+
+    assert "evidence_spans" in prompt
+    assert '"page": 2' in prompt
+    assert "产品系列 GAUSTEK SRI" in prompt
 
 
 def test_cognitive_v12_llm_structured_understanding_is_naturalized() -> None:
