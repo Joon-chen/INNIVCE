@@ -3213,6 +3213,21 @@ def test_runtime_v5_company_profile_query_builds_snapshot_from_knowledge_evidenc
         "resource_type": "drive_file",
         "document_id": "file_pdf",
         "document_type": "file",
+        "content_preview": "公司介绍 固势（苏州）科技有限公司\n产品系列 GAUSTEK SRI",
+        "extraction": {
+            "success": True,
+            "extractor": "pdf_embedded_ocr",
+            "mime_type": "application/pdf",
+            "page_count": 2,
+            "metadata": {
+                "page_texts": [
+                    {"page": 1, "text": "公司介绍 固势（苏州）科技有限公司", "source": "embedded"},
+                    {"page": 2, "text": "产品系列 GAUSTEK SRI", "source": "ocr"},
+                ]
+            },
+            "warnings": [],
+            "error": "",
+        },
     }
     monkeypatch.setattr(
         "app.services.runtime_v5.feishu_resource_providers._knowledge_document_items",
@@ -3253,6 +3268,10 @@ def test_runtime_v5_company_profile_query_builds_snapshot_from_knowledge_evidenc
     assert "测试测量" in result.answer
     assert any(getattr(item, "event_type", "") == "evidence.company_profile.observed" for item in db.added)
     assert any(getattr(item, "snapshot_type", "") == COMPANY_PROFILE_SNAPSHOT_TYPE for item in db.added)
+    evidence_event = next(item for item in db.added if getattr(item, "event_type", "") == "evidence.company_profile.observed")
+    spans = evidence_event.payload["metadata"]["evidence_pack"]["evidence_spans"]
+    assert spans[0]["span_id"] == "p1s1"
+    assert spans[0]["page"] == 1
 
 
 def test_runtime_v5_company_profile_query_uses_official_knowledge_documents(monkeypatch) -> None:

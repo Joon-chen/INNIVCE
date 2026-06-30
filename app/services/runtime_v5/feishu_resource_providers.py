@@ -14,7 +14,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import BotUserAccess, Company, FeishuAppConfig, MemoryFact, OrganizationUser, Resource, Snapshot, WorkEvent
-from app.services.cognitive.evidence_pack import build_evidence_pack_from_text, evidence_pack_payload
+from app.services.cognitive.evidence_pack import build_evidence_pack_from_extraction, evidence_pack_payload
 from app.services.agent.policies import BotActor
 from app.services.feishu import approval_formatters
 from app.services.feishu import approval_resources
@@ -52,7 +52,7 @@ from app.services.feishu.okr import FeishuOkrService
 from app.services.feishu.task import FeishuTaskService
 from app.services.llm.approval_advisor import generate_approval_llm_advice
 from app.services.organization_foundation import resolve_department_members
-from app.shared.file_intelligence import extract_file
+from app.shared.file_intelligence import ExtractionResult, extract_file
 from app.services.runtime_v5.company_profile_query import looks_like_company_profile_query
 from app.services.runtime_v5.context import load_people_snapshot, save_people_snapshot
 from app.services.runtime_v5.domain_query import domain_query_fields, domain_query_payload
@@ -3812,7 +3812,8 @@ def _read_knowledge_document_candidate(
     if not document_id or not _is_readable_knowledge_document_type(document_type):
         return None
     title = str(candidate.get("title") or document_id)
-    content = _read_knowledge_document_text(service, document_id=document_id, document_type=document_type, title=title)
+    extraction = _read_knowledge_document_extraction(service, document_id=document_id, document_type=document_type, title=title)
+    content = extraction.text.strip()
     if not content:
         return None
     if context == "company_profile" and not _document_content_matches_company_profile(content, title=str(candidate.get("title") or "")):
@@ -3826,6 +3827,16 @@ def _read_knowledge_document_candidate(
         "document_id": document_id,
         "document_type": document_type,
         "content_preview": _short_text(content, 6000 if context == "company_profile" else 1200),
+        "extraction": {
+            "success": bool(getattr(extraction, "success", False)),
+            "extractor": str(getattr(extraction, "extractor", "") or "knowledge_document"),
+            "mime_type": getattr(extraction, "mime_type", None),
+            "page_count": getattr(extraction, "page_count", None),
+            "language": getattr(extraction, "language", None),
+            "metadata": getattr(extraction, "metadata", {}) if isinstance(getattr(extraction, "metadata", {}), dict) else {},
+            "warnings": list(getattr(extraction, "warnings", ()) or ()),
+            "error": getattr(extraction, "error", None) or "",
+        },
         "evidence_type": "document_content",
     }
 
@@ -3834,26 +3845,34 @@ def _is_readable_knowledge_document_type(document_type: str) -> bool:
     return document_type in _READABLE_DOCUMENT_TYPES or document_type in _TEXT_EXTRACTABLE_FILE_TYPES
 
 
-def _read_knowledge_document_text(
+def _read_knowledge_document_extraction(
     service: FeishuDriveService,
     *,
     document_id: str,
     document_type: str,
     title: str,
-) -> str:
+) -> ExtractionResult:
     try:
         if document_type in _READABLE_DOCUMENT_TYPES:
             payload = _run_async(service.get_document_content(document_id=document_id, document_type=document_type))
             if not payload.get("available"):
-                return ""
-            return str(payload.get("content_text") or "").strip()
+                return ExtractionResult(success=False, filename=title, extractor="feishu_document", error="document_content_unavailable")
+            text = str(payload.get("content_text") or "").strip()
+            return ExtractionResult(
+                success=bool(text),
+                text=text,
+                filename=title,
+                mime_type=f"application/x-feishu-{document_type}",
+                extractor="feishu_document",
+                metadata={"document_type": document_type},
+            )
         data, content_type = _run_async(service.download_file_content(file_token=document_id))
         result = extract_file(data, filename=title, content_type=content_type, max_chars=12000)
         if not result.success and not result.text:
-            return ""
-        return result.text.strip()
-    except Exception:
-        return ""
+            return result
+        return result
+    except Exception as exc:
+        return ExtractionResult(success=False, filename=title, extractor="knowledge_document", error=str(exc)[:300])
 
 
 def _document_content_matches_company_profile(content: str, *, title: str) -> bool:
@@ -3940,19 +3959,32 @@ def _company_profile_snapshot_from_knowledge_documents(
                 "allowed_departments": [],
                 "allowed_roles": [],
             }
-            evidence_pack = build_evidence_pack_from_text(
-                source_text,
-                filename=str(item.get("title") or ""),
+            extraction_payload = item.get("extraction") if isinstance(item.get("extraction"), dict) else {}
+            evidence_pack = build_evidence_pack_from_extraction(
+                ExtractionResult(
+                    success=bool(extraction_payload.get("success", True)),
+                    text=source_text,
+                    filename=str(item.get("title") or ""),
+                    mime_type=str(extraction_payload.get("mime_type") or "") or None,
+                    extractor=str(extraction_payload.get("extractor") or "knowledge_document"),
+                    page_count=_safe_int(extraction_payload.get("page_count")),
+                    language=str(extraction_payload.get("language") or "") or None,
+                    metadata={
+                        **(extraction_payload.get("metadata") if isinstance(extraction_payload.get("metadata"), dict) else {}),
+                        "title": item.get("title") or "",
+                        "resource_type": item.get("resource_type") or "",
+                        "document_type": item.get("document_type") or "",
+                    },
+                    warnings=tuple(str(warning) for warning in extraction_payload.get("warnings", []) if warning)
+                    if isinstance(extraction_payload.get("warnings"), list)
+                    else (),
+                    error=str(extraction_payload.get("error") or "") or None,
+                ),
                 source_system=str(item.get("source") or "knowledge"),
                 source_object_id=source_object_id,
                 source_object_type=str(item.get("document_type") or item.get("resource_type") or ""),
                 organization_binding=organization_binding,
                 visibility_binding=visibility_binding,
-                metadata={
-                    "title": item.get("title") or "",
-                    "resource_type": item.get("resource_type") or "",
-                    "document_type": item.get("document_type") or "",
-                },
             )
             evidence = EvidenceInput(
                 source_system=str(item.get("source") or "knowledge"),
@@ -3990,6 +4022,13 @@ def _company_profile_snapshot_from_knowledge_documents(
     if snapshot is None:
         return None
     return company_profile_snapshot_item(snapshot)
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _company_profile_knowledge_answer(items: tuple[dict[str, Any], ...]) -> str:
