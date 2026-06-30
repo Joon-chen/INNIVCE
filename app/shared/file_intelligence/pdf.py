@@ -19,6 +19,11 @@ def extract_pdf(data: bytes, *, filename: str, mime_type: str | None, max_chars:
     ocr = extract_pdf_ocr_text(data, filename=filename, mime_type=mime_type, max_chars=max_chars)
     warnings = embedded.warnings + ocr.warnings
     merged_text = _merge_pdf_text(embedded.text, ocr.text, max_chars=max_chars)
+    page_texts = _merge_page_texts(
+        embedded.metadata.get("page_texts") if isinstance(embedded.metadata, dict) else None,
+        ocr.metadata.get("page_texts") if isinstance(ocr.metadata, dict) else None,
+        max_chars=max_chars,
+    )
     if merged_text:
         return ExtractionResult(
             success=embedded.success or ocr.success,
@@ -33,6 +38,7 @@ def extract_pdf(data: bytes, *, filename: str, mime_type: str | None, max_chars:
                 "ocr_text_chars": len((ocr.text or "").strip()),
                 "embedded_extractor": embedded.extractor,
                 "ocr_extractor": ocr.extractor,
+                "page_texts": page_texts,
             },
             warnings=warnings,
             error=ocr.error or embedded.error,
@@ -62,10 +68,10 @@ def extract_pdf(data: bytes, *, filename: str, mime_type: str | None, max_chars:
     )
 
 
-def _merge_pdf_text(embedded_text: str, ocr_text: str, *, max_chars: int) -> str:
+def _merge_pdf_text(*source_texts: str, max_chars: int) -> str:
     chunks: list[str] = []
     seen: set[str] = set()
-    for source_text in (embedded_text, ocr_text):
+    for source_text in source_texts:
         for raw_line in str(source_text or "").splitlines():
             line = " ".join(raw_line.split()).strip()
             if not line:
@@ -76,6 +82,45 @@ def _merge_pdf_text(embedded_text: str, ocr_text: str, *, max_chars: int) -> str
             seen.add(key)
             chunks.append(line)
     return "\n".join(chunks)[:max_chars]
+
+
+def _merge_page_texts(*page_text_sources: object, max_chars: int) -> list[dict[str, object]]:
+    by_page: dict[int, list[str]] = {}
+    sources_by_page: dict[int, set[str]] = {}
+    for page_texts in page_text_sources:
+        if not isinstance(page_texts, list):
+            continue
+        for item in page_texts:
+            if not isinstance(item, dict):
+                continue
+            try:
+                page = int(item.get("page") or 0)
+            except (TypeError, ValueError):
+                page = 0
+            text = str(item.get("text") or "").strip()
+            if page <= 0 or not text:
+                continue
+            by_page.setdefault(page, []).append(text)
+            source = str(item.get("source") or item.get("extractor") or "").strip()
+            if source:
+                sources_by_page.setdefault(page, set()).add(source)
+    merged: list[dict[str, object]] = []
+    remaining = max_chars
+    for page in sorted(by_page):
+        if remaining <= 0:
+            break
+        text = _merge_pdf_text(*by_page[page], max_chars=remaining)
+        if not text:
+            continue
+        merged.append(
+            {
+                "page": page,
+                "text": text,
+                "source": "+".join(sorted(sources_by_page.get(page) or ())) or "pdf",
+            }
+        )
+        remaining -= len(text)
+    return merged
 
 
 def extract_pdf_embedded_text(data: bytes, *, filename: str, mime_type: str | None, max_chars: int) -> ExtractionResult:
@@ -93,7 +138,19 @@ def extract_pdf_embedded_text(data: bytes, *, filename: str, mime_type: str | No
         )
     try:
         reader = PdfReader(BytesIO(data))
-        parts = [(page.extract_text() or "").strip() for page in reader.pages[:5]]
+        page_texts: list[dict[str, object]] = []
+        parts: list[str] = []
+        remaining = max_chars
+        for page_index, page in enumerate(reader.pages[:5], start=1):
+            page_text = (page.extract_text() or "").strip()
+            if not page_text:
+                continue
+            clipped = page_text[:remaining]
+            page_texts.append({"page": page_index, "text": clipped, "source": "embedded"})
+            parts.append(clipped)
+            remaining -= len(clipped)
+            if remaining <= 0:
+                break
         text = "\n".join(part for part in parts if part)[:max_chars]
         return ExtractionResult(
             success=bool(text),
@@ -102,6 +159,7 @@ def extract_pdf_embedded_text(data: bytes, *, filename: str, mime_type: str | No
             filename=filename,
             extractor="pdf_embedded",
             page_count=len(reader.pages),
+            metadata={"page_texts": page_texts},
         )
     except Exception as exc:
         return ExtractionResult(
@@ -139,12 +197,19 @@ def extract_pdf_ocr_text(data: bytes, *, filename: str, mime_type: str | None, m
     try:
         document = fitz.open(stream=data, filetype="pdf")
         parts: list[str] = []
+        page_texts: list[dict[str, object]] = []
+        remaining = max_chars
         for page_index in range(min(document.page_count, settings.ocr_max_pdf_pages)):
+            if remaining <= 0:
+                break
             page = document.load_page(page_index)
             pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            result = extract_image(pixmap.tobytes("png"), filename=f"{filename}#page={page_index + 1}", mime_type="image/png", max_chars=max_chars)
+            result = extract_image(pixmap.tobytes("png"), filename=f"{filename}#page={page_index + 1}", mime_type="image/png", max_chars=remaining)
             if result.text:
-                parts.append(result.text)
+                text = result.text[:remaining]
+                parts.append(text)
+                page_texts.append({"page": page_index + 1, "text": text, "source": "ocr"})
+                remaining -= len(text)
         text = "\n".join(parts)[:max_chars]
         return ExtractionResult(
             success=bool(text),
@@ -154,6 +219,7 @@ def extract_pdf_ocr_text(data: bytes, *, filename: str, mime_type: str | None, m
             extractor="pdf_ocr",
             page_count=document.page_count,
             language=settings.ocr_languages,
+            metadata={"page_texts": page_texts},
         )
     except Exception as exc:
         return ExtractionResult(

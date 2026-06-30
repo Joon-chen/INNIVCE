@@ -123,7 +123,7 @@ def build_evidence_pack_from_extraction(
     visibility_binding: dict[str, Any] | None = None,
 ) -> EvidencePack:
     text = str(extraction.text or "").strip()
-    spans = _evidence_spans(text)
+    spans = _evidence_spans_from_extraction(extraction, text)
     return EvidencePack(
         pack_version=EVIDENCE_PACK_VERSION,
         source_ref=SourceRef(
@@ -142,7 +142,7 @@ def build_evidence_pack_from_extraction(
             page_count=extraction.page_count,
             extraction_quality=_extraction_quality(extraction, text),
         ),
-        outline=_outline(text),
+        outline=_outline(text, spans),
         key_claims=_key_claims(text, spans),
         entities=_entities(text, spans),
         topics=_topics(text),
@@ -197,12 +197,40 @@ def _evidence_ref(span_id: str) -> tuple[dict[str, Any], ...]:
     return ({"span_id": span_id},)
 
 
+def _evidence_spans_from_extraction(extraction: ExtractionResult, text: str) -> tuple[dict[str, Any], ...]:
+    metadata = extraction.metadata if isinstance(extraction.metadata, dict) else {}
+    page_texts = metadata.get("page_texts")
+    if not isinstance(page_texts, list):
+        return _evidence_spans(text)
+    spans: list[dict[str, Any]] = []
+    for page_item in page_texts:
+        if not isinstance(page_item, dict):
+            continue
+        try:
+            page = int(page_item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        page_text = str(page_item.get("text") or "").strip()
+        if page <= 0 or not page_text:
+            continue
+        source = str(page_item.get("source") or "").strip()
+        for index, chunk in enumerate(_span_chunks(page_text), start=1):
+            spans.append({"span_id": f"p{page}s{index}", "page": page, "text": chunk[:280], "source": source})
+            if len(spans) >= 40:
+                return tuple(spans)
+    return tuple(spans) or _evidence_spans(text)
+
+
 def _evidence_spans(text: str) -> tuple[dict[str, Any], ...]:
     chunks = [item.strip() for item in re.split(r"[\n。；;]+", text) if item.strip()]
     spans = []
     for index, chunk in enumerate(chunks[:40], start=1):
         spans.append({"span_id": f"s{index}", "text": chunk[:280]})
     return tuple(spans)
+
+
+def _span_chunks(text: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[\n。；;]+", text) if item.strip()]
 
 
 def _span_for(spans: tuple[dict[str, Any], ...], term: str) -> str:
@@ -213,12 +241,24 @@ def _span_for(spans: tuple[dict[str, Any], ...], term: str) -> str:
     return ""
 
 
-def _outline(text: str) -> tuple[dict[str, Any], ...]:
+def _outline(text: str, spans: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
     values = []
     for title in ("公司介绍", "企业介绍", "产品系列", "产品介绍", "应用场景", "解决方案", "联系方式", "目录"):
         if title.lower() in text.lower():
-            values.append({"title": title, "page_refs": []})
+            values.append({"title": title, "page_refs": _page_refs_for(spans, title)})
     return tuple(values)
+
+
+def _page_refs_for(spans: tuple[dict[str, Any], ...], term: str) -> list[int]:
+    refs: list[int] = []
+    term_lower = term.lower()
+    for span in spans:
+        if term_lower not in str(span.get("text") or "").lower():
+            continue
+        page = span.get("page")
+        if isinstance(page, int) and page > 0 and page not in refs:
+            refs.append(page)
+    return refs
 
 
 def _key_claims(text: str, spans: tuple[dict[str, Any], ...]) -> tuple[EvidenceClaim, ...]:

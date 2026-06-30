@@ -128,3 +128,39 @@ def test_extract_pdf_merges_short_embedded_text_with_ocr(monkeypatch) -> None:
     assert "产品体系 GAUSTEK SRI" in result.text
     assert result.metadata["embedded_text_chars"] > 0
     assert result.metadata["ocr_text_chars"] > 0
+
+
+def test_extract_pdf_merges_page_level_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        file_intelligence_pdf,
+        "extract_pdf_embedded_text",
+        lambda data, *, filename, mime_type, max_chars: ExtractionResult(
+            success=True,
+            text="封面 公司介绍",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_embedded",
+            page_count=2,
+            metadata={"page_texts": [{"page": 1, "text": "封面 公司介绍", "source": "embedded"}]},
+        ),
+    )
+    monkeypatch.setattr(
+        file_intelligence_pdf,
+        "extract_pdf_ocr_text",
+        lambda data, *, filename, mime_type, max_chars: ExtractionResult(
+            success=True,
+            text="产品体系 GAUSTEK SRI",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_ocr",
+            page_count=2,
+            metadata={"page_texts": [{"page": 2, "text": "产品体系 GAUSTEK SRI", "source": "ocr"}]},
+        ),
+    )
+
+    result = file_intelligence_pdf.extract_pdf(b"pdf", filename="profile.pdf", mime_type="application/pdf", max_chars=2000)
+
+    assert result.metadata["page_texts"] == [
+        {"page": 1, "text": "封面 公司介绍", "source": "embedded"},
+        {"page": 2, "text": "产品体系 GAUSTEK SRI", "source": "ocr"},
+    ]
