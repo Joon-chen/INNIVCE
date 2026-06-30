@@ -2037,6 +2037,23 @@ def test_runtime_v5_people_hr_director_question_routes_to_title_list() -> None:
     assert plan.planner_result.sources == ("people",)
 
 
+def test_runtime_v5_people_title_filter_applies_to_org_snapshot_items() -> None:
+    items = (
+        {"name": "李敏", "title": "人力资源总监"},
+        {"name": "张三", "title": "测试工程师"},
+    )
+
+    filtered, metadata = _apply_people_domain_filters(
+        items,
+        question="人力资源总监是哪位",
+        domain_query={"filters": {"query_mode": "title_list"}},
+    )
+
+    assert filtered == ({"name": "李敏", "title": "人力资源总监"},)
+    assert metadata["people_filter"] == {"filter": "title", "value": "人力资源总监"}
+    assert metadata["filtered_user_count"] == 1
+
+
 def test_runtime_v5_people_pronoun_followup_requires_clarification_for_multi_result() -> None:
     result_context = ResultContext(
         result_type="people_search",

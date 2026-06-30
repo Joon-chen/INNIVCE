@@ -6931,6 +6931,12 @@ def _apply_people_domain_filters(
     if name_prefix:
         filtered = tuple(item for item in filtered if str(item.get("name") or "").startswith(name_prefix))
         metadata["people_filter"] = {"filter": "name_prefix", "value": name_prefix}
+    title_keyword = str(filters.get("title") or (filters.get("value") if filters.get("filter") == "title" else "") or "").strip()
+    if not title_keyword:
+        title_keyword = _people_title_filter_from_text(question)
+    if title_keyword:
+        filtered = filter_people_by_title(filtered, title_keyword)
+        metadata["people_filter"] = {"filter": "title", "value": title_keyword}
     if filtered is not items:
         metadata["filtered_user_count"] = len(filtered)
     return filtered, metadata
