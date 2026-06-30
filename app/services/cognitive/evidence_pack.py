@@ -231,6 +231,10 @@ def _key_claims(text: str, spans: tuple[dict[str, Any], ...]) -> tuple[EvidenceC
         claims.append(EvidenceClaim("资料包含解决方案相关描述。", "capability", evidence_refs=_evidence_ref(_span_for(spans, "方案"))))
     if _contains_any(text, ("让测试更简单", "让实验更高效")):
         claims.append(EvidenceClaim("资料强调让测试更简单、让实验更高效。", "capability", evidence_refs=_evidence_ref(_span_for(spans, "让测试更简单"))))
+    if _contains_any(text, ("简单", "高效", "效率", "自动化", "稳定", "可靠", "精度", "快速")):
+        claims.append(EvidenceClaim("资料出现效率、易用性、可靠性或精度相关价值主张。", "value_proposition", evidence_refs=_evidence_ref(_span_for(spans, "高效"))))
+    if _contains_any(text, ("研发", "实验室", "生产", "工业", "客户", "用户")):
+        claims.append(EvidenceClaim("资料提供了可用于推断目标使用场景或客户类型的线索。", "customer_need", confidence="medium", evidence_refs=_evidence_ref(_span_for(spans, "研发"))))
     return tuple(claims)
 
 
@@ -241,9 +245,14 @@ def _entities(text: str, spans: tuple[dict[str, Any], ...]) -> tuple[EvidenceEnt
         ("固势", "organization"),
         ("GAUSTEK SRI", "product"),
         ("测试测量", "domain"),
+        ("测试", "domain"),
+        ("测量", "domain"),
         ("实验室", "scenario"),
         ("研发测试", "scenario"),
+        ("研发", "scenario"),
+        ("生产", "scenario"),
         ("工业场景", "scenario"),
+        ("工业", "scenario"),
     ):
         if name.lower() in text.lower():
             entities.append(EvidenceEntity(name=name, entity_type=entity_type, evidence_refs=_evidence_ref(_span_for(spans, name))))
@@ -254,7 +263,18 @@ def _entities(text: str, spans: tuple[dict[str, Any], ...]) -> tuple[EvidenceEnt
 
 def _topics(text: str) -> tuple[dict[str, Any], ...]:
     values = []
-    for topic in ("测试测量", "产品系列", "实验室场景", "研发测试", "工业场景", "解决方案", "联系方式"):
+    for topic in (
+        "测试测量",
+        "产品系列",
+        "实验室场景",
+        "研发测试",
+        "生产测试",
+        "工业场景",
+        "解决方案",
+        "效率提升",
+        "易用性",
+        "联系方式",
+    ):
         if topic.lower() in text.lower():
             values.append({"topic": topic, "weight": 0.8})
     return tuple(values)
@@ -266,6 +286,8 @@ def _relations(text: str, spans: tuple[dict[str, Any], ...]) -> tuple[EvidenceRe
         relations.append(EvidenceRelation("GAUSTEK SRI", "is_offering_in", "产品体系", evidence_refs=_evidence_ref(_span_for(spans, "GAUSTEK SRI"))))
     if _contains_any(text, ("测试测量", "实验室", "研发测试", "工业场景")):
         relations.append(EvidenceRelation("资料内容", "mentions_scenario", "测试测量/实验/工业场景", evidence_refs=_evidence_ref(_span_for(spans, "测试"))))
+    if _contains_any(text, ("让测试更简单", "让实验更高效")):
+        relations.append(EvidenceRelation("产品能力", "supports_value", "降低测试复杂度/提升实验效率", evidence_refs=_evidence_ref(_span_for(spans, "让测试更简单"))))
     return tuple(relations)
 
 

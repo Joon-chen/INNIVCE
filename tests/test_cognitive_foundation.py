@@ -570,6 +570,45 @@ def test_cognitive_v12_company_profile_consumes_generic_evidence_pack() -> None:
     assert "没有明确客户名单" in company_profile_snapshot_answer(item, query="客户有哪些")
 
 
+def test_cognitive_v12_company_profile_uses_evidence_pack_spans_for_structure() -> None:
+    db = _WriteDb()
+    company_id = uuid4()
+    pack = build_evidence_pack_from_text(
+        (
+            "固势（苏州）科技有限公司产品手册。"
+            "产品体系包括 GAUSTEK SRI 全系列产品。"
+            "应用场景包括实验室、研发测试、生产测试和工业场景。"
+            "价值主张是让测试更简单、让实验更高效。"
+        ),
+        filename="固势宣传册.pdf",
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        source_object_type="pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+    )
+    evidence = EvidenceInput(
+        source_system="registered_resource",
+        source_object_id="file_pdf",
+        organization_binding={"company_id": str(company_id), "object_type": "company", "object_id": str(company_id)},
+        visibility_binding={"scope": "company", "data_classification": "company"},
+        timestamp=datetime.now(UTC),
+        extractor=COMPANY_PROFILE_EXTRACTOR,
+        summary="固势宣传册摘要",
+        metadata={"title": "固势宣传册.pdf", "evidence_pack": evidence_pack_payload(pack)},
+    )
+
+    event = append_evidence_work_event(db, company_id=company_id, evidence=evidence, object_type="company_profile", object_id=str(company_id))
+    snapshot = build_company_profile_snapshot(db, company_id=company_id, evidence_events=(event,), object_id=str(company_id))
+    item = company_profile_snapshot_item(snapshot)
+
+    assert "生产测试场景" in item["structured"]["application_scenarios"]
+    assert item["structured"]["capabilities"]
+    answer = company_profile_snapshot_answer(item, query="公司的产品竞争力如何")
+    assert "资料中能直接支持的优势" in answer
+    assert "不能可靠判断完整竞争力" in answer
+
+
 def test_cognitive_v12_llm_structured_understanding_is_naturalized() -> None:
     understanding = _natural_understanding_text(
         {

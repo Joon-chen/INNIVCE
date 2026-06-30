@@ -1033,7 +1033,10 @@ def _canonical_question_from_frame(*, frame: CommandFrame, context: RuntimeConte
 
 
 def _looks_like_title_query(message: str) -> bool:
-    return any(token in str(message or "") for token in ("董事长", "负责人", "岗位", "职位", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发"))
+    return any(
+        token in str(message or "")
+        for token in ("董事长", "负责人", "岗位", "职位", "工程师", "经理", "主管", "总监", "专员", "销售", "财务", "测试", "运营", "人事", "人力资源", "HR", "研发")
+    )
 
 
 def _looks_like_title_field(value: str) -> bool:

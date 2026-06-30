@@ -124,6 +124,9 @@ _PEOPLE_MARKERS = (
     "名单",
     "人员",
     "人事",
+    "人力资源",
+    "HR",
+    "hr",
     "行政",
     "财务",
     "IT",
@@ -132,6 +135,10 @@ _PEOPLE_MARKERS = (
     "部门",
     "董事长",
     "负责人",
+    "经理",
+    "主管",
+    "总监",
+    "专员",
     "下面",
     "下设",
     "子部门",
@@ -313,11 +320,26 @@ def _target_hint(*, text: str, compact: str) -> str:
         return "male"
     if any(token in compact for token in ("女生", "女性")):
         return "female"
+    role = _role_title_candidate(compact)
+    if role:
+        return role
     for field in ("电话", "手机号", "号码", "邮箱", "职位", "岗位", "直属上级", "上级", "领导", "负责人", "性别"):
         if field in compact:
             return field
     if _is_generic_organization_reference(compact):
         return ""
+    return ""
+
+
+def _role_title_candidate(compact: str) -> str:
+    text = str(compact or "")
+    if not any(token in text for token in ("董事长", "负责人", "工程师", "经理", "主管", "总监", "专员", "人力资源", "HR", "hr")):
+        return ""
+    candidate = text
+    for token in ("公司", "全公司", "谁是", "是谁", "是哪位", "哪位", "哪个", "哪些", "有多少", "多少", "几个", "几位", "人员", "员工", "同事", "的"):
+        candidate = candidate.replace(token, "")
+    if 2 <= len(candidate) <= 20 and any(token in candidate for token in ("董事长", "负责人", "工程师", "经理", "主管", "总监", "专员")):
+        return candidate
     return ""
 
 

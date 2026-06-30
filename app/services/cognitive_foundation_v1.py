@@ -125,12 +125,14 @@ class CompanyProfileExtractor:
     def extract(self, evidence_payloads: tuple[dict[str, Any], ...]) -> CognitiveCandidate:
         summaries = [str(payload.get("summary") or "").strip() for payload in evidence_payloads if _is_evidence_payload(payload)]
         packs = _evidence_packs(evidence_payloads)
-        text = "\n".join(summary for summary in summaries if summary)
+        text = "\n".join([*(summary for summary in summaries if summary), _pack_text(packs)]).strip()
         contacts = _extract_contacts(text)
         products = _extract_products(text, packs)
         business_scope = _extract_business_scope(text, packs)
         industry = _extract_industry(text, packs)
         advantages = _extract_advantages(text)
+        capabilities = _extract_capabilities(text, packs)
+        application_scenarios = _extract_application_scenarios(text, packs)
         positioning = _company_positioning(text=text, business_scope=business_scope, products=products)
         target_customers = _extract_target_customers(text, packs)
         coverage = _company_candidate_coverage(structured={
@@ -147,6 +149,8 @@ class CompanyProfileExtractor:
             "industry": industry,
             "target_customers": target_customers,
             "advantages": advantages,
+            "capabilities": capabilities,
+            "application_scenarios": application_scenarios,
             "contacts": contacts,
         }
         return CognitiveCandidate(
@@ -273,6 +277,8 @@ def company_profile_snapshot_answer(item: dict[str, Any], *, query: str) -> str:
         fields = item.get("structured_fields") if isinstance(item.get("structured_fields"), dict) else {}
     understanding = str(item.get("understanding") or item.get("summary") or "").strip()
     compact = re.sub(r"\s+", "", query or "")
+    if any(token in compact for token in ("竞争", "竞争力", "优势", "强项", "壁垒")):
+        return _competitive_answer(fields, item, understanding)
     if any(token in compact for token in ("产品", "产品线", "有哪些产品")):
         return _structured_with_understanding(
             _list_answer("公司产品", _string_list(fields.get("products")), fallback="公司画像里暂时没有沉淀明确产品清单。"),
@@ -392,6 +398,16 @@ def _evidence_packs(evidence_payloads: tuple[dict[str, Any], ...]) -> tuple[Evid
                 )
             )
     return tuple(packs)
+
+
+def _pack_text(packs: tuple[EvidencePack, ...]) -> str:
+    parts: list[str] = []
+    for pack in packs:
+        for span in pack.evidence_spans:
+            text = str(span.get("text") or "").strip() if isinstance(span, dict) else ""
+            if text:
+                parts.append(text)
+    return "\n".join(_dedupe(parts))
 
 
 def _company_understanding(
@@ -658,6 +674,25 @@ def _customer_answer(fields: dict[str, Any], item: dict[str, Any]) -> str:
     return _list_answer("目标客户", values, fallback="公司画像里暂时没有沉淀明确目标客户。")
 
 
+def _competitive_answer(fields: dict[str, Any], item: dict[str, Any], understanding: str) -> str:
+    advantages = _string_list(fields.get("advantages"))
+    capabilities = _string_list(fields.get("capabilities"))
+    scenarios = _string_list(fields.get("application_scenarios"))
+    lines = []
+    if advantages:
+        lines.append("资料中能直接支持的优势/价值主张：\n" + "\n".join(f"{index}. {value}" for index, value in enumerate(advantages, start=1)))
+    if capabilities:
+        lines.append("能力线索：\n" + "\n".join(f"{index}. {value}" for index, value in enumerate(capabilities, start=1)))
+    if scenarios:
+        lines.append("适用场景线索：\n" + "\n".join(f"{index}. {value}" for index, value in enumerate(scenarios, start=1)))
+    derived = item.get("derived_from") if isinstance(item.get("derived_from"), dict) else {}
+    coverage = derived.get("coverage") if isinstance(derived.get("coverage"), dict) else {}
+    if coverage.get("competitive_position") != "supported":
+        lines.append("边界：资料没有竞品对比、客户案例、性能指标或市场份额，不能可靠判断完整竞争力，只能判断资料中表达的价值主张。")
+    answer = "\n\n".join(lines) if lines else "公司画像里暂时没有足够证据判断竞争力。"
+    return _structured_with_understanding(answer, understanding) if understanding else answer
+
+
 def _uncertainty_answer(item: dict[str, Any]) -> str:
     derived = item.get("derived_from") if isinstance(item.get("derived_from"), dict) else {}
     questions = _string_list(derived.get("open_questions"))
@@ -674,6 +709,7 @@ def _company_candidate_coverage(*, structured: dict[str, Any], packs: tuple[Evid
         "business_scope": "supported" if _string_list(structured.get("business_scope")) else "missing",
         "target_customers": _customer_coverage(packs, _string_list(structured.get("target_customers"))),
         "contacts": "partial" if has_contact else "missing",
+        "competitive_position": _competitive_coverage(packs),
     }
 
 
@@ -683,9 +719,21 @@ def _customer_coverage(packs: tuple[EvidencePack, ...], customers: list[str]) ->
     for pack in packs:
         if any(entity.entity_type in {"customer", "account"} for entity in pack.entities):
             return "supported"
-        if any(claim.claim_type == "customer_need" for claim in pack.key_claims):
-            return "partial"
     return "inferred"
+
+
+def _competitive_coverage(packs: tuple[EvidencePack, ...]) -> str:
+    has_value_claim = any(claim.claim_type == "value_proposition" for pack in packs for claim in pack.key_claims)
+    has_comparison = any(
+        _contains_any(claim.claim, ("竞品", "竞争", "对比", "领先", "市场份额", "性能指标", "案例"))
+        for pack in packs
+        for claim in pack.key_claims
+    )
+    if has_comparison:
+        return "supported"
+    if has_value_claim:
+        return "value_claim_only"
+    return "missing"
 
 
 def _company_open_questions(packs: tuple[EvidencePack, ...], coverage: dict[str, str]) -> tuple[str, ...]:
@@ -696,6 +744,8 @@ def _company_open_questions(packs: tuple[EvidencePack, ...], coverage: dict[str,
         questions.append("没有明确客户名单，客户只能按应用场景推断。")
     if coverage.get("contacts") == "missing":
         questions.append("没有可确认联系方式。")
+    if coverage.get("competitive_position") != "supported":
+        questions.append("没有竞品对比、客户案例、性能指标或市场份额，不能可靠判断完整竞争力。")
     return tuple(_dedupe(questions))
 
 
@@ -777,6 +827,40 @@ def _extract_advantages(text: str) -> list[str]:
         values.append("让测试更简单")
     if "让实验更高效" in text:
         values.append("让实验更高效")
+    if _contains_any(text, ("自动化", "效率")) and "让实验更高效" not in values:
+        values.append("提升测试或实验效率")
+    if _contains_any(text, ("简单", "易用")) and "让测试更简单" not in values:
+        values.append("降低测试复杂度")
+    return _dedupe(values)
+
+
+def _extract_capabilities(text: str, packs: tuple[EvidencePack, ...] = ()) -> list[str]:
+    values = []
+    if _contains_any(text, ("测试测量", "测控")):
+        values.append("测试测量解决方案能力")
+    if _contains_any(text, ("产品系列", "全系列产品")):
+        values.append("产品系列研发与交付")
+    if _contains_any(text, ("实验", "研发")):
+        values.append("实验/研发测试支持能力")
+    for pack in packs:
+        for claim in pack.key_claims:
+            if claim.claim_type in {"capability", "offering"}:
+                values.append(claim.claim)
+    return _dedupe(values)
+
+
+def _extract_application_scenarios(text: str, packs: tuple[EvidencePack, ...] = ()) -> list[str]:
+    values = []
+    for label, terms in (
+        ("测试测量场景", ("测试测量", "测试", "测量")),
+        ("实验室/研发测试场景", ("实验室", "实验", "研发")),
+        ("生产测试场景", ("生产",)),
+        ("工业场景", ("工业", "industrial")),
+    ):
+        if _contains_any(text, terms):
+            values.append(label)
+    values.extend(entity.name for pack in packs for entity in pack.entities if entity.entity_type == "scenario")
+    values.extend(str(topic.get("topic") or "") for pack in packs for topic in pack.topics if "场景" in str(topic.get("topic") or ""))
     return _dedupe(values)
 
 

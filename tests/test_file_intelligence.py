@@ -1,6 +1,7 @@
 from io import BytesIO
 from zipfile import ZipFile
 
+from app.shared.file_intelligence import pdf as file_intelligence_pdf
 from app.shared.file_intelligence import ExtractionResult, extract_file, extract_file_text
 
 
@@ -91,3 +92,39 @@ def test_extract_file_reads_pptx_text() -> None:
 
 def test_extract_file_text_is_compatibility_convenience() -> None:
     assert extract_file_text(b"hello", filename="note.md") == "hello"
+
+
+def test_extract_pdf_merges_short_embedded_text_with_ocr(monkeypatch) -> None:
+    monkeypatch.setattr(
+        file_intelligence_pdf,
+        "extract_pdf_embedded_text",
+        lambda data, *, filename, mime_type, max_chars: ExtractionResult(
+            success=True,
+            text="封面 公司介绍",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_embedded",
+            page_count=8,
+        ),
+    )
+    monkeypatch.setattr(
+        file_intelligence_pdf,
+        "extract_pdf_ocr_text",
+        lambda data, *, filename, mime_type, max_chars: ExtractionResult(
+            success=True,
+            text="产品体系 GAUSTEK SRI\n应用场景 实验室 研发 工业",
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_ocr",
+            page_count=8,
+        ),
+    )
+
+    result = file_intelligence_pdf.extract_pdf(b"pdf", filename="profile.pdf", mime_type="application/pdf", max_chars=2000)
+
+    assert result.success is True
+    assert result.extractor == "pdf_embedded_ocr"
+    assert "封面 公司介绍" in result.text
+    assert "产品体系 GAUSTEK SRI" in result.text
+    assert result.metadata["embedded_text_chars"] > 0
+    assert result.metadata["ocr_text_chars"] > 0

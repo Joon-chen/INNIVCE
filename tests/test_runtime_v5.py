@@ -2025,6 +2025,18 @@ def test_runtime_v5_people_role_question_routes_to_title_list() -> None:
     assert intent.entities["domain_query"]["subject"] == {"type": "organization"}
 
 
+def test_runtime_v5_people_hr_director_question_routes_to_title_list() -> None:
+    question = "人力资源总监是哪位"
+    intent = recognize_intent(question, _context(question))
+    plan = build_command_plan(context=_context(question))
+
+    assert intent.intent == "organization_snapshot"
+    assert intent.entities["people_query_mode"] == "title_list"
+    assert intent.entities["domain_query"]["filters"] == {"query_mode": "title_list"}
+    assert intent.entities["foundation_route"] == "people.aggregate"
+    assert plan.planner_result.sources == ("people",)
+
+
 def test_runtime_v5_people_pronoun_followup_requires_clarification_for_multi_result() -> None:
     result_context = ResultContext(
         result_type="people_search",

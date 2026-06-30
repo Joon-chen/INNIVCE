@@ -3825,7 +3825,7 @@ def _read_knowledge_document_candidate(
         "resource_type": str(candidate.get("resource_type") or "drive_file"),
         "document_id": document_id,
         "document_type": document_type,
-        "content_preview": _short_text(content, 1200),
+        "content_preview": _short_text(content, 6000 if context == "company_profile" else 1200),
         "evidence_type": "document_content",
     }
 
@@ -6888,7 +6888,7 @@ def _people_query_mode_from_text(text: str) -> str:
         return "count_only"
     if any(token in compact for token in ("男生", "男性", "男的", "男员工", "女生", "女性", "女的", "女员工")):
         return "gender_list" if wants_list else "gender_count"
-    if any(token in compact for token in ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+    if any(token in compact for token in ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "专员", "销售", "财务", "测试", "运营", "人事", "人力资源", "hr", "研发")):
         return "title_list" if wants_list else "title_count"
     if wants_list:
         return "list"
@@ -6942,10 +6942,10 @@ def _people_gender_filter(text: str) -> str:
 
 def _people_title_filter_from_text(text: str) -> str:
     compact = re.sub(r"[\s，,。.!！；;：:]+", "", str(text or ""))
-    if not any(token in compact for token in ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "销售", "财务", "测试", "运营", "人事", "研发")):
+    if not any(token in compact for token in ("岗位", "职位", "董事长", "负责人", "工程师", "经理", "主管", "总监", "专员", "销售", "财务", "测试", "运营", "人事", "人力资源", "hr", "研发")):
         return ""
-    keyword = compact
-    for token in ("公司", "全公司", "共有", "有多少个", "有多少位", "有多少", "多少个", "多少位", "多少", "几个", "哪些是", "是谁", "谁是", "有哪些", "都有谁", "分别是谁", "分别", "人员", "员工", "岗位", "职位", "的", "？", "?"):
+    keyword = compact.replace("HR", "hr")
+    for token in ("公司", "全公司", "共有", "有多少个", "有多少位", "有多少", "多少个", "多少位", "多少", "几个", "哪些是", "是哪位", "哪位", "是谁", "谁是", "有哪些", "都有谁", "分别是谁", "分别", "人员", "员工", "同事", "岗位", "职位", "的", "？", "?"):
         keyword = keyword.replace(token, "")
     return keyword.strip()
 

@@ -8,14 +8,35 @@ from app.shared.file_intelligence.image_ocr import extract_image
 from app.shared.file_intelligence.models import ExtractionResult
 
 OCR_MIN_TEXT_CHARS = 20
+OCR_GOOD_TEXT_CHARS = 2500
 
 
 def extract_pdf(data: bytes, *, filename: str, mime_type: str | None, max_chars: int) -> ExtractionResult:
     embedded = extract_pdf_embedded_text(data, filename=filename, mime_type=mime_type, max_chars=max_chars)
-    if len(embedded.text.strip()) >= OCR_MIN_TEXT_CHARS:
+    embedded_text = embedded.text.strip()
+    if len(embedded_text) >= min(max_chars, OCR_GOOD_TEXT_CHARS):
         return embedded
     ocr = extract_pdf_ocr_text(data, filename=filename, mime_type=mime_type, max_chars=max_chars)
     warnings = embedded.warnings + ocr.warnings
+    merged_text = _merge_pdf_text(embedded.text, ocr.text, max_chars=max_chars)
+    if merged_text:
+        return ExtractionResult(
+            success=embedded.success or ocr.success,
+            text=merged_text,
+            mime_type=mime_type,
+            filename=filename,
+            extractor="pdf_embedded_ocr" if embedded_text and ocr.text else (ocr.extractor or embedded.extractor or "pdf"),
+            page_count=embedded.page_count or ocr.page_count,
+            language=ocr.language or embedded.language,
+            metadata={
+                "embedded_text_chars": len(embedded_text),
+                "ocr_text_chars": len((ocr.text or "").strip()),
+                "embedded_extractor": embedded.extractor,
+                "ocr_extractor": ocr.extractor,
+            },
+            warnings=warnings,
+            error=ocr.error or embedded.error,
+        )
     if ocr.success or ocr.text:
         return ExtractionResult(
             success=ocr.success,
@@ -39,6 +60,22 @@ def extract_pdf(data: bytes, *, filename: str, mime_type: str | None, max_chars:
         warnings=warnings or ("no_text_extracted",),
         error=ocr.error or embedded.error,
     )
+
+
+def _merge_pdf_text(embedded_text: str, ocr_text: str, *, max_chars: int) -> str:
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for source_text in (embedded_text, ocr_text):
+        for raw_line in str(source_text or "").splitlines():
+            line = " ".join(raw_line.split()).strip()
+            if not line:
+                continue
+            key = line.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            chunks.append(line)
+    return "\n".join(chunks)[:max_chars]
 
 
 def extract_pdf_embedded_text(data: bytes, *, filename: str, mime_type: str | None, max_chars: int) -> ExtractionResult:
