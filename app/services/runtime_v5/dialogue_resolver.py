@@ -214,6 +214,8 @@ def _intent(*, domain: str, state: ConversationState, semantic_frame: SemanticFr
         if "missing_person_target" in semantic_frame.ambiguities:
             return "smalltalk"
         previous_result = parameters.get("previous_result") if isinstance(parameters.get("previous_result"), dict) else {}
+        if _role_title_candidate(str(parameters.get("raw_message") or "")):
+            return "organization_snapshot"
         if semantic_frame.operation == "field_lookup" and _semantic_scope(semantic_frame) == "organization" and not parameters.get("person_name"):
             return "organization_snapshot"
         if (
@@ -1037,6 +1039,23 @@ def _looks_like_title_query(message: str) -> bool:
         token in str(message or "")
         for token in ("董事长", "负责人", "岗位", "职位", "工程师", "经理", "主管", "总监", "专员", "销售", "财务", "测试", "运营", "人事", "人力资源", "HR", "研发")
     )
+
+
+def _looks_like_role_title_query(message: str) -> bool:
+    text = str(message or "")
+    return any(token in text for token in ("是哪位", "是谁", "谁是", "哪位", "哪个")) and bool(_role_title_candidate(text))
+
+
+def _role_title_candidate(message: str) -> str:
+    text = re.sub(r"[\s，,。.!！；;：:?？]+", "", str(message or ""))
+    if not any(token in text for token in ("董事长", "工程师", "经理", "主管", "总监", "专员", "人力资源", "HR", "hr")):
+        return ""
+    candidate = text
+    for token in ("公司", "全公司", "谁是", "是谁", "是哪位", "哪位", "哪个", "哪些", "有多少", "多少", "几个", "几位", "人员", "员工", "同事", "的"):
+        candidate = candidate.replace(token, "")
+    if 2 <= len(candidate) <= 20 and any(token in candidate for token in ("董事长", "工程师", "经理", "主管", "总监", "专员")):
+        return candidate
+    return ""
 
 
 def _looks_like_title_field(value: str) -> bool:
