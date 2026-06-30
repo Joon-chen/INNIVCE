@@ -800,7 +800,7 @@ def _user_record(item: dict[str, Any]) -> dict[str, Any]:
         "union_id": str(item.get("union_id") or "").strip(),
         "name": name,
         "normalized_name": normalize_organization_name(name),
-        "email": str(item.get("email") or "").strip(),
+        "email": str(item.get("enterprise_email") or item.get("email") or "").strip(),
         "mobile": str(item.get("mobile") or item.get("phone") or "").strip(),
         "job_title": str(item.get("title") or item.get("job_title") or "").strip(),
         "employee_no": str(item.get("employee_no") or item.get("employee_id") or "").strip(),

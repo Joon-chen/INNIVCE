@@ -154,7 +154,8 @@ def test_organization_directory_preserves_feishu_master_data_fields() -> None:
                     "open_id": "ou_max",
                     "user_id": "u_max",
                     "name": "戴留兴",
-                    "email": "mark.dai@example.com",
+                    "email": "",
+                    "enterprise_email": "mark.dai@example.com",
                     "mobile": "+8618712345678",
                     "employee_no": "Gs028",
                     "leader_user_id": "ou_chen",
@@ -175,6 +176,7 @@ def test_organization_directory_preserves_feishu_master_data_fields() -> None:
     assert department["member_count"] == 20
     assert department["primary_member_count"] == 1
     assert department["path_names"] == ["工程中心"]
+    assert user["email"] == "mark.dai@example.com"
     assert user["employee_no"] == "Gs028"
     assert user["leader_user_id"] == "ou_chen"
     assert user["department_paths"] == [{"names": ["工程中心"], "ids": ["od_engineering"]}]
